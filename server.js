@@ -27,6 +27,7 @@ async function azuga(path, body = {}) {
   });
   const text = await r.text();
   if (r.status === 401) token = null; // force re-login next time
+  if (r.status === 429) throw new Error('Azuga is limiting requests right now. Retrying shortly.');
   if (!r.ok) throw new Error(`${path} -> ${r.status}: ${text.slice(0, 300)}`);
   return JSON.parse(text);
 }
@@ -40,25 +41,51 @@ function fmt(d) {
 }
 const daysAgo = n => new Date(Date.now() - n * 864e5);
 
+// Azuga rate-limits per minute, so every viewer shares one copy of each answer.
+// Concurrent asks share one request; if Azuga errors, the last good answer is served.
+const cache = new Map();
+function cached(key, ttlSec, fn) {
+  const c = cache.get(key) || {};
+  if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
+  if (!c.p) c.p = fn()
+    .then(d => { c.data = d; c.t = Date.now(); return d; })
+    .catch(e => { if (c.data !== undefined) return c.data; throw e; })
+    .finally(() => { c.p = null; });
+  cache.set(key, c);
+  return c.p;
+}
+
 const routes = {
-  '/api/vehicles': () => azuga('/trackees.json?limit=100&offset=0'),
-  '/api/locations': () => azuga('/vehicles/latestlocation', {}),
-  '/api/maintenance': () => azuga('/maintanance/reports/scheduledreport.json?' + new URLSearchParams({
+  '/api/vehicles': () => cached('vehicles', 600, () => azuga('/trackees.json?limit=100&offset=0')),
+  '/api/locations': () => cached('locations', 30, () => azuga('/vehicles/latestlocation', {})),
+  '/api/maintenance': () => cached('maintenance', 600, () => azuga('/maintanance/reports/scheduledreport.json?' + new URLSearchParams({
     startTime: fmt(daysAgo(365)), endTime: fmt(daysAgo(-365)), isCount: 'false',
-  })),
-  '/api/videos': q => azuga('/eventVideos.json?videoType=eventVideo', {
-    startTime: fmt(daysAgo(7)), endTime: fmt(new Date()), page: 1, limit: 25,
-    vehiclesIds: q.get('vehicleId') || '',
-  }),
+  }))),
+  '/api/videos': q => {
+    const id = q.get('vehicleId') || '';
+    return cached('videos:' + id, 120, () => azuga('/eventVideos.json?videoType=eventVideo', {
+      startTime: fmt(daysAgo(7)), endTime: fmt(new Date()), page: 1, limit: 25, vehiclesIds: id,
+    }));
+  },
 };
 
 if (process.argv[2] === 'test') {
   const s = fmt(new Date(2026, 0, 5, 13, 7, 9));
   if (s !== '2026-01-05 01:07:09 PM') throw new Error('fmt broken: ' + s);
   if (fmt(new Date(2026, 0, 5, 0, 0, 0)) !== '2026-01-05 12:00:00 AM') throw new Error('fmt midnight broken');
-  console.log('ok');
-  process.exit(0);
-}
+  (async () => {
+    let calls = 0;
+    const ok = () => (calls++, Promise.resolve('fresh'));
+    await Promise.all([cached('t', 60, ok), cached('t', 60, ok)]);
+    if (calls !== 1) throw new Error('cache did not share concurrent calls');
+    cache.get('t').t = 0; // expire it
+    const stale = await cached('t', 60, () => Promise.reject(new Error('429')));
+    if (stale !== 'fresh') throw new Error('cache did not fall back to last good answer');
+    await cached('x', 60, () => Promise.reject(new Error('boom'))).then(() => { throw new Error('should fail'); }, e => { if (e.message !== 'boom') throw e; });
+    console.log('ok');
+    process.exit(0);
+  })();
+} else {
 
 const { DASHBOARD_PASSWORD } = process.env;
 http.createServer(async (req, res) => {
@@ -81,6 +108,7 @@ http.createServer(async (req, res) => {
     res.end(JSON.stringify({ error: e.message }));
   }
 }).listen(PORT, () => console.log('Fleet dashboard running on port ' + PORT));
+}
 
 const PAGE = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Fleet Dashboard · Millennial Pools</title>
@@ -158,8 +186,9 @@ const vname=v=>pick(v,'trackeeName','vehicleName','name')||'Vehicle';
 // Unnamed drivers come through as a phone number like "9052487042 ."
 const dname=v=>{const n=String(pick(v,'driverName','userName','driverFullName')||[v.driverFirstName,v.driverLastName].filter(Boolean).join(' ')).replace(/[ .]+$/,'').trim();return n};
 const initials=n=>/[a-z]/i.test(n)?n.split(/ +/).map(w=>w[0]).slice(0,2).join('').toUpperCase():'?';
-// Azuga's odometer field name varies; take the first non-time numeric "odo" field
-const odo=r=>{const k=Object.keys(r).find(k=>/odo/i.test(k)&&!/time/i.test(k)&&typeof r[k]==='number'&&r[k]>0);return k?Math.round(r[k]).toLocaleString():'–'};
+// Azuga sends several odometers: prefer the truck's own reading, then Azuga's current estimate.
+// (vehicleDeviceOdoReading is the reading at tracker install, so it's stale.)
+const odo=r=>{const v=(r.odo_support&&+r.vehicleSupportedOdoValue)||+r.vehicleDeviceCurrentodoReading||+r.totalDistanceTravelled||+r.odometerReading;return v>0?Math.round(v).toLocaleString()+' mi'+(r.odo_support?'':' (Azuga estimate)'):'Not reported yet'};
 const when=t=>+t>1e11?new Date(+t).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):(t||'');
 // Azuga sends km/h unless a unit field says miles; convert to mph
 const speed=r=>{const s=+pick(r,'speed')||0;return /mi|mph/i.test(String(pick(r,'speedUnit','speedUom','unitOfMeasure','distanceUnit')||''))?s:s*0.621371};
@@ -220,11 +249,12 @@ async function select(id){
   try{if(!maint.length)maint=list(await get('/api/maintenance'));
     const m=maint.filter(x=>vid(x)==id||vname(x)==vname(r));
     $('m').innerHTML=m.length?m.map(x=>{const s=String(pick(x,'status','reminderStatus')||'');return '<div class="ev"><span class="pill '+(/over/i.test(s)?'bad':/up/i.test(s)?'warn':'idle')+'">'+esc(s||'Scheduled')+'</span><b>'+esc(pick(x,'serviceType','serviceName')||'Service')+'</b><span class="t">'+esc(when(pick(x,'nextServiceDate','dueDate')))+(pick(x,'nextServiceOdometer')?' · at '+esc(pick(x,'nextServiceOdometer'))+' mi':'')+'</span></div>'}).join(''):(r.maintenanceEnabled===false?'Maintenance tracking is turned off for this vehicle in Azuga.':'No maintenance scheduled.');
-  }catch(e){$('m').textContent='Maintenance unavailable: '+e.message}
+  }catch(e){$('m').textContent=e.message;retry(id)}
   try{const v=list(await get('/api/videos?vehicleId='+encodeURIComponent(id)));
     $('vids').innerHTML=v.length?v.map(x=>{const e=pick(x,'eventType','eventName');const clips=links(x).filter(u=>!/thumb/i.test(u));return '<div class="ev"><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="t">'+esc(when(pick(x,'eventTime','startTime')))+'</span><span class="muted">'+esc(pick(x,'driverName')||'')+'</span><span class="clips">'+clips.map((u,i)=>'<a class="btn" target="_blank" rel="noopener" href="'+esc(u)+'">▶ Clip '+(i+1)+'</a>').join('')+'</span></div>'}).join(''):'No camera events in the last 7 days.';
-  }catch(e){$('vids').textContent='Footage unavailable: '+e.message}
+  }catch(e){$('vids').textContent=e.message;retry(id)}
 }
+const retried=new Set();function retry(id){if(retried.has(id))return;retried.add(id);setTimeout(()=>{if(sel==id)select(id)},30000)}
 $('q').oninput=render;
 refresh();setInterval(refresh,30000);
 </script></body></html>`;
