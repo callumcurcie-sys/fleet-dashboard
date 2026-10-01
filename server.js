@@ -519,6 +519,23 @@ if (process.argv[2] === 'test') {
 } else {
 
 const { DASHBOARD_PASSWORD } = process.env;
+// Azuga's camera storage only serves files to pages on azuga.com, so the server fetches them
+// and passes them through. Locked to Azuga's recording bucket so it can't fetch anything else.
+async function media(u, req, res) {
+  let src; try { src = new URL(u); } catch { res.writeHead(400); return res.end(); }
+  if (src.protocol !== 'https:' || !/^azuga-vmx-recording\.s3[\w.-]*\.amazonaws\.com$/.test(src.hostname)) { res.writeHead(403); return res.end(); }
+  try {
+    const h = { Referer: 'https://fleet-app.azuga.com/' };
+    if (req.headers.range) h.Range = req.headers.range;  // lets videos seek
+    const r = await fetch(src, { headers: h });
+    const out = { 'Cache-Control': 'private, max-age=86400' };
+    for (const k of ['content-type', 'content-length', 'content-range', 'accept-ranges']) if (r.headers.get(k)) out[k] = r.headers.get(k);
+    res.writeHead(r.status, out);
+    if (!r.body) return res.end();
+    require('stream').Readable.fromWeb(r.body).on('error', () => res.destroy()).pipe(res);
+  } catch (e) { console.error('Media failed:', e.message); res.writeHead(502); res.end(); }
+}
+
 http.createServer(async (req, res) => {
   // Browser's built-in login box. Any username works; password must match.
   const given = Buffer.from((req.headers.authorization || '').split(' ')[1] || '', 'base64').toString().split(':').slice(1).join(':');
@@ -540,6 +557,7 @@ http.createServer(async (req, res) => {
       res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: e.message }));
     }
   }
+  if (url.pathname === '/api/media') return media(url.searchParams.get('u'), req, res);
   const route = routes[url.pathname];
   if (!route) { res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(PAGE); }
   try {
@@ -966,6 +984,9 @@ let VIDS=[];
 function evMedia(x){
   const videos=(x.videoLinks||[]).filter(v=>v&&v.videoLink).map(v=>({name:v.videoName||(v.videoIndex===2?'Driver facing':'Road facing'),url:v.videoLink,poster:v.thumbnailLink||''}));
   const snaps=(x.snapshotLinks||[]).filter(s=>s&&s.snapshotLink).map(s=>({name:s.snapshotName||(s.snapshotIndex===2?'Driver facing':'Road facing'),url:s.snapshotLink}));
+  const via=u=>'/api/media?u='+encodeURIComponent(u);
+  videos.forEach(v=>{v.url=via(v.url);if(v.poster)v.poster=via(v.poster)});snaps.forEach(s=>s.url=via(s.url));
+  snaps.sort((a,b)=>/road/i.test(b.name)-/road/i.test(a.name));
   return {videos,snaps};
 }
 function openMedia(i){
