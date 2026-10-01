@@ -80,7 +80,8 @@ const routes = {
     const id = q.get('vehicleId') || '';
     const body = { startTime: fmt(daysAgo(7)), endTime: fmt(new Date()), page: 1, limit: 100, vehiclesIds: id };
     return cached('videos:' + id, 120, async () => {
-      const ev = list(await azuga('/eventVideos.json?videoType=eventVideo', body));
+      let ev = [];  // all pages, so older clips in the week aren't cut off
+      for (let page = 1; page <= 5; page++) { const p = list(await azuga('/eventVideos.json?videoType=eventVideo', { ...body, page })); ev = ev.concat(p); if (p.length < body.limit) break; }
       // Clips someone asked the camera for (from this dashboard or Azuga's site)
       let rq = []; try { rq = list(await azuga('/eventVideos.json?videoType=requestedVideo', body)).map(x => ({ ...x, eventType: x.eventType || 'Requested clip', requested: true })); } catch (e) { console.error('Requested videos:', e.message); }
       const t = x => +(x.eventTime || x.startTime || 0) || Date.parse(x.eventTime || x.startTime) || 0;
@@ -541,23 +542,6 @@ async function media(u, req, res) {
   } catch (e) { console.error('Media failed:', e.message); res.writeHead(502); res.end(); }
 }
 
-// Ask the camera to upload the clip around an event (Azuga allows up to 60 min; we take 30s)
-async function requestVideo(b) {
-  const id = String(b.vehicleId || ''), t = +b.time;
-  if (!id || !(t > 1e11)) throw new Error('Missing truck or event time');
-  const at = ms => fmt(new Date(t + ms + new Date(t).getTimezoneOffset() * 6e4));  // Azuga wants UTC here
-  const body = { vehicleId: id, startTime: at(-15000), endTime: at(15000), requestedVideoName: 'MP' + Date.now() };
-  let out;
-  for (const deviceVendorId of [15, 14]) {  // 15 = AI camera, 14 = older SafetyCam
-    out = await azuga('/createRequestVideo.json', { ...body, deviceVendorId });
-    if (!/AZSC005/.test(JSON.stringify(azErr(out) || ''))) break;
-  }
-  const e = azErr(out);
-  if (e) throw new Error(/AZSC006/.test(JSON.stringify(e)) ? 'The camera is offline. Try again when the truck is on.' : 'Azuga said: ' + JSON.stringify(e).slice(0, 200));
-  cache.delete('videos:' + id);
-  return { ok: true };
-}
-
 http.createServer(async (req, res) => {
   // Browser's built-in login box. Any username works; password must match.
   const given = Buffer.from((req.headers.authorization || '').split(' ')[1] || '', 'base64').toString().split(':').slice(1).join(':');
@@ -566,7 +550,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/update': saveTruck, '/api/video/request': requestVideo, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
+  const POSTS = { '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   if (POSTS[url.pathname]) {
     // JSON-only + POST-only, so another website can't trigger a change with a plain form
     if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
@@ -724,7 +708,6 @@ dialog#media::backdrop{background:rgba(10,30,45,.6)}
 .mhead{display:flex;align-items:flex-start;gap:12px;margin-bottom:12px}.mhead>div{flex:1}.mhead h3{margin:6px 0 2px;font-size:16px}.mhead p{margin:0;font-size:13px}
 .mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
 .mgrid figure{margin:0}.mgrid img,.mgrid video{width:100%;border-radius:10px;background:#000;display:block;max-height:60vh;object-fit:contain}
-.mreq{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:12px;font-size:13px}
 .mgrid figcaption{font-size:12px;color:var(--muted);margin-top:5px}
 .btn{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:12px;font-weight:600;color:var(--poolInk);background:var(--shallow);padding:5px 10px;border-radius:8px;text-decoration:none;transition:background .15s}
 .btn:hover{background:var(--shallow2)}.ic{width:14px;height:14px;flex:none}
@@ -996,7 +979,7 @@ async function select(id){
         +(th?'<span class="evth"><img src="'+esc(th)+'" alt="" loading="lazy">'+(md.videos.length?'<i>'+ICON.play+'</i>':'')+'</span>':'<span class="evth none">'+(x.requested?'Waiting':'No media')+'</span>')
         +'<span class="evi"><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="t">'+esc(when(pick(x,'eventTime','startTime')))+(drv?' · '+esc(drv):'')+'</span>'
         +'<span class="muted" style="font-size:12px">'+esc(pick(x,'address')||'')+'</span></span>'
-        +'<span class="evgo">'+(md.videos.length?'Watch':md.snaps.length?'View photos':x.requested?'Waiting on camera':'Request clip')+'</span></button>'}).join(''):'<span class="muted">No camera events this week. Safe driving.</span>';
+        +'<span class="evgo">'+(md.videos.length?'Watch':md.snaps.length?'View photos':x.requested?'Waiting on camera':'')+'</span></button>'}).join(''):'<span class="muted">No camera events this week. Safe driving.</span>';
   }catch(e){$('vids').innerHTML='<span class="muted">'+esc(e.message)+'</span>';retry(id)}
 }
 function closeDetail(){sel=null;$('right').classList.remove('open');setTimeout(()=>map.invalidateSize(),0);render()}
@@ -1015,15 +998,12 @@ function evMedia(x){
 function openMedia(i){
   const x=VIDS[i];if(!x)return;const md=evMedia(x),e=pick(x,'eventType','eventName'),drv=[x.firstName,x.lastName].filter(Boolean).join(' ');
   $('mbody').innerHTML='<div class="mhead"><div><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><h3>'+esc(when(pick(x,'eventTime','startTime')))+(drv?' · '+esc(drv):'')+'</h3><p class="muted">'+esc(pick(x,'address')||'')+(x.speed?' · '+Math.round(x.speed*0.621371)+' mph':'')+'</p></div><button class="dclose" id="mclose" aria-label="Close">×</button></div>'
-   +'<div class="mgrid">'+(md.videos.length?md.videos.map(v=>'<figure><video src="'+esc(v.url)+'" controls playsinline preload="metadata"'+(v.poster?' poster="'+esc(v.poster)+'"':'')+'></video><figcaption>'+esc(v.name)+'</figcaption></figure>').join('')
+   +'<div class="mgrid">'+(md.videos.length?md.videos.map(v=>'<figure><video src="'+esc(v.url)+'" controls playsinline preload="metadata"'+(v.poster?' poster="'+esc(v.poster)+'"':'')+'></video><figcaption>'+esc(v.name)+' · <a href="'+esc(v.url)+'" target="_blank" rel="noopener">Open in new tab</a></figcaption></figure>').join('')
      :md.snaps.map(s=>'<figure><img src="'+esc(s.url)+'" alt="'+esc(s.name)+'"><figcaption>'+esc(s.name)+'</figcaption></figure>').join(''))+'</div>'
-   +(md.videos.length?'':x.requested?'<p class="muted" style="margin:10px 0 0;font-size:13px">Clip requested. The camera uploads it the next time the truck is on; it will play here once it arrives.</p>':'<div class="mreq"><span class="muted">'+(md.snaps.length?'Only photos for this event.':'No photos or video for this event.')+'</span><button class="btn" id="mreq" data-i="'+i+'">Request video clip</button><span id="mreqmsg" class="muted"></span></div>');
+   +(md.videos.length?'':x.requested?'<p class="muted" style="margin:10px 0 0;font-size:13px">Clip requested. The camera uploads it the next time the truck is on; it will play here once it arrives.</p>':'<p class="muted" style="margin:10px 0 0;font-size:13px">'+(md.snaps.length?'Azuga only has photos for this event, no video clip.':'Azuga has no photos or video for this event.')+'</p>');
   $('media').showModal();const v=$('mbody').querySelector('video');if(v)v.play().catch(()=>{});
 }
-async function reqClip(i){const x=VIDS[i],b=$('mreq'),m=$('mreqmsg');b.disabled=true;b.textContent='Requesting…';
-  try{await post('/api/video/request',{vehicleId:x.vehicleId||x.trackeeId||sel,time:+pick(x,'eventTime','startTime')});b.remove();m.textContent='Requested. The camera uploads the 30-second clip the next time the truck is on; it will show up in this list as "Requested clip".'}
-  catch(err){b.disabled=false;b.textContent='Request video clip';m.textContent=err.message}}
-document.addEventListener('click',e=>{if(e.target.id==='mreq')reqClip(+e.target.dataset.i);const b=e.target.closest('.evb');if(b&&!b.disabled)openMedia(+b.dataset.i);if(e.target.id==='mclose'||e.target.id==='media')closeMedia()});
+document.addEventListener('click',e=>{const b=e.target.closest('.evb');if(b&&!b.disabled)openMedia(+b.dataset.i);if(e.target.id==='mclose'||e.target.id==='media')closeMedia()});
 function closeMedia(){$('mbody').querySelectorAll('video').forEach(v=>v.pause());$('media').close()}
 const retried=new Set();function retry(id){if(retried.has(id))return;retried.add(id);setTimeout(()=>{if(sel==id)select(id)},30000)}
 // ---- Airtable (source of truth) ----
