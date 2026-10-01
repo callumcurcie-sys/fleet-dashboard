@@ -79,7 +79,7 @@ const routes = {
   '/api/videos': q => {
     const id = q.get('vehicleId') || '';
     const body = { startTime: fmt(daysAgo(7)), endTime: fmt(new Date()), page: 1, limit: 100, ...(id ? { vehiclesIds: id } : {}) };
-    return cached('videos:' + id, 120, async () => {
+    return cached('videos:' + id, id ? 120 : 300, async () => {
       let ev = [];  // all pages, so older clips in the week aren't cut off
       for (let page = 1; page <= (id ? 5 : 15); page++) { const p = list(await azuga('/eventVideos.json?videoType=eventVideo', { ...body, page })); ev = ev.concat(p); if (p.length < body.limit) break; }
       // Clips someone asked the camera for (from this dashboard or Azuga's site)
@@ -812,7 +812,7 @@ tbody tr:hover td{background:#fcfbf8}
 
 @media(max-width:900px){
  header{padding:12px 16px}.bar{padding:12px 16px 0}.search{flex:1 1 100%}
- main{grid-template-columns:1fr;height:auto;padding:12px 16px}#list{max-height:45vh}#right,#right.open{grid-template-columns:1fr;grid-template-rows:auto;grid-template-areas:none}#right>*{grid-area:auto!important}#map{height:300px}#donut{flex-wrap:wrap;justify-content:center}
+ main{grid-template-columns:1fr;height:auto;padding:12px 16px}#list{max-height:45vh}#right,#right.open{grid-template-columns:1fr;grid-template-rows:auto;grid-template-areas:none}#right>*{grid-area:auto!important}#map{height:300px}#detail{order:1}#donut{order:2}#cams{order:3}#donut{flex-wrap:wrap;justify-content:center}
  .grid{grid-template-columns:repeat(2,1fr)}.kv:nth-child(3){border-left:0}.kv:nth-child(n+3){border-top:1px solid var(--line)}
  #vEdit,#vDrv{padding:12px 16px}.ed{grid-template-columns:1fr;height:auto}#edList{max-height:35vh}#drvRows td:nth-child(3){display:none}
 }
@@ -981,7 +981,7 @@ async function select(id){
     $('m').innerHTML=m.length?m.map(x=>{const s=String(pick(x,'status','reminderStatus')||'');return '<div class="ev"><span class="pill '+(/over/i.test(s)?'bad':/up/i.test(s)?'warn':'idle')+'">'+esc(s||'Scheduled')+'</span><b>'+esc(pick(x,'serviceType','serviceName')||'Service')+'</b><span class="t">'+esc(when(pick(x,'nextServiceDate','dueDate')))+(pick(x,'nextServiceOdometer')?' · at '+esc(pick(x,'nextServiceOdometer'))+' mi':'')+'</span></div>'}).join(''):'<span class="muted">'+(r.maintenanceEnabled===false?'Maintenance tracking is off for this truck in Azuga.':'Nothing due.')+'</span>';
   }catch(e){$('m').innerHTML='<span class="muted">'+esc(e.message)+'</span>';retry(id)}
   $('vids').innerHTML='<div class="sk" style="width:70%"></div><div class="sk" style="width:50%"></div>';$('donut').innerHTML='<div class="sk" style="width:60%"></div>';
-  try{const v=list(await get('/api/videos?vehicleId='+encodeURIComponent(id)));if(sel!=id)return;
+  try{const v=(await fleetVids()).filter(x=>x.vehicleId==id);if(sel!=id)return;
     TRUCKV=v;camType='';drawCams();
   }catch(e){if(sel!=id)return;$('vids').innerHTML='<span class="muted">'+esc(e.message)+'</span>';$('donut').innerHTML='';retry(id)}
 }
@@ -1290,6 +1290,11 @@ $('newDrv').onsubmit=async e=>{
   $('ndSave').disabled=false;
 };
 loadAT();
+// One fleet-wide camera download (refreshed every 5 min) instead of several Azuga calls per truck click,
+// which tripped Azuga's per-minute limit and made clicks wait.
+let FV=null,FVat=0;
+function fleetVids(){if(FV&&Date.now()-FVat<3e5)return FV;FVat=Date.now();const p=get('/api/videos').then(list);if(!FV)FV=p;p.then(()=>{FV=p},()=>{if(FV===p)FV=null;FVat=0});return FV}  // stale copy keeps serving while it refreshes
+fleetVids();
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
   ['vMap','vEdit','vDrv'].forEach(v=>$(v).hidden=b.dataset.v!==v);$('sum').hidden=b.dataset.v!=='vMap';
