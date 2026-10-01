@@ -454,117 +454,173 @@ http.createServer(async (req, res) => {
 
 const PAGE = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Fleet Dashboard · Millennial Pools</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
-:root{--bg:#eef2f6;--card:#fff;--ink:#0f1b2d;--muted:#526077;--line:#e2e8f0;--navy:#0b2545;--accent:#0ea5b7;--go:#166534;--goBg:#dcfce7;--idle:#475569;--idleBg:#eef2f6;--warn:#92400e;--warnBg:#fef3c7;--bad:#b91c1c;--badBg:#fee2e2;--r:14px}
+/* Millennial Pools fleet. Deep water + pool cyan on a warm deck. */
+:root{
+ --deck:#f4f1ea;--deck2:#ebe6db;--card:#fff;--line:#e4ded2;--line2:#d6cfc1;
+ --ink:#10222e;--ink2:#3d4f5c;--muted:#5c6b75;
+ --deep:#0a2c40;--deep2:#103a52;--pool:#0b7f9e;--poolInk:#075a71;--shallow:#e2f3f7;--shallow2:#c9e8f0;
+ --go:#166534;--goDot:#16a34a;--goBg:#dcf5e3;--idle:#475569;--idleDot:#64748b;--idleBg:#eef0f0;
+ --warn:#8a4b06;--warnDot:#d97706;--warnBg:#fdf0d5;--bad:#a1231f;--badBg:#fde4e1;
+ --r:12px;--sh:0 1px 2px rgba(16,34,46,.06),0 1px 1px rgba(16,34,46,.04)}
 *{box-sizing:border-box}
-body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--ink);font-size:14px}
-header{background:var(--navy);color:#fff;padding:14px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
-.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px}
-.logo{width:34px;height:34px;border-radius:9px;background:var(--accent);display:grid;place-items:center;font-size:13px;font-weight:700}
-.brand small{display:block;font-weight:500;font-size:12px;opacity:.7}
-.search{flex:1;max-width:420px;position:relative}
-.search input{width:100%;padding:10px 14px 10px 36px;border:0;border-radius:10px;font:inherit;background:rgba(255,255,255,.14);color:#fff;outline:none}
-.search input::placeholder{color:rgba(255,255,255,.65)}.search input:focus{background:rgba(255,255,255,.22)}
-.search svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);opacity:.7}
-.live{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:13px;opacity:.9}
-.dot{width:8px;height:8px;border-radius:50%;background:#4ade80;box-shadow:0 0 0 0 rgba(74,222,128,.7);animation:pulse 2s infinite}
-@keyframes pulse{70%{box-shadow:0 0 0 8px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}
-.tabs{display:flex;gap:4px;background:rgba(255,255,255,.1);padding:4px;border-radius:10px}
-.tabs button{font:inherit;font-weight:600;font-size:13px;color:#fff;background:none;border:0;padding:7px 14px;border-radius:7px;cursor:pointer;opacity:.75}
-.tabs button.on{background:#fff;color:var(--navy);opacity:1}
-#vEdit,#vDrv{padding:16px 24px 24px}
-#drvRows td{font-size:13px}#drvRows .sub{color:var(--muted);font-size:12px}
-.azf{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}.azf input{font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:7px;min-width:0;width:170px}
-.ed{display:grid;grid-template-columns:320px 1fr;gap:16px;height:calc(100vh - 100px);min-height:520px}
-.edl{display:flex;flex-direction:column;min-height:0}.edf{padding:12px 14px;border-bottom:1px solid var(--line);font-size:13px;color:var(--muted)}
-#edList{overflow:auto;flex:1}
-.eli{padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer;display:flex;justify-content:space-between;gap:8px;align-items:center}
-.eli:hover{background:var(--bg)}.eli.sel{background:#e0f2f5}.eli.sel b{color:#0b4f5c}
-.eli b{display:block;font-weight:600}.eli small{color:var(--muted)}
-.edc{padding:22px 26px;overflow:auto}
-.edh{display:flex;align-items:center;gap:12px;margin-bottom:6px}.edh h2{margin:0;font-size:20px}.edh .pos{margin-left:auto;color:var(--muted);font-size:13px}
-.miss{color:var(--warn);font-size:13px;margin-bottom:12px}
-fieldset{border:0;padding:0;margin:18px 0 0}legend{font-size:13px;font-weight:600;color:var(--ink);margin-bottom:8px}
-.fg{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
-.fg label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:var(--muted)}
-.fg input,.fg select{font:inherit;font-size:14px;font-weight:400;color:var(--ink);padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:#fff}
-.fg input:focus,.fg select:focus{outline:2px solid var(--accent);border-color:transparent}
-.fg .dirty{background:#fffbeb;border-color:#f59e0b}.fg .hint{font-weight:400}
-.edb{display:flex;gap:8px;align-items:center;margin-top:24px;padding-top:16px;border-top:1px solid var(--line);flex-wrap:wrap}
-.btn2{font:inherit;font-weight:600;font-size:13px;border:1px solid var(--line);background:#fff;color:var(--ink);padding:9px 14px;border-radius:9px;cursor:pointer}
-.btn2.pri{background:var(--navy);color:#fff;border-color:var(--navy)}.btn2:disabled{opacity:.45;cursor:default}
-#edMsg{font-size:13px;margin-left:8px}
-.at{background:#f0f9fb;border:1px solid #cdeaf0;border-radius:12px;padding:12px 14px;margin-top:14px;font-size:13px}
-.at.off{background:var(--bg);border-color:var(--line);color:var(--muted)}
-.at h4{margin:0 0 8px;font-size:13px;font-weight:600;color:#0b4f5c}
-.at .kvs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px 14px}.at .kvs span{display:block;color:var(--muted);font-size:11px}
-.docs{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
-.fromAt{align-self:flex-start;display:inline-block;font-size:10px;font-weight:700;color:#0e7490;background:#e0f2f5;border-radius:4px;padding:1px 5px;margin-left:6px}
-.note{color:var(--warn);font-size:12px;margin-top:6px}
-.fg label.chk{flex-direction:row;align-items:center;gap:8px;padding-top:22px}#edMsg.ok{color:var(--go)}#edMsg.bad{color:var(--bad)}
-@media(max-width:900px){#vEdit,#vDrv{padding:12px 16px}#drvRows td:nth-child(3){display:none}.ed{grid-template-columns:1fr;height:auto}#edList{max-height:35vh}}
-.panel{background:var(--card);border-radius:var(--r);box-shadow:0 1px 2px rgba(15,27,45,.06);overflow:auto}
-.panel .intro{padding:16px 20px;border-bottom:1px solid var(--line);color:var(--muted)}.panel .intro b{color:var(--ink)}
-table{width:100%;border-collapse:collapse}th{text-align:left;font-size:12px;font-weight:600;color:var(--muted);padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
-td{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
-td input{font:inherit;width:100%;min-width:110px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#fff}
-td input:focus{outline:2px solid var(--accent);border-color:transparent}td input.dirty{background:#fffbeb;border-color:#f59e0b}
-.save{font:inherit;font-weight:600;font-size:13px;color:#fff;background:var(--navy);border:0;padding:8px 14px;border-radius:8px;cursor:pointer}.save:disabled{opacity:.5;cursor:default}
-.msg{font-size:12px;margin-top:4px;max-width:220px}.msg.ok{color:var(--go)}.msg.bad{color:var(--bad)}
-::selection{background:#bfe9f0;color:var(--ink)}
-:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-*{scrollbar-width:thin;scrollbar-color:#c5d0dc transparent}
-.kv b,.pill,.t,td,.eli small{font-variant-numeric:tabular-nums}
-.btn2:hover:not(:disabled){border-color:#c5d0dc;background:#f8fafc}.btn2.pri:hover:not(:disabled){background:#123a6b}
-.btn{display:inline-flex;align-items:center;gap:6px}.ic{width:14px;height:14px;flex:none}
-.sk{background:linear-gradient(90deg,#eef2f6 25%,#e3e9f0 37%,#eef2f6 63%);background-size:400% 100%;animation:sk 1.4s ease infinite;border-radius:6px;height:12px;margin:6px 0}
-@keyframes sk{0%{background-position:100% 50%}100%{background-position:0 50%}}
-@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
-#err{background:var(--badBg);color:var(--bad);padding:10px 24px;display:none;font-size:13px}
-.sum{display:flex;gap:8px;flex-wrap:wrap;padding:14px 24px 0}
-.sum button{font:inherit;font-size:13px;display:inline-flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);color:var(--ink);padding:7px 12px;border-radius:999px;cursor:pointer;transition:background .15s,border-color .15s}
-.sum button:hover{border-color:#c5d0dc}.sum button[aria-pressed=true]{background:var(--navy);border-color:var(--navy);color:#fff}
-.sum b{font-weight:700;font-variant-numeric:tabular-nums}.sum .dot{width:8px;height:8px;border-radius:50%;animation:none;box-shadow:none}
-main{display:grid;grid-template-columns:360px 1fr;gap:16px;padding:14px 24px 24px;height:calc(100vh - 130px);min-height:560px}
-#list{overflow:auto;display:flex;flex-direction:column;gap:8px;padding-right:4px}
-.card{background:var(--card);border-radius:var(--r);padding:12px 14px;cursor:pointer;border:2px solid transparent;display:flex;gap:12px;box-shadow:0 1px 2px rgba(15,27,45,.06);transition:border-color .15s,transform .15s}
-.card:hover{border-color:var(--line)}.card.sel{border-color:var(--accent)}
-.av{flex:none;width:38px;height:38px;border-radius:50%;background:#e0f2f5;color:#0e7490;display:grid;place-items:center;font-weight:600;font-size:13px}
-.av.none{background:var(--idleBg);color:var(--idle)}
-.ci{min-width:0;flex:1}.ci .top{display:flex;justify-content:space-between;gap:8px;align-items:center}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;font-family:Figtree,system-ui,sans-serif;background:var(--deck);color:var(--ink);font-size:14px;line-height:1.45}
+::selection{background:var(--shallow2);color:var(--ink)}
+:focus-visible{outline:2px solid var(--pool);outline-offset:2px;border-radius:4px}
+*{scrollbar-width:thin;scrollbar-color:var(--line2) transparent}
+[hidden]{display:none!important}
+.muted{color:var(--muted)}
+.kv b,.pill,.t,td,.eli small,.sum b,.num{font-variant-numeric:tabular-nums}
+
+/* Header */
+header{background:var(--deep);color:#fff;padding:12px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:11px;font-weight:700;font-size:16px;letter-spacing:-.01em}
+.logo{width:34px;height:34px;border-radius:10px;background:var(--pool);display:grid;place-items:center}
+.logo svg{width:22px;height:22px}
+.brand small{display:block;font-weight:500;font-size:12px;color:#9cc3d3;letter-spacing:0}
+.live{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe3ec}
+.live .dot{width:8px;height:8px;border-radius:50%;background:#4ade80;box-shadow:0 0 0 0 rgba(74,222,128,.6);animation:pulse 2.4s ease-out infinite}
+.live.down .dot{background:#f59e0b;animation:none}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(74,222,128,.55)}80%,100%{box-shadow:0 0 0 7px rgba(74,222,128,0)}}
+.tabs{display:flex;gap:2px;background:var(--deep2);padding:3px;border-radius:10px}
+.tabs button{font:inherit;font-weight:600;font-size:13px;color:#cfe3ec;background:none;border:0;padding:7px 14px;border-radius:8px;cursor:pointer;transition:background .15s,color .15s}
+.tabs button:hover{color:#fff}.tabs button.on{background:#fff;color:var(--deep)}
+#err{background:var(--badBg);color:var(--bad);padding:10px 24px;font-size:13px}
+#err:empty{display:none}
+
+/* Toolbar: search + filters */
+.bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:14px 24px 0}
+.search{position:relative;flex:0 1 320px;min-width:200px}
+.search input{width:100%;font:inherit;padding:8px 12px 8px 34px;border:1px solid var(--line2);border-radius:9px;background:var(--card);color:var(--ink);outline:none;transition:border-color .15s,box-shadow .15s}
+.search input:focus{border-color:var(--pool);box-shadow:0 0 0 3px var(--shallow2)}
+.search svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--muted)}
+.sum{display:flex;gap:6px;flex-wrap:wrap}
+.sum button{font:inherit;font-size:13px;display:inline-flex;align-items:center;gap:7px;background:transparent;border:1px solid transparent;color:var(--ink2);padding:6px 11px;border-radius:999px;cursor:pointer;transition:background .15s,border-color .15s}
+.sum button:hover{background:var(--deck2)}
+.sum button[aria-pressed=true]{background:var(--card);border-color:var(--line2);color:var(--ink);box-shadow:var(--sh)}
+.sum b{font-weight:700;color:var(--ink)}
+.sum .dot{width:8px;height:8px;border-radius:50%}
+
+/* Live map layout */
+main{display:grid;grid-template-columns:350px 1fr;gap:14px;padding:12px 24px 24px;height:calc(100vh - 126px);min-height:560px}
+#list{overflow:auto;background:var(--card);border-radius:var(--r);box-shadow:var(--sh)}
+.card{display:flex;gap:11px;align-items:flex-start;padding:12px 14px;border-bottom:1px solid var(--line);cursor:pointer;transition:background .12s}
+.card:last-child{border-bottom:0}.card:hover{background:#faf8f4}
+.card.sel{background:var(--shallow)}
+.av{flex:none;width:34px;height:34px;border-radius:50%;background:var(--shallow);color:var(--poolInk);display:grid;place-items:center;font-weight:700;font-size:12px}
+.av.none{background:var(--deck2);color:var(--muted)}.av.none svg{width:17px;height:17px}
+.card.sel .av{background:#fff}
+.ci{min-width:0;flex:1}
+.ci .top{display:flex;justify-content:space-between;gap:8px;align-items:center}
 .ci b{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ci .d{color:var(--ink);font-size:13px;margin-top:2px}.ci .a{color:var(--muted);font-size:12px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pill{flex:none;font-size:11px;font-weight:600;padding:3px 8px;border-radius:999px}
+.tno{flex:none;font-size:11px;font-weight:700;color:var(--poolInk);background:var(--shallow);border-radius:5px;padding:1px 6px;margin-right:6px}
+.card.sel .tno{background:#fff}
+.ci .d{font-size:13px;margin-top:1px;color:var(--ink2)}
+.ci .a{color:var(--muted);font-size:12px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pill{flex:none;display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;padding:2px 9px;border-radius:999px;white-space:nowrap}
 .pill.go{background:var(--goBg);color:var(--go)}.pill.idle{background:var(--idleBg);color:var(--idle)}
 .pill.warn{background:var(--warnBg);color:var(--warn)}.pill.bad{background:var(--badBg);color:var(--bad)}
-#right{display:grid;grid-template-rows:minmax(260px,52%) 1fr;gap:16px;min-height:0}
-#map{border-radius:var(--r);box-shadow:0 1px 2px rgba(15,27,45,.06)}
-#detail{background:var(--card);border-radius:var(--r);padding:18px 20px;overflow:auto;box-shadow:0 1px 2px rgba(15,27,45,.06)}
-.empty{color:var(--muted);display:grid;place-items:center;height:100%;text-align:center}
-.dh{display:flex;align-items:center;gap:14px;margin-bottom:14px}.dh h2{margin:0;font-size:18px}.dh p{margin:2px 0 0;color:var(--muted)}
-.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px}
-.kv{background:var(--bg);border-radius:10px;padding:10px 12px}.kv span{display:block;color:var(--muted);font-size:12px;font-weight:500}.kv b{font-weight:600;font-size:14px}
-h3{font-size:14px;font-weight:600;color:var(--ink);margin:22px 0 8px}
-.ev{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line);flex-wrap:wrap}
-.ev .t{color:var(--muted);font-size:12px;min-width:150px}.ev .clips{margin-left:auto;display:flex;gap:6px}
-.btn{font:inherit;font-size:12px;font-weight:600;color:var(--navy);background:#e0f2f5;padding:5px 10px;border-radius:8px;text-decoration:none}.btn:hover{background:#c7eaf0}
-.muted{color:var(--muted)}
-details{margin-top:18px}summary{cursor:pointer;color:var(--muted);font-size:12px}details pre{font-size:11px;background:var(--bg);padding:10px;border-radius:8px;overflow:auto;max-height:260px}
-@media(max-width:900px){.sum{padding:12px 16px 0}main{grid-template-columns:1fr;height:auto;padding:12px 16px}#list{max-height:45vh}#right{grid-template-rows:340px auto}.grid{grid-template-columns:repeat(2,1fr)}header{padding:12px 16px}.live{margin-left:auto}.search{flex-basis:100%;max-width:none;order:3}}
+.pill .ic{width:12px;height:12px}
+#right{display:grid;grid-template-rows:minmax(260px,50%) 1fr;gap:14px;min-height:0}
+#map{border-radius:var(--r);box-shadow:var(--sh);background:#dfe7e6}
+.leaflet-tile-pane{filter:saturate(.35) contrast(.95) brightness(1.04)}
+.leaflet-container{font:inherit}
+.leaflet-tooltip{font:inherit;font-size:12px;border-radius:7px;border:0;box-shadow:0 2px 8px rgba(16,34,46,.18)}
+/* The one flourish: moving trucks ripple like a disturbance on water */
+.mv{animation:ripple 2.2s cubic-bezier(.2,.7,.3,1) infinite}
+@keyframes ripple{0%{stroke-width:2;stroke-opacity:.9}100%{stroke-width:22;stroke-opacity:0}}
+#detail{background:var(--card);border-radius:var(--r);padding:20px 22px;overflow:auto;box-shadow:var(--sh)}
+.empty{color:var(--muted);display:grid;place-items:center;height:100%;text-align:center;padding:24px;gap:6px}
+.empty b{color:var(--ink);font-size:15px}
+.dh{display:flex;align-items:center;gap:13px;margin-bottom:14px}
+.dh h2{margin:0;font-size:19px;font-weight:700;letter-spacing:-.01em;display:flex;align-items:center;gap:8px}
+.dh p{margin:2px 0 0;color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);border-radius:10px;margin-bottom:12px}
+.kv{padding:10px 14px;border-left:1px solid var(--line)}.kv:first-child{border-left:0}
+.kv span{display:block;color:var(--muted);font-size:12px}.kv b{font-weight:600;font-size:15px}
+.addr{display:flex;gap:6px;align-items:center;color:var(--ink2)}
+h3{font-size:14px;font-weight:700;color:var(--ink);margin:22px 0 4px}
+.ev{display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid var(--line);flex-wrap:wrap}
+.ev:first-of-type{border-top:0}
+.ev .t{color:var(--muted);font-size:13px;min-width:140px}.ev .clips{margin-left:auto;display:flex;gap:6px}
+.btn{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:12px;font-weight:600;color:var(--poolInk);background:var(--shallow);padding:5px 10px;border-radius:8px;text-decoration:none;transition:background .15s}
+.btn:hover{background:var(--shallow2)}.ic{width:14px;height:14px;flex:none}
+details{margin-top:22px}summary{cursor:pointer;color:var(--muted);font-size:12px}
+details pre{font-size:11px;background:var(--deck);padding:10px;border-radius:8px;overflow:auto;max-height:260px}
+.sk{background:linear-gradient(90deg,var(--deck) 25%,var(--deck2) 37%,var(--deck) 63%);background-size:400% 100%;animation:sk 1.4s ease infinite;border-radius:6px;height:11px;margin:6px 0}
+@keyframes sk{0%{background-position:100% 50%}100%{background-position:0 50%}}
+
+/* Airtable box */
+.at{background:var(--shallow);border-radius:10px;padding:13px 15px;margin-top:14px;font-size:13px;color:var(--ink2)}
+.at.off{background:var(--deck);color:var(--muted)}
+.at h4{margin:0 0 9px;font-size:13px;font-weight:700;color:var(--poolInk)}
+.at .kvs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px 16px}
+.at .kvs span{display:block;color:var(--muted);font-size:12px}.at .kvs div{color:var(--ink)}
+.docs{display:flex;gap:6px;flex-wrap:wrap;margin-top:11px}.at .btn{background:#fff}.at .btn:hover{background:var(--shallow2)}
+.fromAt{align-self:flex-start;display:inline-block;font-size:11px;font-weight:700;color:var(--poolInk);background:var(--shallow);border-radius:5px;padding:1px 6px;margin-left:6px}
+.note{color:var(--warn);font-size:12px;margin-top:6px}
+
+/* Panels, edit tab, drivers tab */
+#vEdit,#vDrv{padding:14px 24px 24px}
+.panel{background:var(--card);border-radius:var(--r);box-shadow:var(--sh);overflow:auto}
+.panel .intro{padding:16px 20px;border-bottom:1px solid var(--line);color:var(--muted)}.panel .intro b{color:var(--ink);font-size:15px}
+.ed{display:grid;grid-template-columns:320px 1fr;gap:14px;height:calc(100vh - 140px);min-height:520px}
+.edl{display:flex;flex-direction:column;min-height:0}
+.edf{padding:12px 14px;border-bottom:1px solid var(--line);font-size:13px;color:var(--ink2)}
+#edList{overflow:auto;flex:1}
+.eli{padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer;display:flex;justify-content:space-between;gap:8px;align-items:center;transition:background .12s}
+.eli:hover{background:#faf8f4}.eli.sel{background:var(--shallow)}.eli.sel b{color:var(--poolInk)}
+.eli b{display:block;font-weight:600}.eli small{color:var(--muted)}
+.edc{padding:22px 26px;overflow:auto}
+.edh{display:flex;align-items:center;gap:12px;margin-bottom:4px}.edh h2{margin:0;font-size:20px;letter-spacing:-.01em}
+.edh .pos{margin-left:auto;color:var(--muted);font-size:13px}
+.miss{color:var(--warn);font-size:13px;margin-bottom:10px}
+fieldset{border:0;padding:0;margin:20px 0 0}legend{font-size:14px;font-weight:700;color:var(--ink);margin-bottom:8px;padding:0}
+.fg{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.fg label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:var(--ink2)}
+.fg input,.fg select{font:inherit;font-size:14px;font-weight:400;color:var(--ink);padding:9px 11px;border:1px solid var(--line2);border-radius:9px;background:#fff;transition:border-color .15s,box-shadow .15s}
+.fg input:focus,.fg select:focus{outline:none;border-color:var(--pool);box-shadow:0 0 0 3px var(--shallow2)}
+.fg input::placeholder{color:#8a969d}
+.fg .dirty{background:#fffaeb;border-color:#e9b949}.fg .hint{font-weight:400;color:var(--muted)}
+.fg label.chk{flex-direction:row;align-items:center;gap:8px;padding-top:22px}
+input[type=checkbox]{accent-color:var(--pool);width:15px;height:15px}
+.edb{display:flex;gap:8px;align-items:center;margin-top:24px;padding-top:16px;border-top:1px solid var(--line);flex-wrap:wrap}
+.btn2{font:inherit;font-weight:600;font-size:13px;border:1px solid var(--line2);background:#fff;color:var(--ink);padding:8px 14px;border-radius:9px;cursor:pointer;transition:background .15s,border-color .15s}
+.btn2:hover:not(:disabled){background:var(--deck)}
+.btn2.pri{background:var(--deep);color:#fff;border-color:var(--deep)}.btn2.pri:hover:not(:disabled){background:var(--deep2)}
+.btn2:disabled{opacity:.45;cursor:default}
+#edMsg{font-size:13px;margin-left:8px}#edMsg.ok{color:var(--go)}#edMsg.bad{color:var(--bad)}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:12px;font-weight:600;color:var(--muted);padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap;background:#fbfaf7}
+td{padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+tbody tr:hover td{background:#fcfbf8}
+#drvRows td{font-size:13px}#drvRows .sub{color:var(--muted);font-size:12px}
+.azf{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.azf input{font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line2);border-radius:7px;min-width:0;width:170px}
+.msg{font-size:12px;margin-top:4px;max-width:240px}.msg.ok{color:var(--go)}.msg.bad{color:var(--bad)}
+
+@media(max-width:900px){
+ header{padding:12px 16px}.bar{padding:12px 16px 0}.search{flex:1 1 100%}
+ main{grid-template-columns:1fr;height:auto;padding:12px 16px}#list{max-height:45vh}#right{grid-template-rows:340px auto}
+ .grid{grid-template-columns:repeat(2,1fr)}.kv:nth-child(3){border-left:0}.kv:nth-child(n+3){border-top:1px solid var(--line)}
+ #vEdit,#vDrv{padding:12px 16px}.ed{grid-template-columns:1fr;height:auto}#edList{max-height:35vh}#drvRows td:nth-child(3){display:none}
+}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head><body>
 <header>
- <div class="brand"><div class="logo">MP</div><div>Fleet Dashboard<small>Millennial Pools</small></div></div>
- <div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search vehicle or driver"></div>
- <div class="live"><span class="dot"></span><span id="upd">Connecting...</span></div>
-<nav class="tabs"><button data-v="vMap" class="on">Live map</button><button data-v="vEdit">Edit vehicles</button><button data-v="vDrv">Drivers</button></nav>
+ <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M3 9c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0"/><path d="M3 15c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0" opacity=".6"/></svg></div><div>Millennial Pools<small>Fleet</small></div></div>
+ <div class="live" id="live"><span class="dot"></span><span id="upd">Connecting to Azuga...</span></div>
+ <nav class="tabs"><button data-v="vMap" class="on">Live map</button><button data-v="vEdit">Edit vehicles</button><button data-v="vDrv">Drivers</button></nav>
 </header>
+<div class="bar"><div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search trucks or drivers" aria-label="Search trucks or drivers"></div><nav class="sum" id="sum" aria-label="Filter vehicles"></nav></div>
 <div id="err"></div>
-<div id="vMap"><nav class="sum" id="sum" aria-label="Filter vehicles"></nav>
+<div id="vMap">
 <main><div id="list"><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div></div>
-<div id="right"><div id="map"></div><div id="detail"><div class="empty">Select a vehicle to see its driver, maintenance and camera footage.</div></div></div></main></div>
+<div id="right"><div id="map"></div><div id="detail"><div class="empty"><b>Pick a truck</b>Its driver, paperwork, maintenance and camera footage show up here.</div></div></div></main></div>
 <div id="vDrv" hidden><div class="panel">
  <div class="intro" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><div><b>Drivers</b> <span id="drvCount"></span><br>From your Airtable Drivers table. New drivers are saved to Airtable first, then added to Azuga.</div><span style="flex:1"></span><button class="btn2 pri" id="newDrvBtn">+ New driver</button></div>
  <form id="newDrv" hidden autocomplete="off" style="padding:16px 20px;border-bottom:1px solid var(--line);background:#fafcfd">
@@ -592,7 +648,8 @@ const $=id=>document.getElementById(id);
 const svg=d=>'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+d+'</svg>';
 const ICON={pin:svg('<path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/>'),
  file:svg('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>'),
- play:svg('<path d="M8 5v14l11-7z"/>'),check:svg('<path d="M5 12.5l4.5 4.5L19 7"/>')};
+ play:svg('<path d="M8 5v14l11-7z"/>'),
+ truck:svg('<path d="M3 7h11v9H3z"/><path d="M14 10h4l3 3v3h-7"/><circle cx="7" cy="17.5" r="1.6"/><circle cx="17" cy="17.5" r="1.6"/>'),check:svg('<path d="M5 12.5l4.5 4.5L19 7"/>')};
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
 // Azuga wraps lists differently per endpoint; grab the first array we find
 const list=x=>Array.isArray(x)?x:x&&typeof x==='object'?(Object.values(x).map(list).find(a=>a.length)||[]):[];
@@ -610,7 +667,9 @@ const when=t=>+t>1e11?new Date(+t).toLocaleString([], {month:'short',day:'numeri
 const speed=r=>{const s=+pick(r,'speed')||0;return /mi|mph/i.test(String(pick(r,'speedUnit','speedUom','unitOfMeasure','distanceUnit')||''))?s:s*0.621371};
 // Old (stored) locations and finished trips keep their last speed, so don't count them as moving
 const moving=r=>speed(r)>0&&r.storedLocation!==true&&!/stop|end|park|idle|off/i.test(String(pick(r,'tripState','tripStatus')||''));
-const status=r=>moving(r)?'<span class="pill go">Moving · '+Math.round(speed(r))+' mph</span>':'<span class="pill idle">Parked</span>';
+const status=r=>moving(r)?'<span class="pill go">'+Math.round(speed(r))+' mph</span>':'<span class="pill idle">Parked</span>';
+const tno=id=>{const L=link(id);return L&&L.linked&&L.truck.truckNo?'<span class="tno">#'+esc(L.truck.truckNo.split(/[ ~(]/)[0])+'</span>':''};
+const avatar=(d,big)=>{const named=/[a-z]/i.test(d);return '<div class="av'+(named?'':' none')+'"'+(big?' style="width:44px;height:44px;font-size:14px"':'')+'>'+(named?esc(initials(d)):ICON.truck)+'</div>'};
 const evName=e=>String(e||'Event').replace(/^CAM_/,'').replace(/_MESSAGE$/,'').replace(/_/g,' ').toLowerCase().replace(/^./,c=>c.toUpperCase()).replace('Hard breaking','Hard braking');
 const evClass=e=>/FATIGUE|DISTRACT|VIOLENT|COLLISION|PHONE|SMOK|SPEED/i.test(e)?'bad':'warn';
 const links=o=>JSON.stringify(o).match(/https?:[^"\\\\]+/g)||[];
@@ -620,22 +679,22 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy
 let fitted=false;
 
 async function get(p){const r=await fetch(p);const j=await r.json();if(j.error)throw new Error(j.error);return j}
-function showErr(e){$('err').style.display=e?'block':'none';$('err').textContent=e?'Problem talking to Azuga: '+e.message:''}
+function showErr(e){$('err').textContent=e?'Azuga is not answering right now ('+e.message+'). Showing the last data we have.':''}
 
 async function refresh(){
   try{
     const [v,l]=await Promise.all([vehicles.length?null:get('/api/vehicles'),get('/api/locations')]);
     if(v)vehicles=list(v);locs=list(l);showErr();
-    $('upd').textContent='Live · updated '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+    $('upd').textContent='Live · '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});$('live').classList.remove('down');
     render();
-  }catch(e){showErr(e);$('upd').textContent='Connection problem'}
+  }catch(e){showErr(e);$('upd').textContent='Reconnecting...';$('live').classList.add('down')}
 }
 function all(){
   const byId={};vehicles.forEach(v=>byId[vid(v)]=v);
   return locs.length?locs.map(l=>({...byId[vid(l)],...l})):vehicles;
 }
 let filt='all';
-const FILTERS={all:['All vehicles',()=>true,''],moving:['Moving',moving,'#16a34a'],parked:['Parked',r=>!moving(r),'#94a3b8'],nodriver:['No driver',r=>!/[a-z]/i.test(dname(r)),'#d97706']};
+const FILTERS={all:['All trucks',()=>true,''],moving:['Moving',moving,'var(--goDot)'],parked:['Parked',r=>!moving(r),'var(--idleDot)'],nodriver:['No driver',r=>!/[a-z]/i.test(dname(r)),'var(--warnDot)']};
 function rows(){
   const q=$('q').value.toLowerCase();
   return all().filter(r=>FILTERS[filt][1](r)&&(!q||(vname(r)+' '+dname(r)).toLowerCase().includes(q)))
@@ -645,14 +704,20 @@ function render(){
   const a=all(),rs=rows();
   $('sum').innerHTML=Object.entries(FILTERS).map(([k,[label,fn,c]])=>'<button data-f="'+k+'" aria-pressed="'+(filt===k)+'">'+(c?'<span class="dot" style="background:'+c+'"></span>':'')+label+' <b>'+a.filter(fn).length+'</b></button>').join('');
   $('sum').querySelectorAll('button').forEach(b=>b.onclick=()=>{filt=b.dataset.f;render()});
-  $('list').innerHTML=rs.length?rs.map(r=>{const d=dname(r),named=/[a-z]/i.test(d);return '<div class="card'+(sel==vid(r)?' sel':'')+'" data-id="'+esc(vid(r))+'"><div class="av'+(named?'':' none')+'">'+esc(initials(d))+'</div><div class="ci"><div class="top"><b>'+esc(vname(r))+'</b>'+status(r)+'</div><div class="d">'+(named?esc(d):'<span class="muted">No driver name'+(d?' · '+esc(d):'')+'</span>')+'</div><div class="a">'+esc(pick(r,'address','landmark')||'Location unavailable')+'</div></div></div>'}).join(''):'<div class="empty" style="padding:30px">'+(a.length?'No vehicles match. Clear the search or pick All vehicles above.':'No vehicles yet. Once Azuga reports your trucks, they appear here.')+'</div>';
+  const emptyMsg=!a.length?'<b>No trucks yet</b>Once Azuga reports your trucks, they show up here.'
+    :filt==='moving'&&!$('q').value?'<b>Every truck is parked</b>Nothing on the road right now.'
+    :filt==='nodriver'&&!$('q').value?'<b>Every truck has a driver</b>Nice and tidy.'
+    :'<b>No matches</b>Try a different search, or pick All trucks above.';
+  $('list').innerHTML=rs.length?rs.map(r=>{const d=dname(r),named=/[a-z]/i.test(d);return '<div class="card'+(sel==vid(r)?' sel':'')+'" data-id="'+esc(vid(r))+'" tabindex="0" role="button">'+avatar(d)+'<div class="ci"><div class="top"><b>'+tno(vid(r))+esc(vname(r))+'</b>'+status(r)+'</div><div class="d">'+(named?esc(d):'<span class="muted">No driver assigned</span>')+'</div><div class="a">'+esc(pick(r,'address','landmark')||'Location unavailable')+'</div></div></div>'}).join(''):'<div class="empty">'+emptyMsg+'</div>';
+  document.querySelectorAll('.card').forEach(c=>c.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();select(c.dataset.id)}});
   document.querySelectorAll('.card').forEach(c=>c.onclick=()=>select(c.dataset.id));
   const pts=[],shown=new Set(rs.map(vid));
   Object.entries(markers).forEach(([id,m])=>{if(!shown.has(id))map.removeLayer(m)});
   rs.forEach(r=>{const lat=+pick(r,'latitude','lat'),lng=+pick(r,'longitude','lng','lon');if(!lat||!lng)return;pts.push([lat,lng]);
-    const id=vid(r),isSel=sel==id,c=moving(r)?'#16a34a':'#0b2545';
+    const id=vid(r),isSel=sel==id,mv=moving(r),c=mv?'#16a34a':'#0a2c40';
     const m=markers[id]||(markers[id]=L.circleMarker([lat,lng]).on('click',()=>select(id)));if(!map.hasLayer(m))m.addTo(map);
-    m.setLatLng([lat,lng]).setStyle({radius:isSel?11:7,color:'#fff',weight:2,fillColor:isSel?'#0ea5b7':c,fillOpacity:1}).bindTooltip(esc(vname(r))+(dname(r)?' · '+esc(dname(r)):''));
+    m.setLatLng([lat,lng]).setStyle({radius:isSel?10:6.5,color:mv?'#16a34a':'#fff',weight:2,fillColor:isSel?'#0b7f9e':c,fillOpacity:1}).bindTooltip(esc(vname(r))+(/[a-z]/i.test(dname(r))?' · '+esc(dname(r)):''));
+    const el=m.getElement();if(el)el.classList.toggle('mv',mv);
     if(isSel)m.bringToFront();});
   if(!fitted&&pts.length){map.fitBounds(pts,{padding:[30,30]});fitted=true}
 }
@@ -660,26 +725,26 @@ async function select(id){
   sel=id;render();const r=all().find(x=>vid(x)==id)||{};
   if(markers[id])map.setView(markers[id].getLatLng(),13);
   const d=dname(r),named=/[a-z]/i.test(d),mmy=[r.year,r.make,r.model].filter(Boolean).join(' ');
-  $('detail').innerHTML='<div class="dh"><div class="av'+(named?'':' none')+'" style="width:46px;height:46px">'+esc(initials(d))+'</div><div><h2>'+esc(vname(r))+'</h2><p>'+(named?esc(d):'No driver name')+(mmy?' · '+esc(mmy):'')+'</p></div><div style="margin-left:auto">'+status(r)+'</div></div>'
+  $('detail').innerHTML='<div class="dh">'+avatar(d,1)+'<div><h2>'+tno(id)+esc(vname(r))+'</h2><p>'+(named?esc(d):'No driver assigned')+(mmy?' · '+esc(mmy):'')+'</p></div><div style="margin-left:auto">'+status(r)+'</div></div>'
    +'<div class="grid"><div class="kv"><span>Odometer</span><b>'+esc(odo(r))+'</b></div><div class="kv"><span>Speed</span><b>'+(moving(r)?Math.round(speed(r)):0)+' mph</b></div><div class="kv"><span>Group</span><b>'+esc(pick(r,'groupName')||'–')+'</b></div><div class="kv"><span>Plate</span><b>'+esc(pick(r,'licensePlate','licensePlateNo','plateNumber')||'–')+'</b></div></div>'
-   +'<div class="muted" style="display:flex;gap:6px;align-items:center">'+ICON.pin+esc(pick(r,'address','landmark')||'Location unavailable')+'</div>'
+   +'<div class="addr">'+ICON.pin+esc(pick(r,'address','landmark')||'Location unavailable')+'</div>'
    +atBox(id)
-   +'<h3>Maintenance</h3><div id="m" class="muted">Loading...</div><h3>Camera events · last 7 days</h3><div id="vids" class="muted">Loading...</div>'
+   +'<h3>Maintenance</h3><div id="m"><div class="sk" style="width:55%"></div></div><h3>Camera events, last 7 days</h3><div id="vids"><div class="sk" style="width:70%"></div><div class="sk" style="width:50%"></div></div>'
    +'<details><summary>All Azuga data for this vehicle</summary><pre>'+esc(JSON.stringify(r,null,2))+'</pre></details>';
   try{if(!maint.length)maint=list(await get('/api/maintenance'));
     const m=maint.filter(x=>vid(x)==id||vname(x)==vname(r));
-    $('m').innerHTML=m.length?m.map(x=>{const s=String(pick(x,'status','reminderStatus')||'');return '<div class="ev"><span class="pill '+(/over/i.test(s)?'bad':/up/i.test(s)?'warn':'idle')+'">'+esc(s||'Scheduled')+'</span><b>'+esc(pick(x,'serviceType','serviceName')||'Service')+'</b><span class="t">'+esc(when(pick(x,'nextServiceDate','dueDate')))+(pick(x,'nextServiceOdometer')?' · at '+esc(pick(x,'nextServiceOdometer'))+' mi':'')+'</span></div>'}).join(''):(r.maintenanceEnabled===false?'Maintenance tracking is turned off for this vehicle in Azuga.':'No maintenance scheduled.');
-  }catch(e){$('m').textContent=e.message;retry(id)}
+    $('m').innerHTML=m.length?m.map(x=>{const s=String(pick(x,'status','reminderStatus')||'');return '<div class="ev"><span class="pill '+(/over/i.test(s)?'bad':/up/i.test(s)?'warn':'idle')+'">'+esc(s||'Scheduled')+'</span><b>'+esc(pick(x,'serviceType','serviceName')||'Service')+'</b><span class="t">'+esc(when(pick(x,'nextServiceDate','dueDate')))+(pick(x,'nextServiceOdometer')?' · at '+esc(pick(x,'nextServiceOdometer'))+' mi':'')+'</span></div>'}).join(''):'<span class="muted">'+(r.maintenanceEnabled===false?'Maintenance tracking is off for this truck in Azuga.':'Nothing due.')+'</span>';
+  }catch(e){$('m').innerHTML='<span class="muted">'+esc(e.message)+'</span>';retry(id)}
   try{const v=list(await get('/api/videos?vehicleId='+encodeURIComponent(id)));
-    $('vids').innerHTML=v.length?v.map(x=>{const e=pick(x,'eventType','eventName');const clips=links(x).filter(u=>!/thumb/i.test(u));return '<div class="ev"><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="t">'+esc(when(pick(x,'eventTime','startTime')))+'</span><span class="muted">'+esc(pick(x,'driverName')||'')+'</span><span class="clips">'+clips.map((u,i)=>'<a class="btn" target="_blank" rel="noopener" href="'+esc(u)+'">'+ICON.play+'Clip '+(i+1)+'</a>').join('')+'</span></div>'}).join(''):'No camera events in the last 7 days.';
-  }catch(e){$('vids').textContent=e.message;retry(id)}
+    $('vids').innerHTML=v.length?v.map(x=>{const e=pick(x,'eventType','eventName');const clips=links(x).filter(u=>!/thumb/i.test(u));return '<div class="ev"><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="t">'+esc(when(pick(x,'eventTime','startTime')))+'</span><span class="muted">'+esc(pick(x,'driverName')||'')+'</span><span class="clips">'+clips.map((u,i)=>'<a class="btn" target="_blank" rel="noopener" href="'+esc(u)+'">'+ICON.play+'Clip '+(i+1)+'</a>').join('')+'</span></div>'}).join(''):'<span class="muted">No camera events this week. Safe driving.</span>';
+  }catch(e){$('vids').innerHTML='<span class="muted">'+esc(e.message)+'</span>';retry(id)}
 }
 const retried=new Set();function retry(id){if(retried.has(id))return;retried.add(id);setTimeout(()=>{if(sel==id)select(id)},30000)}
 // ---- Airtable (source of truth) ----
 let AT=null;
-async function loadAT(){try{AT=await get('/api/airtable')}catch(e){AT={connected:true,error:e.message,links:{}}}if(!$('vEdit').hidden)renderEdit()}
+async function loadAT(){try{AT=await get('/api/airtable')}catch(e){AT={connected:true,error:e.message,links:{}}}if(!$('vEdit').hidden)renderEdit();if(vehicles.length||locs.length)render()}
 const link=id=>AT&&AT.links&&AT.links[id];
-const docBtns=t=>{const d=[...t.insCard.map(f=>['Insurance card',f]),...t.files.map(f=>[f.name,f])];return d.length?'<div class="docs">'+d.map(([n,f])=>'<a class="btn" target="_blank" rel="noopener" href="'+esc(f.url)+'">'+ICON.file+esc(n)+'</a>').join('')+'</div>':'<div class="muted" style="margin-top:8px">No insurance card or files in Airtable yet.</div>'};
+const docBtns=t=>{const d=[...t.insCard.map(f=>['Insurance card',f]),...t.files.map(f=>[f.name,f])];return d.length?'<div class="docs">'+d.map(([n,f])=>'<a class="btn" target="_blank" rel="noopener" href="'+esc(f.url)+'">'+ICON.file+esc(n)+'</a>').join('')+'</div>':'<div class="muted" style="margin-top:8px">No insurance card or other files in Airtable yet.</div>'};
 const drvLine=d=>d?esc(d.name)+(d.license?' · License '+esc(d.state?d.state+' ':'')+esc(d.license):''):'None';
 function atBox(id){
   if(!AT)return '<div class="at off">Loading Airtable...</div>';
@@ -688,7 +753,7 @@ function atBox(id){
   const L=link(id);
   if(!L||!L.linked)return '<div class="at off">'+(L&&L.dupe?'Two Airtable trucks share this VIN. Fix the duplicate in Airtable to link it.':'Not linked to Airtable. This VIN is not in your Trucks table.')+'</div>';
   const t=L.truck;
-  return '<div class="at"><h4>From Airtable'+(t.truckNo?' · Truck #'+esc(t.truckNo):'')+'</h4><div class="kvs">'
+  return '<div class="at"><h4>Paperwork from Airtable</h4><div class="kvs">'
    +'<div><span>Driver</span>'+drvLine(t.driver)+'</div><div><span>Plate</span>'+esc(t.plate||'–')+'</div><div><span>Insurance policy</span>'+esc(t.policy||'–')+'</div>'
    +'<div><span>Reg. renewal #</span>'+esc(t.regRenew||'–')+'</div><div><span>EZ Pass</span>'+esc(t.ezpass||'–')+'</div><div><span>VIN</span>'+esc(t.vin||'–')+'</div></div>'+docBtns(t)
    +(Object.keys(L.changes||{}).length?'<div class="note">Azuga is out of date for this truck. Open it in Edit vehicles to sync.</div>':'')+'</div>';
@@ -715,7 +780,7 @@ function renderEdit(){
   $('edList').innerHTML=rs.length?rs.map(v=>{const m=missing(v);return '<div class="eli'+(edSel==vid(v)?' sel':'')+'" data-id="'+esc(vid(v))+'"><div><b>'+esc(vname(v))+'</b><small>'+esc(/[a-z]/i.test(dname(v))?dname(v):'No driver')+(pick(v,'licensePlateNo','licensePlate')?' · '+esc(pick(v,'licensePlateNo','licensePlate')):'')+'</small></div>'+(outOfSync(v)?'<span class="pill warn">Sync</span>':m.length?'<span class="pill warn">Missing '+m.length+'</span>':'<span class="pill go" aria-label="Complete">'+ICON.check+'</span>')+'</div>'}).join(''):'<div class="empty" style="padding:30px">'+(vehicles.length?'No trucks match.':'Loading...')+'</div>';
   document.querySelectorAll('.eli').forEach(e=>e.onclick=()=>openEd(e.dataset.id));
   const n=vehicles.filter(outOfSync).length;
-  if(!syncing)$('syncBar').innerHTML=!AT?'':!AT.connected?'<span class="muted">Airtable not connected</span>':AT.error?'<span class="muted">Airtable unavailable</span>':n?'<button class="btn2 pri" id="syncAll" style="width:100%">Sync '+n+' truck'+(n>1?'s':'')+' from Airtable → Azuga</button>':'<span style="color:var(--go)">✓ Azuga matches Airtable</span>';
+  if(!syncing)$('syncBar').innerHTML=!AT?'':!AT.connected?'<span class="muted">Airtable not connected</span>':AT.error?'<span class="muted">Airtable unavailable</span>':n?'<button class="btn2 pri" id="syncAll" style="width:100%">Sync '+n+' truck'+(n>1?'s':'')+' from Airtable → Azuga</button>':'<span style="color:var(--go);display:inline-flex;gap:6px;align-items:center">'+ICON.check+'Azuga matches Airtable</span>';
   if($('syncAll'))$('syncAll').onclick=syncAll;
 }
 let syncing=false;
@@ -818,7 +883,7 @@ $('newDrv').onsubmit=async e=>{
 loadAT();
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
-  ['vMap','vEdit','vDrv'].forEach(v=>$(v).hidden=b.dataset.v!==v);
+  ['vMap','vEdit','vDrv'].forEach(v=>$(v).hidden=b.dataset.v!==v);$('sum').hidden=b.dataset.v!=='vMap';
   if(b.dataset.v==='vEdit')renderEdit();else if(b.dataset.v==='vDrv'){if(!PEOPLE)loadPeople();else renderDrivers()}else map.invalidateSize();
 });
 $('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers()};
