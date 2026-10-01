@@ -988,8 +988,8 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('media').open&&s
 // Camera events: Azuga gives video links when a clip has uploaded, otherwise still photos from both cameras
 let VIDS=[];
 function evMedia(x){
-  const videos=(x.videoLinks||[]).filter(v=>v&&v.videoLink).map(v=>({name:v.videoName||(v.videoIndex===2?'Driver facing':'Road facing'),url:v.videoLink,poster:v.thumbnailLink||''}));
-  const snaps=(x.snapshotLinks||[]).filter(s=>s&&s.snapshotLink).map(s=>({name:s.snapshotName||(s.snapshotIndex===2?'Driver facing':'Road facing'),url:s.snapshotLink}));
+  const videos=(x.videoLinks||[]).flat().filter(v=>v&&v.videoLink).map(v=>({name:v.videoName||(v.videoIndex===2?'Driver facing':'Road facing'),url:v.videoLink,poster:v.thumbnailLink||''}));
+  const snaps=(x.snapshotLinks||[]).flat().filter(s=>s&&s.snapshotLink).map(s=>({name:s.snapshotName||(s.snapshotIndex===2?'Driver facing':'Road facing'),url:s.snapshotLink}));
   const via=u=>'/api/media?u='+encodeURIComponent(u);
   videos.forEach(v=>{v.url=via(v.url);if(v.poster)v.poster=via(v.poster)});snaps.forEach(s=>s.url=via(s.url));
   snaps.sort((a,b)=>/road/i.test(b.name)-/road/i.test(a.name));
