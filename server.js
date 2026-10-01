@@ -19,9 +19,9 @@ async function getToken() {
   return token;
 }
 
-async function azuga(path, body = {}) {
+async function azuga(path, body = {}, method = 'POST') {
   const r = await fetch(API + path, {
-    method: 'POST',
+    method,
     headers: { Authorization: 'Bearer ' + (await getToken()), 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
@@ -69,6 +69,50 @@ const routes = {
   },
 };
 
+// Same "first array we find" helper the page uses, for Azuga's varying response wrappers
+const list = x => Array.isArray(x) ? x : x && typeof x === 'object' ? (Object.values(x).map(list).find(a => a.length) || []) : [];
+
+// Edit tab -> Azuga. Azuga's update REPLACES the whole vehicle record, so we fetch the
+// current record fresh, change only the edited fields, and send everything else back as-is.
+async function updateVehicle(b) {
+  const id = String(b.trackeeId || '');
+  const cur = list(await azuga('/trackees.json?limit=100&offset=0')).find(v => v.trackeeId === id);
+  if (!cur) throw new Error('Vehicle not found in Azuga.');
+  const body = { ...cur }, changed = [];
+  if (b.name !== undefined) {
+    const n = String(b.name).trim();
+    if (!n || n.length > 100) throw new Error('Name must be 1-100 characters.');
+    body.name = n; changed.push('name');
+  }
+  if (b.licensePlateNo !== undefined) {
+    const v = String(b.licensePlateNo).trim().toUpperCase();
+    if (!/^[A-Z0-9 -]{0,20}$/.test(v)) throw new Error('Plate can only use letters, numbers, spaces and dashes.');
+    body.licensePlateNo = v; changed.push('plate');
+  }
+  if (b.vin !== undefined) {
+    const v = String(b.vin).trim().toUpperCase();
+    if (v && !/^[A-HJ-NPR-Z0-9]{17}$/.test(v)) throw new Error('VIN must be 17 letters/numbers (no I, O or Q).');
+    body.vin = v; changed.push('VIN');
+  }
+  if (b.odometer !== undefined) {
+    const o = Number(b.odometer);
+    if (!Number.isInteger(o) || o < 0 || o > 2000000) throw new Error('Odometer must be a whole number of miles.');
+    body.odometerReading = o; body.currentOdometerReading = o; changed.push('odometer=' + o);
+  }
+  if (!changed.length) throw new Error('Nothing to change.');
+  const r = await azuga('/trackees/' + encodeURIComponent(id) + '.json', body, 'PUT');
+  if (r && r.error) throw new Error('Azuga rejected the change: ' + JSON.stringify(r.error).slice(0, 200));
+  cache.delete('vehicles'); cache.delete('locations');
+  console.log(new Date().toISOString(), 'Updated', cur.name, '->', changed.join(', '));
+  return { ok: true, changed };
+}
+
+async function readJson(req) {
+  let s = '';
+  for await (const c of req) { s += c; if (s.length > 10000) throw new Error('Request too large.'); }
+  return JSON.parse(s || '{}');
+}
+
 if (process.argv[2] === 'test') {
   const s = fmt(new Date(2026, 0, 5, 13, 7, 9));
   if (s !== '2026-01-05 01:07:09 PM') throw new Error('fmt broken: ' + s);
@@ -96,6 +140,17 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
+  if (url.pathname === '/api/update') {
+    // JSON-only + POST-only, so another website can't trigger a change with a plain form
+    if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
+    try {
+      const out = await updateVehicle(await readJson(req));
+      res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(out));
+    } catch (e) {
+      console.error('Update failed:', e.message);
+      res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: e.message }));
+    }
+  }
   const route = routes[url.pathname];
   if (!route) { res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(PAGE); }
   try {
@@ -130,6 +185,18 @@ header{background:linear-gradient(90deg,var(--navy),#13406e);color:#fff;padding:
 .live{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:13px;opacity:.9}
 .dot{width:8px;height:8px;border-radius:50%;background:#4ade80;box-shadow:0 0 0 0 rgba(74,222,128,.7);animation:pulse 2s infinite}
 @keyframes pulse{70%{box-shadow:0 0 0 8px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}
+.tabs{display:flex;gap:4px;background:rgba(255,255,255,.1);padding:4px;border-radius:10px}
+.tabs button{font:inherit;font-weight:600;font-size:13px;color:#fff;background:none;border:0;padding:7px 14px;border-radius:7px;cursor:pointer;opacity:.75}
+.tabs button.on{background:#fff;color:var(--navy);opacity:1}
+#vEdit{padding:16px 24px 24px}
+.panel{background:var(--card);border-radius:var(--r);box-shadow:0 1px 2px rgba(15,27,45,.06);overflow:auto}
+.panel .intro{padding:16px 20px;border-bottom:1px solid var(--line);color:var(--muted)}.panel .intro b{color:var(--ink)}
+table{width:100%;border-collapse:collapse}th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+td input{font:inherit;width:100%;min-width:110px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#fff}
+td input:focus{outline:2px solid var(--accent);border-color:transparent}td input.dirty{background:#fffbeb;border-color:#f59e0b}
+.save{font:inherit;font-weight:600;font-size:13px;color:#fff;background:var(--navy);border:0;padding:8px 14px;border-radius:8px;cursor:pointer}.save:disabled{opacity:.5;cursor:default}
+.msg{font-size:12px;margin-top:4px;max-width:220px}.msg.ok{color:var(--go)}.msg.bad{color:var(--bad)}
 #err{background:var(--badBg);color:var(--bad);padding:10px 24px;display:none;font-size:13px}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:16px 24px 0}
 .stat{background:var(--card);border-radius:var(--r);padding:14px 16px;box-shadow:0 1px 2px rgba(15,27,45,.06)}
@@ -165,16 +232,19 @@ details{margin-top:18px}summary{cursor:pointer;color:var(--muted);font-size:12px
  <div class="brand"><div class="logo">MP</div><div>Fleet Dashboard<small>Millennial Pools</small></div></div>
  <div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search vehicle or driver"></div>
  <div class="live"><span class="dot"></span><span id="upd">Connecting...</span></div>
+<nav class="tabs"><button data-v="vMap" class="on">Live map</button><button data-v="vEdit">Edit vehicles</button></nav>
 </header>
 <div id="err"></div>
-<section class="stats">
+<div id="vMap"><section class="stats">
  <div class="stat"><span>Vehicles</span><b id="sTotal">–</b></div>
  <div class="stat"><span>Moving now</span><b id="sMoving" style="color:var(--go)">–</b></div>
  <div class="stat"><span>Parked</span><b id="sParked">–</b></div>
  <div class="stat"><span>No driver assigned</span><b id="sNoDriver" style="color:var(--warn)">–</b></div>
 </section>
 <main><div id="list"><div class="empty">Loading vehicles...</div></div>
-<div id="right"><div id="map"></div><div id="detail"><div class="empty">Select a vehicle to see its driver, maintenance and camera footage.</div></div></div></main>
+<div id="right"><div id="map"></div><div id="detail"><div class="empty">Select a vehicle to see its driver, maintenance and camera footage.</div></div></div></main></div>
+<div id="vEdit" hidden><div class="panel"><div class="intro"><b>Edit vehicle details.</b> Changes are sent straight to Azuga. Edited boxes turn yellow; click Save on that row to send them. Leave odometer blank to keep the current reading.</div>
+<table><thead><tr><th>Vehicle name</th><th>Driver</th><th>License plate</th><th>VIN</th><th>Odometer (miles)</th><th></th></tr></thead><tbody id="editRows"><tr><td colspan="6" class="muted">Loading...</td></tr></tbody></table></div></div>
 <script>
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
@@ -255,6 +325,30 @@ async function select(id){
   }catch(e){$('vids').textContent=e.message;retry(id)}
 }
 const retried=new Set();function retry(id){if(retried.has(id))return;retried.add(id);setTimeout(()=>{if(sel==id)select(id)},30000)}
-$('q').oninput=render;
+function renderEdit(){
+  const q=$('q').value.toLowerCase();
+  const vs=vehicles.filter(v=>!q||(vname(v)+' '+dname(v)).toLowerCase().includes(q)).sort((a,b)=>vname(a).localeCompare(vname(b)));
+  $('editRows').innerHTML=vs.length?vs.map(v=>'<tr data-id="'+esc(vid(v))+'" data-name="'+esc(vname(v))+'"><td><input name="name" value="'+esc(vname(v))+'" maxlength="100"></td><td class="muted">'+esc(dname(v)||'No driver')+'</td><td><input name="licensePlateNo" value="'+esc(pick(v,'licensePlateNo','licensePlate')||'')+'" maxlength="20"></td><td><input name="vin" value="'+esc(v.vin||'')+'" maxlength="17"></td><td><input name="odometer" type="number" min="0" step="1" placeholder="'+esc(odo(v))+'"></td><td><button class="save">Save</button><div class="msg"></div></td></tr>').join(''):'<tr><td colspan="6" class="muted">No vehicles match your search.</td></tr>';
+}
+$('editRows').addEventListener('input',e=>{if(e.target.tagName==='INPUT')e.target.classList.toggle('dirty',e.target.value!==e.target.defaultValue)});
+$('editRows').addEventListener('click',async e=>{
+  if(!e.target.classList.contains('save'))return;
+  const tr=e.target.closest('tr'),msg=tr.querySelector('.msg'),body={trackeeId:tr.dataset.id},lines=[];
+  tr.querySelectorAll('input').forEach(i=>{if(i.value!==i.defaultValue){body[i.name]=i.name==='odometer'?Number(i.value):i.value;lines.push(i.closest('table').querySelectorAll('th')[i.closest('td').cellIndex].textContent+': '+i.value)}});
+  if(!lines.length){msg.className='msg';msg.textContent='Nothing changed.';return}
+  if(!confirm('Update '+tr.dataset.name+' in Azuga?\\n\\n'+lines.join('\\n')))return;
+  e.target.disabled=true;msg.className='msg';msg.textContent='Saving to Azuga...';
+  try{const r=await fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(j.error)throw new Error(j.error);
+    tr.querySelectorAll('input').forEach(i=>{if(i.name!=='odometer')i.defaultValue=i.value;else i.value='';i.classList.remove('dirty')});
+    msg.className='msg ok';msg.textContent='Saved to Azuga ✓';vehicles=[];refresh();
+  }catch(err){msg.className='msg bad';msg.textContent=err.message}
+  e.target.disabled=false;
+});
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
+  $('vMap').hidden=b.dataset.v!=='vMap';$('vEdit').hidden=b.dataset.v!=='vEdit';
+  if(b.dataset.v==='vEdit')renderEdit();else map.invalidateSize();
+});
+$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit()};
 refresh();setInterval(refresh,30000);
 </script></body></html>`;
