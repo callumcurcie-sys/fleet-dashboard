@@ -88,7 +88,12 @@ const list = x => Array.isArray(x) ? x : x && typeof x === 'object' ? (Object.va
 const rawDrivers = () => cached('rawDrivers', 600, async () => list(await azuga('/users.json?limit=500&offset=0&userType=driver', {})));
 const drivers = () => cached('drivers', 600, async () =>
   (await rawDrivers())
-    .map(u => ({ id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, ''), email: u.email || '' }))
+    .map(u => {
+      const strs = Object.values(u).filter(v => typeof v === 'string');
+      return { id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, ''),
+        email: u.email || strs.find(v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) || '',
+        phone: strs.find(v => /^\+?[\d\s().-]{10,}$/.test(v) && v.replace(/\D/g, '').length >= 10) || '' };
+    })
     .filter(u => u.id && /[a-z]/i.test(u.name))
     .sort((x, y) => x.name.localeCompare(y.name)));
 
@@ -183,7 +188,7 @@ const F = { vin: 'fldT4fSSnXnZuj2Jr', year: 'fldqjqyAK1ZJfn0oT', make: 'fldOhan3
   insCard: 'fldH0Pe6EKyQEBmMR', files: 'fldS5YJgDrLDbxSiK', regRenew: 'fldjFFBZ0UoO4SUXV', ezpass: 'fld1utE81nDdDiqgi', active: 'fldBpQ0MA5cD9YJ06' };
 // Drivers. Date of birth is only ever written (new driver form), never read or shown.
 const D = { name: 'fldMrVtrXN6WDaOjj', license: 'fldcSIYqy5FCEC0Xn', state: 'fld1NdVP4v6QcckK2', pic: 'fldZeCHS22kI7Ythi',
-  policy: 'fldVo5IrWedsKvumK', trucks: 'fld47HPqHRrw9GUL7', notes: 'fldSnexzpxIG22gF0' };
+  policy: 'fldVo5IrWedsKvumK', trucks: 'fld47HPqHRrw9GUL7', notes: 'fldSnexzpxIG22gF0', status: 'fldVuSDYSZVHk0fWN' };
 const D_DOB = 'fldFMJ06wrdGolZkS';
 
 async function airtable(path, opt = {}) {
@@ -214,7 +219,8 @@ const atData = () => cached('airtable', 120, async () => {
   const [trucks, drv] = await Promise.all([atAll(AT_TRUCKS, Object.values(F)), atAll(AT_DRIVERS, Object.values(D))]);
   const att = a => (a || []).map(x => ({ name: x.filename, url: x.url, type: x.type, thumb: x.thumbnails?.small?.url }));
   const drivers = drv.map(r => ({ id: r.id, name: clean(r.fields[D.name]), license: clean(r.fields[D.license]), state: clean(r.fields[D.state]),
-    policy: clean(r.fields[D.policy]?.name ?? r.fields[D.policy]), notes: clean(r.fields[D.notes]), truckIds: r.fields[D.trucks] || [], pic: att(r.fields[D.pic]) }));
+    policy: clean(r.fields[D.policy]?.name ?? r.fields[D.policy]), notes: clean(r.fields[D.notes]), truckIds: r.fields[D.trucks] || [], pic: att(r.fields[D.pic]),
+    status: clean(r.fields[D.status]?.name ?? r.fields[D.status]) || 'Active' }));
   const byId = Object.fromEntries(drivers.map(d => [d.id, d]));
   return {
     drivers,
@@ -327,11 +333,11 @@ async function people() {
   const truckLabel = Object.fromEntries(at.trucks.map(t => [t.id, (t.truckNo ? '#' + t.truckNo.split(/[ ~(]/)[0] + ' ' : '') + [t.year, t.make, t.model].filter(Boolean).join(' ')]));
   const inAz = new Set((az || []).map(d => normName(d.name)));
   const named = at.drivers.filter(d => d.name);
-  const azDupes = az ? (await driverGroups()).filter(g => g.ids.length > 1).map(g => ({ name: g.name, accounts: g.accounts.map(a => ({ email: a.email, trucks: a.trucks })) })) : [];
+  const azDupes = az ? (await driverGroups()).filter(g => g.ids.length > 1).map(g => ({ name: g.name, accounts: g.accounts.map(a => ({ email: a.email, phone: a.phone, ref: a.id.slice(-4), trucks: a.trucks })) })) : [];
   return { connected: true, azugaOk: !!az, azDupes, dupes: dupeGroups(named),
     blank: at.drivers.filter(d => !d.name).map(d => ({ id: d.id, license: d.license, policy: d.policy, trucks: d.truckIds.map(id => truckLabel[id]).filter(Boolean) })),
     drivers: named.sort((a, b) => a.name.localeCompare(b.name)).map(d => ({
-    id: d.id, name: d.name, license: d.license, state: d.state, policy: d.policy, notes: d.notes, pic: d.pic,
+    id: d.id, name: d.name, license: d.license, state: d.state, policy: d.policy, notes: d.notes, pic: d.pic, status: d.status,
     trucks: d.truckIds.map(id => truckLabel[id]).filter(Boolean), inAzuga: inAz.has(normName(d.name)) })) };
 }
 
@@ -365,6 +371,19 @@ async function mergeDrivers(b) {
   cache.delete('airtable');
   console.log(new Date().toISOString(), 'Merged drivers into', keep.name, '- removed', remove.length);
   return { ok: true, kept: keep.name, removed: remove.length };
+}
+
+// Mark drivers Active / Inactive in Airtable (10 records per request is Airtable's limit).
+async function setDriverStatus(b) {
+  const status = b.status === 'Inactive' ? 'Inactive' : b.status === 'Active' ? 'Active' : null;
+  if (!status) throw new Error('Status must be Active or Inactive.');
+  const known = new Set((await atData()).drivers.map(d => d.id)), ids = [...new Set(b.ids || [])];
+  if (!ids.length || ids.some(id => !known.has(id))) throw new Error('Some of those drivers were not found. Refresh and try again.');
+  for (let i = 0; i < ids.length; i += 10)
+    await airtable(AT_DRIVERS, { method: 'PATCH', body: JSON.stringify({ records: ids.slice(i, i + 10).map(id => ({ id, fields: { [D.status]: status } })) }) });
+  cache.delete('airtable');
+  console.log(new Date().toISOString(), 'Marked', ids.length, 'driver(s)', status);
+  return { ok: true, count: ids.length, status };
 }
 
 // Only records with no name can be deleted outright (leftover blank rows).
@@ -483,7 +502,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver };
+  const POSTS = { '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   if (POSTS[url.pathname]) {
     // JSON-only + POST-only, so another website can't trigger a change with a plain form
     if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
@@ -585,7 +604,7 @@ main{display:grid;grid-template-columns:350px 1fr;gap:14px;padding:12px 24px 24p
 .pill .ic{width:12px;height:12px}
 #right{display:grid;grid-template-rows:minmax(260px,50%) 1fr;gap:14px;min-height:0}
 #map{border-radius:var(--r);box-shadow:var(--sh);background:#dfe7e6}
-.leaflet-tile-pane{filter:saturate(.85) contrast(1.02)}
+.leaflet-tile-pane{filter:saturate(.55) sepia(.08) brightness(1.03) contrast(.96)}
 #map{position:relative}
 /* Truck pins: number labels, colored by status */
 .tm{background:none;border:0}
@@ -672,7 +691,7 @@ tbody tr:hover td{background:#fcfbf8}
 .crewhead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
 .crewhead h2{margin:0;font-size:20px;font-weight:700;letter-spacing:-.01em}.crewhead p{margin:2px 0 0;font-size:13px}
 .nd{padding:18px 20px;margin-bottom:12px}
-.rrow{display:grid;grid-template-columns:36px minmax(160px,1.3fr) minmax(140px,1fr) 150px;gap:14px;align-items:center;padding:11px 18px;border-bottom:1px solid var(--line)}
+.rrow{display:grid;grid-template-columns:18px 36px minmax(160px,1.3fr) minmax(140px,1fr) 150px;gap:14px;align-items:center;padding:11px 18px;border-bottom:1px solid var(--line)}
 .rrow:last-child{border-bottom:0}.rrow:hover{background:#fcfbf8}
 .rrow.off{opacity:.55}.rrow.off:hover{opacity:.8}
 .mav{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:12px;background:var(--shallow);color:var(--poolInk)}
@@ -683,7 +702,7 @@ tbody tr:hover td{background:#fcfbf8}
 .tag{font-size:11px;font-weight:600;color:var(--muted);border:1px solid var(--line2);border-radius:5px;padding:0 5px;margin-left:6px;vertical-align:1px}
 .link{font:inherit;font-size:13px;font-weight:600;color:var(--poolInk);background:none;border:0;padding:0;cursor:pointer;text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--shallow2)}
 .link:hover{text-decoration-color:currentColor}
-.rrow .azf{grid-column:2/-1;margin:2px 0 4px;display:flex;gap:6px;flex-wrap:wrap}
+.rrow .azf{grid-column:3/-1;margin:2px 0 4px;display:flex;gap:6px;flex-wrap:wrap}
 .rrow .azf input{flex:1 1 160px;width:auto}
 .addrow{display:flex;align-items:center;gap:10px;width:100%;padding:13px 18px;font:inherit;font-weight:600;color:var(--poolInk);background:none;border:0;cursor:pointer;text-align:left}
 .addrow:hover{background:var(--shallow)}.addrow .mav{background:none;border:1.5px dashed var(--shallow2);font-size:18px;font-weight:500}
@@ -692,7 +711,10 @@ tbody tr:hover td{background:#fcfbf8}
 .dupg{background:#fff;border-radius:10px;padding:10px 12px;margin-top:10px}
 .dupg label{display:flex;gap:8px;align-items:baseline;padding:4px 0;cursor:pointer}.dupg label span{color:var(--muted)}
 .dupg .edb{margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
-@media(max-width:700px){.rrow{grid-template-columns:36px minmax(0,1fr) auto;row-gap:2px}.rt{grid-column:2/-1;grid-row:2;font-size:12px}.rs{grid-row:1;grid-column:3}.rrow .azf{grid-row:3}}
+@media(max-width:700px){.rrow{grid-template-columns:18px 36px minmax(0,1fr) auto;row-gap:2px}.rt{grid-column:3/-1;grid-row:2;font-size:12px}.rs{grid-row:1;grid-column:4}.rrow .azf{grid-row:3}}
+.rrow.picked{background:var(--shallow)}.rrow.picked.off{opacity:.8}
+.selbar{position:sticky;bottom:16px;z-index:5;margin:12px auto 0;max-width:640px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--deep);color:#fff;border-radius:12px;padding:10px 14px;box-shadow:0 8px 24px rgba(10,44,64,.3)}
+.selbar b{font-weight:700}.selbar .btn2{background:#fff;border-color:#fff}.selbar .link{color:#cfe3ec}.selbar .msg{color:#fde68a}
 .azf{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .azf input{font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line2);border-radius:7px;min-width:0;width:170px}
 .msg{font-size:12px;margin-top:4px;max-width:240px}.msg.ok{color:var(--go)}.msg.bad{color:var(--bad)}
@@ -957,8 +979,10 @@ let PEOPLE=null;
 async function loadPeople(){try{PEOPLE=await get('/api/people')}catch(e){PEOPLE={connected:true,error:e.message,drivers:[]}}renderDrivers()}
 const post=async(u,b)=>{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.error)throw new Error(j.error);return j};
 let dfilt='all';
-const inactive=d=>/inactive/i.test(d.policy);
-const DF={all:['Everyone',()=>true],truck:['On a truck',d=>d.trucks.length],free:['No truck',d=>!d.trucks.length&&!inactive(d)],noaz:['Not in Azuga',d=>PEOPLE&&PEOPLE.azugaOk&&!d.inAzuga&&!inactive(d)]};
+// The Airtable Status field decides (blank counts as Active).
+const inactive=d=>d.status==='Inactive';
+const picked=new Set();
+const DF={all:['Everyone',()=>true],truck:['On a truck',d=>d.trucks.length],free:['No truck',d=>!d.trucks.length&&!inactive(d)],noaz:['Not in Azuga',d=>PEOPLE&&PEOPLE.azugaOk&&!d.inAzuga&&!inactive(d)],off:['Inactive',inactive]};
 function renderDupes(){
   const P=PEOPLE,by=Object.fromEntries(P.drivers.map(d=>[d.id,d])),groups=(P.dupes||[]).map(g=>g.map(id=>by[id]).filter(Boolean)).filter(g=>g.length>1),blank=P.blank||[];
   const azd=P.azDupes||[];
@@ -969,14 +993,28 @@ function renderDupes(){
       +'<div class="edb"><span class="msg"></span><span style="flex:1"></span><button class="btn2 pri mergeGo">Merge and delete extras</button></div></div>').join(''):'')
     +(blank.length?'<h4 style="margin-top:'+(groups.length?'14px':'0')+'">'+blank.length+' blank record'+(blank.length>1?'s':'')+'</h4>These have no name in Airtable.'
     +blank.map(d=>'<div class="dupg" data-id="'+esc(d.id)+'" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>'+esc([d.license,d.policy,d.trucks.join(', ')].filter(Boolean).join(' · ')||'Empty')+'</span><span style="flex:1"></span><span class="msg"></span><button class="btn2 delBlank">Delete</button></div>').join(''):'')
-    +(azd.length?'<h4 style="margin-top:'+(groups.length||blank.length?'14px':'0')+'">'+azd.length+' driver'+(azd.length>1?'s have':' has')+' more than one Azuga login</h4>The truck dropdown already shows each person once. To tidy Azuga itself, delete the unused logins in Azuga (Admin, then Users).'
-      +azd.map(g=>'<div class="dupg"><b>'+esc(g.name)+'</b>'+g.accounts.map((a,i)=>'<div style="display:flex;gap:8px;padding-top:4px"><span>'+esc(a.email||'No email')+'</span><span class="muted">'+(a.trucks?'on '+a.trucks+' truck'+(a.trucks>1?'s':'')+(i===0?' · keep this one':''):'not on any truck')+'</span></div>').join('')+'</div>').join(''):'')+'</div>';
+    +(azd.length?'<details style="margin-top:'+(groups.length||blank.length?'14px':'0')+'"><summary style="font-size:13px;color:var(--warn);font-weight:700">'+azd.length+' driver'+(azd.length>1?'s have':' has')+' more than one Azuga login (show)</summary>'
+      +'<p style="margin:6px 0 0">The truck dropdown already shows each person once, so nothing is broken. To tidy Azuga itself, delete the logins marked "not on any truck" in Azuga (Admin, then Users).</p>'
+      +azd.map(g=>'<div class="dupg"><b>'+esc(g.name)+'</b>'+g.accounts.map((a,i)=>'<div style="display:flex;gap:10px;padding-top:4px;flex-wrap:wrap"><span>'+esc(a.email||a.phone||('Login ending in '+a.ref))+'</span><span class="muted">'+(a.trucks?'on '+a.trucks+' truck'+(a.trucks>1?'s':'')+(i===0?' · keep this one':''):'not on any truck')+'</span></div>').join('')+'</div>').join('')+'</details>':'')+'</div>';
   document.querySelectorAll('.mergeGo').forEach(b=>b.onclick=async()=>{const box=b.closest('.dupg'),g=groups[box.dataset.g],keep=box.querySelector('input:checked').value,rm=g.filter(d=>d.id!==keep),m=box.querySelector('.msg');
     if(!confirm('Keep '+by[keep].name+' and delete '+rm.length+' duplicate'+(rm.length>1?'s':'')+' from Airtable?\\n\\nTrucks and missing details are copied to the kept record first. This can not be undone.'))return;
     b.disabled=true;m.textContent='Merging...';try{await post('/api/driver/merge',{keepId:keep,removeIds:rm.map(d=>d.id)});await loadPeople()}catch(e){m.className='msg bad';m.textContent=e.message;b.disabled=false}});
   document.querySelectorAll('.delBlank').forEach(b=>b.onclick=async()=>{const box=b.closest('.dupg'),m=box.querySelector('.msg');
     if(!confirm('Delete this blank record from Airtable? This can not be undone.'))return;
     b.disabled=true;try{await post('/api/driver/delete',{id:box.dataset.id});await loadPeople()}catch(e){m.className='msg bad';m.textContent=e.message;b.disabled=false}});
+}
+function renderSelbar(){
+  let bar=$('selbar');
+  if(!picked.size){if(bar)bar.remove();return}
+  if(!bar){bar=document.createElement('div');bar.id='selbar';bar.className='selbar';$('vDrv').appendChild(bar)}
+  const ds=PEOPLE.drivers.filter(d=>picked.has(d.id)),anyOn=ds.some(d=>!inactive(d)),anyOff=ds.some(inactive);
+  bar.innerHTML='<b>'+picked.size+' selected</b><span style="flex:1"></span><span class="msg"></span>'+(anyOn?'<button class="btn2" data-s="Inactive">Make inactive</button>':'')+(anyOff?'<button class="btn2" data-s="Active">Make active</button>':'')+'<button class="link" id="selClear">Clear</button>';
+  $('selClear').onclick=()=>{picked.clear();renderDrivers()};
+  bar.querySelectorAll('[data-s]').forEach(b=>b.onclick=async()=>{const st=b.dataset.s,ids=ds.filter(d=>st==='Inactive'?!inactive(d):inactive(d)).map(d=>d.id),m=bar.querySelector('.msg');
+    if(!confirm('Mark '+ids.length+' driver'+(ids.length>1?'s':'')+' '+st.toLowerCase()+' in Airtable?'))return;
+    bar.querySelectorAll('button').forEach(x=>x.disabled=true);m.textContent='Saving...';
+    try{await post('/api/driver/status',{ids,status:st});picked.clear();await loadPeople()}
+    catch(e){m.textContent=e.message;bar.querySelectorAll('button').forEach(x=>x.disabled=false)}});
 }
 function renderDrivers(){
   if(!PEOPLE)return;
@@ -990,7 +1028,8 @@ function renderDrivers(){
   renderDupes();
   const q=$('q').value.toLowerCase(),ds=all.filter(d=>DF[dfilt][1](d)&&(!q||(d.name+' '+d.trucks.join(' ')+' '+d.license).toLowerCase().includes(q)))
     .sort((a,b)=>inactive(a)-inactive(b)||a.name.localeCompare(b.name));
-  $('drvRows').innerHTML=(ds.length?ds.map(d=>'<div class="rrow'+(inactive(d)?' off':'')+'" data-id="'+esc(d.id)+'"><div class="mav">'+esc(initials(d.name))+'</div>'
+  [...picked].forEach(id=>{if(!all.some(d=>d.id===id))picked.delete(id)});
+  $('drvRows').innerHTML=(ds.length?ds.map(d=>'<div class="rrow'+(inactive(d)?' off':'')+(picked.has(d.id)?' picked':'')+'" data-id="'+esc(d.id)+'"><input type="checkbox" class="pick" aria-label="Select '+esc(d.name)+'"'+(picked.has(d.id)?' checked':'')+'><div class="mav">'+esc(initials(d.name))+'</div>'
     +'<div class="rn"><b>'+esc(d.name)+(inactive(d)?'<span class="tag">Inactive</span>':'')+'</b><span>'+esc([d.license&&((d.state?d.state+' ':'')+d.license),!inactive(d)&&d.policy].filter(Boolean).join(' · ')||'No license on file')+(d.notes?' · '+esc(d.notes):'')+'</span></div>'
     +'<div class="rt'+(d.trucks.length?'':' none')+'">'+(d.trucks.length?d.trucks.map(esc).join(', '):'No truck')+'</div>'
     +'<div class="rs">'+(!PEOPLE.azugaOk||inactive(d)?'':d.inAzuga?'<span class="inaz">In Azuga</span>':'<button class="link azbtn">Add to Azuga</button>')+'</div>'
@@ -998,6 +1037,8 @@ function renderDrivers(){
     :'<div class="empty" style="padding:36px"><b>'+(dfilt==='noaz'&&!q?'Everyone is in Azuga':'No drivers match')+'</b>'+(dfilt==='noaz'&&!q?'The whole crew can be assigned to trucks.':'Try a different search or filter.')+'</div>')
     +'<button class="addrow" id="addRow"><span class="mav">+</span>Add a driver</button>';
   $('addRow').onclick=()=>$('newDrvBtn').click();
+  document.querySelectorAll('.pick').forEach(c=>c.onchange=()=>{const id=c.closest('.rrow').dataset.id;c.checked?picked.add(id):picked.delete(id);c.closest('.rrow').classList.toggle('picked',c.checked);renderSelbar()});
+  renderSelbar();
   document.querySelectorAll('.azbtn').forEach(b=>b.onclick=()=>{const f=b.closest('.rrow').querySelector('.azf');f.hidden=!f.hidden;if(!f.hidden)f.querySelector('.aze').focus()});
   document.querySelectorAll('.azgo').forEach(b=>b.onclick=async()=>{const t=b.closest('.rrow'),m=t.querySelector('.msg');b.disabled=true;m.className='msg';m.textContent='Adding to Azuga...';
     try{await post('/api/driver/azuga',{airtableId:t.dataset.id,email:t.querySelector('.aze').value,phone:t.querySelector('.azp').value});driverList=null;await loadPeople()}
