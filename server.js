@@ -36,7 +36,11 @@ async function azuga(path, body = {}, method = 'POST', attempt = 1) {
     if (attempt < 3) { await sleep(15000 * attempt); return azuga(path, body, method, attempt + 1); }
     throw new Error('Azuga is limiting requests right now. Try again in a minute.');
   }
-  if (!r.ok) throw new Error(`${path} -> ${r.status}: ${text.slice(0, 300)}`);
+  if (!r.ok) {
+    // Show Azuga's own words ("Password length must be...") instead of raw JSON
+    let msg; try { const j = JSON.parse(text); msg = [].concat(j.error || j.message || []).map(e => e && (e.message || e)).filter(Boolean).join('; '); } catch {}
+    throw new Error(msg || `${path} -> ${r.status}: ${text.slice(0, 300)}`);
+  }
   return JSON.parse(text);
 }
 
@@ -335,8 +339,7 @@ async function people() {
   const truckLabel = Object.fromEntries(at.trucks.map(t => [t.id, (t.truckNo ? '#' + t.truckNo.split(/[ ~(]/)[0] + ' ' : '') + [t.year, t.make, t.model].filter(Boolean).join(' ')]));
   const inAz = new Set((az || []).map(d => normName(d.name)));
   const named = at.drivers.filter(d => d.name);
-  const azDupes = az ? (await driverGroups()).filter(g => g.ids.length > 1).map(g => ({ name: g.name, accounts: g.accounts.map(a => ({ email: a.email, phone: a.phone, ref: a.id.slice(-4), trucks: a.trucks })) })) : [];
-  return { connected: true, azugaOk: !!az, azDupes, dupes: dupeGroups(named),
+  return { connected: true, azugaOk: !!az, dupes: dupeGroups(named),
     blank: at.drivers.filter(d => !d.name).map(d => ({ id: d.id, license: d.license, policy: d.policy, trucks: d.truckIds.map(id => truckLabel[id]).filter(Boolean) })),
     drivers: named.sort((a, b) => a.name.localeCompare(b.name)).map(d => ({
     id: d.id, name: d.name, license: d.license, state: d.state, policy: d.policy, notes: d.notes, pic: d.pic, status: d.status,
@@ -429,7 +432,8 @@ async function createAzugaDriver(name, email, phone) {
     firstName: parts.slice(0, -1).join(' '), lastName: parts[parts.length - 1], userName: login, email,
     timeZone: tpl.timeZone || 'America/New_York', groupIds: [groupId], userTypeName: 'driver', emailVerification: false,
     // Random password, never shown; reset it in Azuga if the driver needs the Azuga app.
-    password: 'Mp!' + require('crypto').randomBytes(12).toString('base64url') + '7a',
+    // Azuga caps passwords at 15 characters: 14 here, with upper, lower, digit and symbol
+    password: 'Mp!' + require('crypto').randomBytes(9).toString('base64url').slice(0, 9) + '7a',
   };
   if (tpl.roleId) body.roleId = tpl.roleId; else body.roleName = tpl.roleName || 'Driver';
   if (digits) body.primaryContactNumber = '+1-' + digits.slice(-10);
@@ -452,7 +456,16 @@ async function createDriver(b) {
   for (const k in opt) if (clean(b[k])) fields[opt[k][0]] = text(b[k], opt[k][1], k);
   if (b.dob) fields[D_DOB] = b.dob;
   if (b.addToAzuga && clean(b.email) && !EMAIL_OK.test(clean(b.email))) throw new Error('That email address does not look right.');
+  const photo = b.photo && /^image\/(jpeg|png|webp)$/.test(b.photo.type) && typeof b.photo.data === 'string' && b.photo.data.length < 7e6 ? b.photo : null;
+  if (b.photo && !photo) throw new Error('The license photo must be a JPG, PNG or WEBP under 5 MB.');
   const rec = await airtable(AT_DRIVERS, { method: 'POST', body: JSON.stringify({ fields, typecast: true }) });
+  if (photo) {
+    // Airtable's direct upload: the image goes straight into the License Picture field of the new record
+    const up = await fetch('https://content.airtable.com/v0/' + AT_BASE + '/' + rec.id + '/' + D.pic + '/uploadAttachment', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + AIRTABLE_TOKEN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contentType: photo.type, file: photo.data, filename: (name.replace(/[^a-z0-9]+/gi, '-') || 'driver') + '-license.jpg' }) });
+    if (!up.ok) console.error('License photo upload failed:', up.status, (await up.text()).slice(0, 200));
+  }
   cache.delete('airtable');
   console.log(new Date().toISOString(), 'Airtable driver created', name);
   const saved = ['Airtable'];
@@ -481,9 +494,9 @@ async function syncOne(id) {
   return { ok: true, changed, notes: d.notes };
 }
 
-async function readJson(req) {
+async function readJson(req, max = 10000) {
   let s = '';
-  for await (const c of req) { s += c; if (s.length > 10000) throw new Error('Request too large.'); }
+  for await (const c of req) { s += c; if (s.length > max) throw new Error('Request too large.'); }
   return JSON.parse(s || '{}');
 }
 
@@ -519,7 +532,7 @@ http.createServer(async (req, res) => {
     // JSON-only + POST-only, so another website can't trigger a change with a plain form
     if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
     try {
-      const b = await readJson(req);
+      const b = await readJson(req, url.pathname === '/api/driver/create' ? 8e6 : 10000);  // room for a license photo
       const out = await POSTS[url.pathname](b);
       res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(out));
     } catch (e) {
@@ -698,7 +711,10 @@ fieldset{border:0;padding:0;margin:20px 0 0}legend{font-size:14px;font-weight:70
 .fg input,.fg select{font:inherit;font-size:14px;font-weight:400;color:var(--ink);padding:9px 11px;border:1px solid var(--line2);border-radius:9px;background:#fff;transition:border-color .15s,box-shadow .15s}
 .fg input:focus,.fg select:focus{outline:none;border-color:var(--pool);box-shadow:0 0 0 3px var(--shallow2)}
 .fg input::placeholder{color:#8a969d}
-.fg .dirty{background:#fffaeb;border-color:#e9b949}.fg .hint{font-weight:400;color:var(--muted)}
+.fg .dirty{background:#fffaeb;border-color:#e9b949}
+.bang{display:inline-grid;place-items:center;flex:none;width:18px;height:18px;border-radius:50%;background:var(--warnBg);color:var(--warn);font-weight:800;font-size:12px;line-height:1;vertical-align:-3px;margin-left:6px}
+.fg .need{border-color:#e9b949}
+.fg label{position:relative}.fg label>.bang{position:absolute;right:10px;top:31px;margin:0;pointer-events:none}.fg label:has(select)>.bang{right:32px}.fg .hint{font-weight:400;color:var(--muted)}
 .fg label.chk{flex-direction:row;align-items:center;gap:8px;padding-top:22px}
 input[type=checkbox]{accent-color:var(--pool);width:15px;height:15px}
 .edb{display:flex;gap:8px;align-items:center;margin-top:24px;padding-top:16px;border-top:1px solid var(--line);flex-wrap:wrap}
@@ -715,6 +731,9 @@ tbody tr:hover td{background:#fcfbf8}
 .crewhead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
 .crewhead h2{margin:0;font-size:20px;font-weight:700;letter-spacing:-.01em}.crewhead p{margin:2px 0 0;font-size:13px}
 .nd{padding:18px 20px;margin-bottom:12px}
+.scan{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+.scan label{display:inline-flex;align-items:center;cursor:pointer}.scan .hint{font-size:12px;color:var(--muted)}
+#frontPrev{height:44px;border-radius:6px;border:1px solid var(--line2)}
 .roster{max-width:1100px}
 .rrow{display:grid;grid-template-columns:18px 36px minmax(200px,1fr) minmax(180px,.9fr) 130px;gap:14px;align-items:center;padding:11px 18px;border-bottom:1px solid var(--line)}
 .rrow:last-child{border-bottom:0}.rrow:hover{background:#fcfbf8}
@@ -778,7 +797,14 @@ tbody tr:hover td{background:#fcfbf8}
   <button class="btn2 pri" id="newDrvBtn">+ Add driver</button>
  </div>
  <form id="newDrv" hidden autocomplete="off" class="panel nd">
-  <h3 style="margin:0 0 12px">Add a driver</h3><div class="fg">
+  <h3 style="margin:0 0 6px">Add a driver</h3>
+  <div class="scan">
+   <label class="btn2"><input type="file" accept="image/*" capture="environment" id="scanBack" hidden>Scan back of license</label>
+   <label class="btn2"><input type="file" accept="image/*" capture="environment" id="scanFront" hidden>Add photo of front</label>
+   <img id="frontPrev" alt="" hidden>
+   <span id="scanMsg" class="hint">Scan the barcode on the back to fill in name, license number, state and birthday.</span>
+  </div>
+  <div class="fg">
    <label>Full name *<input name="name" maxlength="80" required></label>
    <label>License number<input name="license" maxlength="40"></label>
    <label>License state<input name="state" maxlength="20" placeholder="NJ"></label>
@@ -969,7 +995,7 @@ const edRows=()=>{const q=$('q').value.toLowerCase();return vehicles.filter(v=>(
 const dirtyCount=()=>document.querySelectorAll('#edCard .dirty').length;
 function renderEdit(){
   const rs=edRows();
-  $('edList').innerHTML=rs.length?rs.map(v=>{const m=missing(v);return '<div class="eli'+(edSel==vid(v)?' sel':'')+'" data-id="'+esc(vid(v))+'"><div><b>'+tno(vid(v))+esc(title(v))+'</b>'+azSub(v)+'<small>'+esc(/[a-z]/i.test(dname(v))?dname(v):'No driver')+(pick(v,'licensePlateNo','licensePlate')?' · '+esc(pick(v,'licensePlateNo','licensePlate')):'')+'</small></div>'+(outOfSync(v)?'<span class="pill warn">Sync</span>':m.length?'<span class="pill warn">Missing '+m.length+'</span>':'<span class="pill go" aria-label="Complete">'+ICON.check+'</span>')+'</div>'}).join(''):'<div class="empty" style="padding:30px">'+(vehicles.length?'No trucks match.':'Loading...')+'</div>';
+  $('edList').innerHTML=rs.length?rs.map(v=>{const m=missing(v);return '<div class="eli'+(edSel==vid(v)?' sel':'')+'" data-id="'+esc(vid(v))+'"><div><b>'+tno(vid(v))+esc(title(v))+'</b>'+azSub(v)+'<small>'+esc(/[a-z]/i.test(dname(v))?dname(v):'No driver')+(pick(v,'licensePlateNo','licensePlate')?' · '+esc(pick(v,'licensePlateNo','licensePlate')):'')+'</small></div>'+(outOfSync(v)?'<span class="pill warn">Sync</span>':m.length?'<span class="bang" title="Missing '+m.join(', ')+'" aria-label="Missing '+m.join(', ')+'">!</span>':'')+'</div>'}).join(''):'<div class="empty" style="padding:30px">'+(vehicles.length?'No trucks match.':'Loading...')+'</div>';
   document.querySelectorAll('.eli').forEach(e=>e.onclick=()=>openEd(e.dataset.id));
   const n=vehicles.filter(outOfSync).length;
   if(!syncing)$('syncBar').innerHTML=!AT?'':!AT.connected?'<span class="muted">Airtable not connected</span>':AT.error?'<span class="muted">Airtable unavailable</span>':n?'<button class="btn2 pri" id="syncAll" style="width:100%">Sync '+n+' truck'+(n>1?'s':'')+' from Airtable → Azuga</button>':'<span style="color:var(--go);display:inline-flex;gap:6px;align-items:center">'+ICON.check+'Azuga matches Airtable</span>';
@@ -1008,7 +1034,7 @@ async function openEd(id){
     if(type==='driver'){const curId=v.userId||'',wantId=atWant(L,'userId'),curG=driverList.find(d=>d.ids.includes(curId)),selId=wantId||curId;const known=!!curG;return '<label>'+label+'<select name="userId" data-orig="'+esc(curId)+'"'+(wantId?' class="dirty"':'')+'>'+(known?'':'<option value="'+esc(curId)+'" selected>'+esc(/[a-z]/i.test(dname(v))?dname(v):'No driver')+'</option>')+driverList.map(d=>{const val=d===curG?curId:d.id;return '<option value="'+esc(val)+'"'+(val===selId?' selected':'')+'>'+esc(d.name)+'</option>'}).join('')+'</select>'+(wantId?'<span class="fromAt" style="align-self:flex-start">FROM AIRTABLE</span>':'')+(driverList.length?'':'<span class="hint">Could not load the driver list from Azuga.</span>')+'</label>'}
     return '<label>'+label+(fa?'<span class="fromAt">FROM AIRTABLE</span>':'')+'<input name="'+k+'" type="'+type+'" '+(opt?'maxlength="'+opt+'"':'')+' value="'+esc(cur??'')+'" data-orig="'+esc(orig??'')+'"'+(fa?' class="dirty"':'')+(k==='odometer'?' placeholder="Now: '+esc(odo(v))+'"':'')+'>'+(k==='odometer'?'<span class="hint">Leave blank to keep the current reading</span>':'')+'</label>'};
   $('edCard').innerHTML='<div class="edh"><div><h2>'+tno(vid(v))+esc(title(v))+'</h2>'+azSub(v)+'</div><span class="pos">'+(i+1)+' of '+rs.length+'</span></div>'
-   +(m.length?'<div class="miss">Missing: '+m.join(', ')+'</div>':'<div class="miss" style="color:var(--go)">All key info filled in</div>')
+
    +(lk?'<div class="at"><h4>Linked to Airtable'+(L.truck.truckNo?' truck #'+esc(L.truck.truckNo):'')+' · matched by '+esc(L.how)+'</h4>'
       +(Object.keys(L.changes).length?'Fields marked <span class="fromAt">FROM AIRTABLE</span> have newer info in Airtable. Click Save to update Azuga.':'Azuga matches Airtable.')
       +(L.notes||[]).map(n=>'<div class="note">'+esc(n)+'</div>').join('')+'<div style="margin-top:6px"><b>Driver in Airtable:</b> '+drvLine(L.truck.driver)+'</div>'+docBtns(L.truck)+'</div>'
@@ -1016,10 +1042,18 @@ async function openEd(id){
    +[...FIELDS,...(lk?[AT_FIELDS]:[])].map(([g,fs])=>'<fieldset><legend>'+g+'</legend><div class="fg">'+fs.map(input).join('')+'</div></fieldset>').join('')
    +'<div class="edb"><button class="btn2" id="edPrev"'+(i>0?'':' disabled')+'>← Previous</button><button class="btn2" id="edNext"'+(i<rs.length-1?'':' disabled')+'>Next →</button><span style="flex:1"></span><span id="edMsg"></span><button class="btn2" id="edSave">Save</button><button class="btn2 pri" id="edSaveNext">Save &amp; next →</button></div>';
   const val=el=>el.type==='checkbox'?String(el.checked):el.value;
-  $('edCard').querySelectorAll('input,select').forEach(el=>el.oninput=el.onchange=()=>el.classList.toggle('dirty',val(el)!==el.dataset.orig));
+  $('edCard').querySelectorAll('input,select').forEach(el=>el.oninput=el.onchange=()=>{el.classList.toggle('dirty',val(el)!==el.dataset.orig);markNeed(el)});
+  $('edCard').querySelectorAll('[name=vin],[name=licensePlateNo],[name=userId]').forEach(markNeed);
   const go=d=>{const n=rs[i+d];if(n)openEd(vid(n))};
   $('edPrev').onclick=()=>go(-1);$('edNext').onclick=()=>go(1);
   $('edSave').onclick=()=>saveEd(v,0,go);$('edSaveNext').onclick=()=>saveEd(v,1,go);
+}
+// Empty VIN, plate or driver gets an "!" on its box
+function markNeed(el){
+  if(!['vin','licensePlateNo','userId'].includes(el.name))return;
+  const empty=el.name==='userId'?!/[a-z]/i.test(el.options[el.selectedIndex]?.text.replace('No driver','')||''):!el.value.trim();
+  el.classList.toggle('need',empty);const lab=el.closest('label');let b=lab.querySelector('.bang');
+  if(empty&&!b){b=document.createElement('span');b.className='bang';b.textContent='!';b.title='Missing';lab.firstChild.after(b)}else if(!empty&&b)b.remove();
 }
 async function saveEd(v,thenNext,go){
   const msg=$('edMsg'),body={trackeeId:vid(v)},lines=[];
@@ -1050,17 +1084,14 @@ const picked=new Set();
 const DF={all:['Everyone',()=>true],truck:['On a truck',d=>d.trucks.length],free:['No truck',d=>!d.trucks.length&&!inactive(d)],noaz:['Not in Azuga',d=>PEOPLE&&PEOPLE.azugaOk&&!d.inAzuga&&!inactive(d)],off:['Inactive',inactive]};
 function renderDupes(){
   const P=PEOPLE,by=Object.fromEntries(P.drivers.map(d=>[d.id,d])),groups=(P.dupes||[]).map(g=>g.map(id=>by[id]).filter(Boolean)).filter(g=>g.length>1),blank=P.blank||[];
-  const azd=P.azDupes||[];
-  if(!groups.length&&!blank.length&&!azd.length){$('dupes').innerHTML='';return}
+  if(!groups.length&&!blank.length){$('dupes').innerHTML='';return}
   const line=d=>[d.license&&((d.state?d.state+' ':'')+d.license),d.trucks.join(', '),d.policy].filter(Boolean).join(' · ')||'No details';
   $('dupes').innerHTML='<div class="dup">'+(groups.length?'<h4>'+groups.length+' possible duplicate'+(groups.length>1?'s':'')+'</h4>Pick the record to keep. Its trucks and any missing details are copied over from the others, then the extras are deleted from Airtable.'
     +groups.map((g,i)=>'<div class="dupg" data-g="'+i+'">'+g.map((d,j)=>'<label><input type="radio" name="keep'+i+'" value="'+esc(d.id)+'"'+(j===0?' checked':'')+'><b>'+esc(d.name)+'</b><span>'+esc(line(d))+'</span></label>').join('')
       +'<div class="edb"><span class="msg"></span><span style="flex:1"></span><button class="btn2 pri mergeGo">Merge and delete extras</button></div></div>').join(''):'')
     +(blank.length?'<h4 style="margin-top:'+(groups.length?'14px':'0')+'">'+blank.length+' blank record'+(blank.length>1?'s':'')+'</h4>These have no name in Airtable.'
     +blank.map(d=>'<div class="dupg" data-id="'+esc(d.id)+'" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>'+esc([d.license,d.policy,d.trucks.join(', ')].filter(Boolean).join(' · ')||'Empty')+'</span><span style="flex:1"></span><span class="msg"></span><button class="btn2 delBlank">Delete</button></div>').join(''):'')
-    +(azd.length?'<details style="margin-top:'+(groups.length||blank.length?'14px':'0')+'"><summary style="font-size:13px;color:var(--warn);font-weight:700">'+azd.length+' driver'+(azd.length>1?'s have':' has')+' more than one Azuga login (show)</summary>'
-      +'<p style="margin:6px 0 0">The truck dropdown already shows each person once, so nothing is broken. To tidy Azuga itself, delete the logins marked "not on any truck" in Azuga (Admin, then Users).</p>'
-      +azd.map(g=>'<div class="dupg"><b>'+esc(g.name)+'</b>'+g.accounts.map((a,i)=>'<div style="display:flex;gap:10px;padding-top:4px;flex-wrap:wrap"><span>'+esc(a.email||a.phone||('Login ending in '+a.ref))+'</span><span class="muted">'+(a.trucks?'on '+a.trucks+' truck'+(a.trucks>1?'s':'')+(i===0?' · keep this one':''):'not on any truck')+'</span></div>').join('')+'</div>').join('')+'</details>':'')+'</div>';
++'</div>';
   document.querySelectorAll('.mergeGo').forEach(b=>b.onclick=async()=>{const box=b.closest('.dupg'),g=groups[box.dataset.g],keep=box.querySelector('input:checked').value,rm=g.filter(d=>d.id!==keep),m=box.querySelector('.msg');
     if(!confirm('Keep '+by[keep].name+' and delete '+rm.length+' duplicate'+(rm.length>1?'s':'')+' from Airtable?\\n\\nTrucks and missing details are copied to the kept record first. This can not be undone.'))return;
     b.disabled=true;m.textContent='Merging...';try{await post('/api/driver/merge',{keepId:keep,removeIds:rm.map(d=>d.id)});await loadPeople()}catch(e){m.className='msg bad';m.textContent=e.message;b.disabled=false}});
@@ -1109,7 +1140,7 @@ function renderDrivers(){
     .sort((a,b)=>inactive(a)-inactive(b)||a.name.localeCompare(b.name));
   [...picked].forEach(id=>{if(!all.some(d=>d.id===id))picked.delete(id)});
   $('drvRows').innerHTML=(ds.length?ds.map(d=>'<div class="rrow'+(inactive(d)?' off':'')+(picked.has(d.id)?' picked':'')+'" data-id="'+esc(d.id)+'"><input type="checkbox" class="pick" aria-label="Select '+esc(d.name)+'"'+(picked.has(d.id)?' checked':'')+'><div class="mav">'+esc(initials(d.name))+'</div>'
-    +'<div class="rn"><b>'+esc(d.name)+(inactive(d)?'<span class="tag">Inactive</span>':'')+'</b><span>'+esc([d.license&&((d.state?d.state+' ':'')+d.license),!inactive(d)&&d.policy].filter(Boolean).join(' · ')||'No license on file')+(d.notes?' · '+esc(d.notes):'')+'</span></div>'
+    +'<div class="rn"><b>'+esc(d.name)+(inactive(d)?'<span class="tag">Inactive</span>':!d.license?'<span class="bang" title="No license on file">!</span>':'')+'</b><span>'+esc([d.license&&((d.state?d.state+' ':'')+d.license),!inactive(d)&&d.policy].filter(Boolean).join(' · ')||'No license on file')+(d.notes?' · '+esc(d.notes):'')+'</span></div>'
     +'<div class="rt'+(d.trucks.length?'':' none')+'">'+(d.trucks.length?d.trucks.map(esc).join(', '):'No truck')+'</div>'
     +'<div class="rs">'+(!PEOPLE.azugaOk||inactive(d)?'':d.inAzuga?'<span class="inaz">In Azuga</span>':'<button class="link azbtn">Add to Azuga</button>')+'</div>'
     +'</div>').join('')
@@ -1123,13 +1154,47 @@ function renderDrivers(){
     catch(e){b.disabled=false;b.textContent='Try again';b.title=e.message;t.querySelector('.rn span').textContent='Azuga said: '+e.message}});
 }
 $('newDrvBtn').onclick=()=>{$('newDrv').hidden=false;$('newDrv').scrollIntoView({block:'nearest'});$('newDrv').querySelector('[name=name]').focus()};
-$('ndCancel').onclick=()=>{$('newDrv').reset();$('newDrv').hidden=true;$('ndMsg').textContent=''};
+$('ndCancel').onclick=()=>{frontPhoto=null;$('frontPrev').hidden=true;$('newDrv').reset();$('newDrv').hidden=true;$('ndMsg').textContent=''};
 $('newDrv').addToAzuga.onchange=e=>{$('azFields').hidden=!e.target.checked};
+// ---- License scan: the barcode on the back of every US license holds name, number, state and birthday
+let frontPhoto=null;
+const loadJs=src=>new Promise((ok,no)=>{if(document.querySelector('script[src="'+src+'"]'))return ok();const t=document.createElement('script');t.src=src;t.onload=ok;t.onerror=()=>no(new Error('Could not load the barcode reader.'));document.head.appendChild(t)});
+const titleCase=t=>String(t||'').toLowerCase().replace(/(^|[ '-])[a-z]/g,c=>c.toUpperCase());
+function aamva(raw){
+  const NL=String.fromCharCode(10),txt=raw.split(String.fromCharCode(13)).join(NL).split(String.fromCharCode(30)).join(NL),f={};
+  txt.split(NL).forEach(line=>{let L=line.trim();const i=L.indexOf('DLDAQ');if(i>=0)L=L.slice(i+2);const k=L.slice(0,3);if(/^D[A-Z]{2}$/.test(k)&&!(k in f))f[k]=L.slice(3).trim()});
+  let first=f.DAC||f.DCT||'',last=f.DCS||f.DAB||'';
+  if(!first&&f.DAA){const p=f.DAA.split(',');last=p[0];first=p[1]||''}
+  let dob=f.DBB||'';
+  if(/^[0-9]{8}$/.test(dob))dob=+dob.slice(0,2)>12?dob.slice(0,4)+'-'+dob.slice(4,6)+'-'+dob.slice(6):dob.slice(4)+'-'+dob.slice(0,2)+'-'+dob.slice(2,4);else dob='';
+  return {name:titleCase((first.split(' ')[0]+' '+last).trim()),license:f.DAQ||'',state:f.DAJ||'',dob};
+}
+const shrink=(file,max)=>new Promise((ok,no)=>{const img=new Image();img.onload=()=>{const k=Math.min(1,max/Math.max(img.width,img.height)),c=document.createElement('canvas');c.width=Math.round(img.width*k);c.height=Math.round(img.height*k);const g=c.getContext('2d');g.fillStyle='#fff';g.fillRect(0,0,c.width,c.height);g.drawImage(img,0,0,c.width,c.height);ok(c)};img.onerror=()=>no(new Error('That file is not an image.'));img.src=URL.createObjectURL(file)});
+$('scanBack').onchange=async e=>{
+  const file=e.target.files[0],m=$('scanMsg'),f=$('newDrv');if(!file)return;
+  m.style.color='';m.textContent='Reading the barcode...';
+  try{
+    await loadJs('https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js');
+    const hints=new Map([[ZXing.DecodeHintType.POSSIBLE_FORMATS,[ZXing.BarcodeFormat.PDF_417]],[ZXing.DecodeHintType.TRY_HARDER,true]]);
+    const reader=new ZXing.BrowserMultiFormatReader(hints);let text=null;
+    for(const size of [2400,1600,3200]){try{const c=await shrink(file,size);text=(await reader.decodeFromImageUrl(c.toDataURL('image/png'))).getText();break}catch(err){}}
+    if(!text)throw new Error('Could not read the barcode. Try a closer, sharper photo of the back, with no glare.');
+    const d=aamva(text);if(!d.license&&!d.name)throw new Error('That barcode is not a driver license.');
+    [['name',d.name],['license',d.license],['state',d.state],['dob',d.dob]].forEach(([k,v])=>{if(v)f.querySelector('[name='+k+']').value=v});
+    m.style.color='var(--go)';m.textContent='Filled in from the license. Check it looks right.';
+  }catch(err){m.style.color='var(--bad)';m.textContent=err.message}
+  e.target.value='';
+};
+$('scanFront').onchange=async e=>{
+  const file=e.target.files[0];if(!file)return;
+  try{const c=await shrink(file,1600),url=c.toDataURL('image/jpeg',.85);frontPhoto={type:'image/jpeg',data:url.split(',')[1]};$('frontPrev').src=url;$('frontPrev').hidden=false}
+  catch(err){$('scanMsg').style.color='var(--bad)';$('scanMsg').textContent=err.message}
+};
 $('newDrv').onsubmit=async e=>{
-  e.preventDefault();const f=$('newDrv'),m=$('ndMsg'),b=Object.fromEntries(new FormData(f));b.addToAzuga=f.addToAzuga.checked;
+  e.preventDefault();const f=$('newDrv'),m=$('ndMsg'),b=Object.fromEntries(new FormData(f));b.addToAzuga=f.addToAzuga.checked;if(frontPhoto)b.photo=frontPhoto;
   $('ndSave').disabled=true;m.style.color='';m.textContent='Saving...';
   try{const j=await post('/api/driver/create',b);m.style.color=j.warning?'var(--warn)':'var(--go)';m.textContent=j.warning||('Saved to '+j.saved.join(' and ')+' ✓');
-    f.reset();if(!j.warning)setTimeout(()=>{f.hidden=true;m.textContent=''},2500);driverList=null;await loadPeople()}
+    f.reset();frontPhoto=null;$('frontPrev').hidden=true;if(!j.warning)setTimeout(()=>{f.hidden=true;m.textContent=''},2500);driverList=null;await loadPeople()}
   catch(err){m.style.color='var(--bad)';m.textContent=err.message}
   $('ndSave').disabled=false;
 };
