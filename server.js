@@ -60,6 +60,7 @@ const routes = {
   '/api/locations': () => cached('locations', 30, () => azuga('/vehicles/latestlocation', {})),
   '/api/drivers': () => drivers(),
   '/api/airtable': () => atLinks(),
+  '/api/people': () => people(),
   '/api/maintenance': () => cached('maintenance', 600, () => azuga('/maintanance/reports/scheduledreport.json?' + new URLSearchParams({
     startTime: fmt(daysAgo(365)), endTime: fmt(daysAgo(-365)), isCount: 'false',
   }))),
@@ -76,8 +77,9 @@ const list = x => Array.isArray(x) ? x : x && typeof x === 'object' ? (Object.va
 
 // Edit tab -> Azuga. Azuga's update REPLACES the whole vehicle record, so we fetch the
 // current record fresh, change only the edited fields, and send everything else back as-is.
+const rawDrivers = () => cached('rawDrivers', 600, async () => list(await azuga('/users.json?limit=500&offset=0&userType=driver', {})));
 const drivers = () => cached('drivers', 600, async () =>
-  list(await azuga('/users.json?limit=500&offset=0&userType=driver', {}))
+  (await rawDrivers())
     .map(u => ({ id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, '') }))
     .filter(u => u.id && /[a-z]/i.test(u.name))
     .sort((x, y) => x.name.localeCompare(y.name)));
@@ -155,8 +157,10 @@ const AT_BASE = 'appxOcqhRSdoWgHE3', AT_TRUCKS = 'tbl3aU0dRPvn79Ba1', AT_DRIVERS
 const F = { vin: 'fldT4fSSnXnZuj2Jr', year: 'fldqjqyAK1ZJfn0oT', make: 'fldOhan3is4yEhucl', model: 'fldM01jCShSILujYB',
   truckNo: 'fldYmYqWTfoYoRvjB', policy: 'fldWlS28YbpsipR7r', driver: 'fldEO66ezgMWnguAu', plate: 'fldLGLwnLOAfpw88W',
   insCard: 'fldH0Pe6EKyQEBmMR', files: 'fldS5YJgDrLDbxSiK', regRenew: 'fldjFFBZ0UoO4SUXV', ezpass: 'fld1utE81nDdDiqgi', active: 'fldBpQ0MA5cD9YJ06' };
-// Drivers: name + license only. Date of birth is deliberately never read.
-const D = { name: 'fldMrVtrXN6WDaOjj', license: 'fldcSIYqy5FCEC0Xn', state: 'fld1NdVP4v6QcckK2' };
+// Drivers. Date of birth is only ever written (new driver form), never read or shown.
+const D = { name: 'fldMrVtrXN6WDaOjj', license: 'fldcSIYqy5FCEC0Xn', state: 'fld1NdVP4v6QcckK2', pic: 'fldZeCHS22kI7Ythi',
+  policy: 'fldVo5IrWedsKvumK', trucks: 'fld47HPqHRrw9GUL7', notes: 'fldSnexzpxIG22gF0' };
+const D_DOB = 'fldFMJ06wrdGolZkS';
 
 async function airtable(path, opt = {}) {
   if (!AIRTABLE_TOKEN) throw new Error('Airtable is not connected yet (add AIRTABLE_TOKEN in Render).');
@@ -184,9 +188,10 @@ const PLATE_OK = /^[A-Z0-9]{2,8}$/;  // real plates; skips notes like "HALDEMAN 
 
 const atData = () => cached('airtable', 120, async () => {
   const [trucks, drv] = await Promise.all([atAll(AT_TRUCKS, Object.values(F)), atAll(AT_DRIVERS, Object.values(D))]);
-  const drivers = drv.map(r => ({ id: r.id, name: clean(r.fields[D.name]), license: clean(r.fields[D.license]), state: clean(r.fields[D.state]) }));
-  const byId = Object.fromEntries(drivers.map(d => [d.id, d]));
   const att = a => (a || []).map(x => ({ name: x.filename, url: x.url, type: x.type, thumb: x.thumbnails?.small?.url }));
+  const drivers = drv.map(r => ({ id: r.id, name: clean(r.fields[D.name]), license: clean(r.fields[D.license]), state: clean(r.fields[D.state]),
+    policy: clean(r.fields[D.policy]?.name ?? r.fields[D.policy]), notes: clean(r.fields[D.notes]), truckIds: r.fields[D.trucks] || [], pic: att(r.fields[D.pic]) }));
+  const byId = Object.fromEntries(drivers.map(d => [d.id, d]));
   return {
     drivers,
     trucks: trucks.map(r => { const f = r.fields; return {
@@ -291,6 +296,78 @@ async function saveTruck(b) {
   return { ok: true, saved, notes };
 }
 
+// ---------------- Drivers tab ----------------
+async function people() {
+  if (!AIRTABLE_TOKEN) return { connected: false };
+  const [at, az] = await Promise.all([atData(), drivers().catch(() => null)]);
+  const truckLabel = Object.fromEntries(at.trucks.map(t => [t.id, (t.truckNo ? '#' + t.truckNo + ' ' : '') + [t.year, t.make, t.model].filter(Boolean).join(' ')]));
+  const inAz = new Set((az || []).map(d => normName(d.name)));
+  return { connected: true, azugaOk: !!az, drivers: at.drivers.filter(d => d.name).sort((a, b) => a.name.localeCompare(b.name)).map(d => ({
+    id: d.id, name: d.name, license: d.license, state: d.state, policy: d.policy, notes: d.notes, pic: d.pic,
+    trucks: d.truckIds.map(id => truckLabel[id]).filter(Boolean), inAzuga: inAz.has(normName(d.name)) })) };
+}
+
+const EMAIL_OK = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+async function createAzugaDriver(name, email, phone) {
+  const parts = clean(name).split(/\s+/);
+  if (parts.length < 2) throw new Error('Azuga needs a first and last name.');
+  email = clean(email).toLowerCase();
+  if (!EMAIL_OK.test(email)) throw new Error('Azuga needs a valid email address for the driver (it is their login).');
+  if ((await drivers()).some(d => normName(d.name) === normName(name))) throw new Error(name + ' is already a driver in Azuga.');
+  const digits = clean(phone).replace(/\D/g, '');
+  if (digits && digits.length !== 10 && !(digits.length === 11 && digits[0] === '1')) throw new Error('Phone must be a 10-digit US number.');
+  // Copy role, time zone and group from an existing Azuga driver so new ones are set up the same way.
+  const tpl = (await rawDrivers())[0] || {};
+  const vs = list(await routes['/api/vehicles']());
+  const counts = {}; vs.forEach(v => v.groupId && (counts[v.groupId] = (counts[v.groupId] || 0) + 1));
+  const groupId = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+  if (!groupId) throw new Error('Could not find your Azuga group.');
+  const body = {
+    firstName: parts.slice(0, -1).join(' '), lastName: parts[parts.length - 1], userName: email, email,
+    timeZone: tpl.timeZone || 'America/New_York', groupIds: [groupId], userTypeName: 'driver', emailVerification: false,
+    // Random password, never shown; reset it in Azuga if the driver needs the Azuga app.
+    password: 'Mp!' + require('crypto').randomBytes(12).toString('base64url') + '7a',
+  };
+  if (tpl.roleId) body.roleId = tpl.roleId; else body.roleName = tpl.roleName || 'Driver';
+  if (digits) body.primaryContactNumber = '+1-' + digits.slice(-10);
+  const r = await azuga('/user/create.json', body);
+  if (r && Array.isArray(r.error) ? r.error.length : r && r.error) throw new Error('Azuga rejected the new driver: ' + JSON.stringify(r.error).slice(0, 200));
+  cache.delete('rawDrivers'); cache.delete('drivers');
+  console.log(new Date().toISOString(), 'Azuga driver created', name);
+  return r && r.data;
+}
+
+async function createDriver(b) {
+  const name = text(b.name, 80, 'Name').replace(/\s+/g, ' ');
+  if (!name) throw new Error('Driver name is required.');
+  if (b.dob && !/^\d{4}-\d{2}-\d{2}$/.test(b.dob)) throw new Error('Date of birth must be a date.');
+  if ((await atData()).drivers.some(d => normName(d.name) === normName(name))) throw new Error(name + ' is already in Airtable.');
+  const fields = { [D.name]: name };
+  const opt = { license: [D.license, 40], state: [D.state, 20], policy: [D.policy, 60], notes: [D.notes, 500] };
+  for (const k in opt) if (clean(b[k])) fields[opt[k][0]] = text(b[k], opt[k][1], k);
+  if (b.dob) fields[D_DOB] = b.dob;
+  if (b.addToAzuga) {  // check Azuga's requirements up front so we don't half-create
+    if (name.split(' ').length < 2) throw new Error('Azuga needs a first and last name.');
+    if (!EMAIL_OK.test(clean(b.email))) throw new Error('Azuga needs a valid email address for the driver (it is their login).');
+  }
+  const rec = await airtable(AT_DRIVERS, { method: 'POST', body: JSON.stringify({ fields, typecast: true }) });
+  cache.delete('airtable');
+  console.log(new Date().toISOString(), 'Airtable driver created', name);
+  const saved = ['Airtable'];
+  if (b.addToAzuga) {
+    try { await createAzugaDriver(name, b.email, b.phone); saved.push('Azuga'); }
+    catch (e) { return { ok: true, saved, warning: 'Saved to Airtable, but Azuga said: ' + e.message + ' Use "Add to Azuga" to try again.' }; }
+  }
+  return { ok: true, saved, id: rec.id };
+}
+
+async function addDriverToAzuga(b) {
+  const d = (await atData()).drivers.find(d => d.id === b.airtableId);
+  if (!d) throw new Error('Driver not found in Airtable.');
+  await createAzugaDriver(d.name, b.email, b.phone);
+  return { ok: true, saved: ['Azuga'] };
+}
+
 // Push Airtable's values into Azuga for one truck.
 async function syncOne(id) {
   const [vs, at] = await Promise.all([freshVehicles(), atData()]);
@@ -335,12 +412,13 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  if (url.pathname === '/api/update' || url.pathname === '/api/sync') {
+  const POSTS = { '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/azuga': addDriverToAzuga };
+  if (POSTS[url.pathname]) {
     // JSON-only + POST-only, so another website can't trigger a change with a plain form
     if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
     try {
       const b = await readJson(req);
-      const out = url.pathname === '/api/sync' ? await syncOne(String(b.trackeeId || '')) : await saveTruck(b);
+      const out = await POSTS[url.pathname](b);
       res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(out));
     } catch (e) {
       console.error('Update failed:', e.message);
@@ -384,7 +462,9 @@ header{background:linear-gradient(90deg,var(--navy),#13406e);color:#fff;padding:
 .tabs{display:flex;gap:4px;background:rgba(255,255,255,.1);padding:4px;border-radius:10px}
 .tabs button{font:inherit;font-weight:600;font-size:13px;color:#fff;background:none;border:0;padding:7px 14px;border-radius:7px;cursor:pointer;opacity:.75}
 .tabs button.on{background:#fff;color:var(--navy);opacity:1}
-#vEdit{padding:16px 24px 24px}
+#vEdit,#vDrv{padding:16px 24px 24px}
+#drvRows td{font-size:13px}#drvRows .sub{color:var(--muted);font-size:12px}
+.azf{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}.azf input{font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:7px;min-width:0;width:170px}
 .ed{display:grid;grid-template-columns:320px 1fr;gap:16px;height:calc(100vh - 100px);min-height:520px}
 .edl{display:flex;flex-direction:column;min-height:0}.edf{padding:12px 14px;border-bottom:1px solid var(--line);font-size:13px;color:var(--muted)}
 #edList{overflow:auto;flex:1}
@@ -412,7 +492,7 @@ fieldset{border:0;padding:0;margin:18px 0 0}legend{font-size:12px;font-weight:70
 .fromAt{align-self:flex-start;display:inline-block;font-size:10px;font-weight:700;color:#0e7490;background:#e0f2f5;border-radius:4px;padding:1px 5px;margin-left:6px}
 .note{color:var(--warn);font-size:12px;margin-top:6px}
 .fg label.chk{flex-direction:row;align-items:center;gap:8px;padding-top:22px}#edMsg.ok{color:var(--go)}#edMsg.bad{color:var(--bad)}
-@media(max-width:900px){#vEdit{padding:12px 16px}.ed{grid-template-columns:1fr;height:auto}#edList{max-height:35vh}}
+@media(max-width:900px){#vEdit,#vDrv{padding:12px 16px}#drvRows td:nth-child(3){display:none}.ed{grid-template-columns:1fr;height:auto}#edList{max-height:35vh}}
 .panel{background:var(--card);border-radius:var(--r);box-shadow:0 1px 2px rgba(15,27,45,.06);overflow:auto}
 .panel .intro{padding:16px 20px;border-bottom:1px solid var(--line);color:var(--muted)}.panel .intro b{color:var(--ink)}
 table{width:100%;border-collapse:collapse}th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -456,7 +536,7 @@ details{margin-top:18px}summary{cursor:pointer;color:var(--muted);font-size:12px
  <div class="brand"><div class="logo">MP</div><div>Fleet Dashboard<small>Millennial Pools</small></div></div>
  <div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search vehicle or driver"></div>
  <div class="live"><span class="dot"></span><span id="upd">Connecting...</span></div>
-<nav class="tabs"><button data-v="vMap" class="on">Live map</button><button data-v="vEdit">Edit vehicles</button></nav>
+<nav class="tabs"><button data-v="vMap" class="on">Live map</button><button data-v="vEdit">Edit vehicles</button><button data-v="vDrv">Drivers</button></nav>
 </header>
 <div id="err"></div>
 <div id="vMap"><section class="stats">
@@ -467,6 +547,24 @@ details{margin-top:18px}summary{cursor:pointer;color:var(--muted);font-size:12px
 </section>
 <main><div id="list"><div class="empty">Loading vehicles...</div></div>
 <div id="right"><div id="map"></div><div id="detail"><div class="empty">Select a vehicle to see its driver, maintenance and camera footage.</div></div></div></main></div>
+<div id="vDrv" hidden><div class="panel">
+ <div class="intro" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><div><b>Drivers</b> <span id="drvCount"></span><br>From your Airtable Drivers table. New drivers are saved to Airtable first, then added to Azuga.</div><span style="flex:1"></span><button class="btn2 pri" id="newDrvBtn">+ New driver</button></div>
+ <form id="newDrv" hidden autocomplete="off" style="padding:16px 20px;border-bottom:1px solid var(--line);background:#fafcfd">
+  <div class="fg">
+   <label>Full name *<input name="name" maxlength="80" required></label>
+   <label>License number<input name="license" maxlength="40"></label>
+   <label>License state<input name="state" maxlength="20" placeholder="NJ"></label>
+   <label>Insurance policy<input name="policy" maxlength="60" list="policyList"></label>
+   <label>Date of birth<input name="dob" type="date"><span class="hint">Saved to Airtable only, never shown here</span></label>
+   <label>Notes<input name="notes" maxlength="500"></label>
+  </div>
+  <fieldset><legend><label style="display:inline-flex;gap:6px;align-items:center;font-size:12px"><input type="checkbox" name="addToAzuga" checked> Also add to Azuga</label></legend>
+   <div class="fg" id="azFields"><label>Email * (their Azuga login)<input name="email" type="email" maxlength="120"></label><label>Phone<input name="phone" type="tel" maxlength="20" placeholder="732-555-0100"></label></div></fieldset>
+  <div class="edb"><span id="ndMsg" style="font-size:13px"></span><span style="flex:1"></span><button type="button" class="btn2" id="ndCancel">Cancel</button><button class="btn2 pri" id="ndSave">Save driver</button></div>
+ </form>
+ <datalist id="policyList"></datalist>
+ <table><thead><tr><th>Driver</th><th>License</th><th>Insurance policy</th><th>Truck</th><th>Azuga</th></tr></thead><tbody id="drvRows"><tr><td colspan="5" class="muted">Loading...</td></tr></tbody></table>
+</div></div>
 <div id="vEdit" hidden><div class="ed">
  <aside class="panel edl"><div class="edf"><label><input type="checkbox" id="needs"> Only show trucks that need attention</label><div id="syncBar" style="margin-top:10px"></div></div><div id="edList"></div></aside>
  <section class="panel edc" id="edCard"><div class="empty">Pick a truck on the left to edit it.</div></section>
@@ -654,13 +752,47 @@ async function saveEd(v,thenNext,go){
 }
 $('needs').onchange=renderEdit;
 const AT_ONLY_KEYS={truckNo:1,policy:1,regRenew:1,ezpass:1};
+
+// ---- Drivers tab ----
+let PEOPLE=null;
+async function loadPeople(){try{PEOPLE=await get('/api/people')}catch(e){PEOPLE={connected:true,error:e.message,drivers:[]}}renderDrivers()}
+const post=async(u,b)=>{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.error)throw new Error(j.error);return j};
+function renderDrivers(){
+  if(!PEOPLE)return;
+  if(!PEOPLE.connected){$('drvRows').innerHTML='<tr><td colspan="5" class="muted">Airtable is not connected yet. Add AIRTABLE_TOKEN in Render.</td></tr>';$('newDrvBtn').disabled=true;return}
+  if(PEOPLE.error){$('drvRows').innerHTML='<tr><td colspan="5" class="muted">Airtable unavailable: '+esc(PEOPLE.error)+'</td></tr>';return}
+  const q=$('q').value.toLowerCase(),ds=PEOPLE.drivers.filter(d=>!q||(d.name+' '+d.trucks.join(' ')+' '+d.license).toLowerCase().includes(q));
+  const missing=PEOPLE.drivers.filter(d=>!d.inAzuga).length;
+  $('drvCount').innerHTML='<span class="muted">· '+PEOPLE.drivers.length+' total'+(PEOPLE.azugaOk&&missing?' · <span style="color:var(--warn)">'+missing+' not in Azuga</span>':'')+'</span>';
+  $('policyList').innerHTML=[...new Set(PEOPLE.drivers.map(d=>d.policy).filter(Boolean))].map(p=>'<option value="'+esc(p)+'">').join('');
+  $('drvRows').innerHTML=ds.length?ds.map(d=>'<tr data-id="'+esc(d.id)+'"><td><b>'+esc(d.name)+'</b>'+(d.notes?'<div class="sub">'+esc(d.notes)+'</div>':'')+'</td>'
+    +'<td>'+(d.license?esc((d.state?d.state+' ':'')+d.license):'<span class="muted">–</span>')+(d.pic.length?'<div><a class="btn" target="_blank" rel="noopener" href="'+esc(d.pic[0].url)+'">📄 License photo</a></div>':'')+'</td>'
+    +'<td>'+esc(d.policy||'–')+'</td><td>'+(d.trucks.length?d.trucks.map(esc).join('<br>'):'<span class="muted">None</span>')+'</td>'
+    +'<td>'+(!PEOPLE.azugaOk?'<span class="muted">?</span>':d.inAzuga?'<span class="pill go">In Azuga</span>':'<span class="pill warn">Not in Azuga</span><div class="azf"><input placeholder="Email (Azuga login)" type="email" class="aze"><input placeholder="Phone" type="tel" class="azp"><button class="btn2 azgo">Add to Azuga</button></div><div class="msg"></div>')+'</td></tr>').join('')
+    :'<tr><td colspan="5" class="muted">No drivers match.</td></tr>';
+  document.querySelectorAll('.azgo').forEach(b=>b.onclick=async()=>{const tr=b.closest('tr'),m=tr.querySelector('.msg');b.disabled=true;m.className='msg';m.textContent='Adding to Azuga...';
+    try{await post('/api/driver/azuga',{airtableId:tr.dataset.id,email:tr.querySelector('.aze').value,phone:tr.querySelector('.azp').value});driverList=null;await loadPeople()}
+    catch(e){m.className='msg bad';m.textContent=e.message;b.disabled=false}});
+}
+$('newDrvBtn').onclick=()=>{$('newDrv').hidden=false;$('newDrv').querySelector('[name=name]').focus()};
+$('ndCancel').onclick=()=>{$('newDrv').reset();$('newDrv').hidden=true;$('ndMsg').textContent=''};
+$('newDrv').addToAzuga.onchange=e=>{$('azFields').hidden=!e.target.checked};
+$('newDrv').onsubmit=async e=>{
+  e.preventDefault();const f=$('newDrv'),m=$('ndMsg'),b=Object.fromEntries(new FormData(f));b.addToAzuga=f.addToAzuga.checked;
+  if(b.addToAzuga&&!b.email){m.style.color='var(--bad)';m.textContent='Email is needed to add them to Azuga (or untick Also add to Azuga).';return}
+  $('ndSave').disabled=true;m.style.color='';m.textContent='Saving...';
+  try{const j=await post('/api/driver/create',b);m.style.color=j.warning?'var(--warn)':'var(--go)';m.textContent=j.warning||('Saved to '+j.saved.join(' and ')+' ✓');
+    f.reset();if(!j.warning)setTimeout(()=>{f.hidden=true;m.textContent=''},2500);driverList=null;await loadPeople()}
+  catch(err){m.style.color='var(--bad)';m.textContent=err.message}
+  $('ndSave').disabled=false;
+};
 loadAT();
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
-  $('vMap').hidden=b.dataset.v!=='vMap';$('vEdit').hidden=b.dataset.v!=='vEdit';
-  if(b.dataset.v==='vEdit')renderEdit();else map.invalidateSize();
+  ['vMap','vEdit','vDrv'].forEach(v=>$(v).hidden=b.dataset.v!==v);
+  if(b.dataset.v==='vEdit')renderEdit();else if(b.dataset.v==='vDrv'){if(!PEOPLE)loadPeople();else renderDrivers()}else map.invalidateSize();
 });
-$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit()};
+$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers()};
 window.addEventListener('beforeunload',e=>{if(dirtyCount())e.preventDefault()});
 refresh();setInterval(refresh,30000);
 </script></body></html>`;
