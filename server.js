@@ -19,7 +19,11 @@ async function getToken() {
   return token;
 }
 
-async function azuga(path, body = {}, method = 'POST') {
+// Azuga answers success with error: null OR error: [] -- only a non-empty error is a real failure.
+const azErr = r => { const e = r && r.error; return e && !(Array.isArray(e) && !e.length) ? e : null; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function azuga(path, body = {}, method = 'POST', attempt = 1) {
   const r = await fetch(API + path, {
     method,
     headers: { Authorization: 'Bearer ' + (await getToken()), 'Content-Type': 'application/json' },
@@ -27,7 +31,11 @@ async function azuga(path, body = {}, method = 'POST') {
   });
   const text = await r.text();
   if (r.status === 401) token = null; // force re-login next time
-  if (r.status === 429) throw new Error('Azuga is limiting requests right now. Retrying shortly.');
+  if (r.status === 429) {
+    // Per-minute limit: wait it out and retry (15s, then 30s) before giving up.
+    if (attempt < 3) { await sleep(15000 * attempt); return azuga(path, body, method, attempt + 1); }
+    throw new Error('Azuga is limiting requests right now. Try again in a minute.');
+  }
   if (!r.ok) throw new Error(`${path} -> ${r.status}: ${text.slice(0, 300)}`);
   return JSON.parse(text);
 }
@@ -93,7 +101,10 @@ const text = (v, max, label) => {
 
 // Edit tab -> Azuga. Azuga's update REPLACES the whole vehicle record, so we fetch the
 // current record fresh, change only the edited fields, and send everything else back as-is.
-const freshVehicles = async () => list(await azuga('/trackees.json?limit=100&offset=0'));
+// Short-lived shared copy of the vehicle list. After each save we patch our copy in place,
+// so it never goes stale from our own edits and a bulk sync makes one list call, not one per truck.
+// ponytail: a change made on Azuga's own site in the last 60s could be overwritten; shrink the 60 if that bites.
+const freshVehicles = async () => list(await cached('fresh', 60, () => azuga('/trackees.json?limit=100&offset=0')));
 
 // Validates the edits and builds the full record to send. Throws on bad input, writes nothing.
 async function buildUpdate(b, vs) {
@@ -145,7 +156,9 @@ async function buildUpdate(b, vs) {
 async function sendUpdate({ id, cur, body, changed }) {
   if (!changed.length) throw new Error('Nothing to change.');
   const r = await azuga('/trackees/' + encodeURIComponent(id) + '.json', body, 'PUT');
-  if (r && r.error) throw new Error('Azuga rejected the change: ' + JSON.stringify(r.error).slice(0, 200));
+  if (azErr(r)) throw new Error('Azuga rejected the change: ' + JSON.stringify(azErr(r)).slice(0, 200));
+  const mine = list(cache.get('fresh')?.data).find(v => v.trackeeId === id);
+  if (mine) Object.assign(mine, body);
   cache.delete('vehicles'); cache.delete('locations');
   console.log(new Date().toISOString(), 'Azuga updated', cur.name, '->', changed.join(', '));
   return changed;
@@ -331,7 +344,7 @@ async function createAzugaDriver(name, email, phone) {
   if (tpl.roleId) body.roleId = tpl.roleId; else body.roleName = tpl.roleName || 'Driver';
   if (digits) body.primaryContactNumber = '+1-' + digits.slice(-10);
   const r = await azuga('/user/create.json', body);
-  if (r && Array.isArray(r.error) ? r.error.length : r && r.error) throw new Error('Azuga rejected the new driver: ' + JSON.stringify(r.error).slice(0, 200));
+  if (azErr(r)) throw new Error('Azuga rejected the new driver: ' + JSON.stringify(azErr(r)).slice(0, 200));
   cache.delete('rawDrivers'); cache.delete('drivers');
   console.log(new Date().toISOString(), 'Azuga driver created', name);
   return r && r.data;
@@ -445,10 +458,10 @@ const PAGE = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewp
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
-:root{--bg:#eef2f6;--card:#fff;--ink:#0f1b2d;--muted:#64748b;--line:#e2e8f0;--navy:#0b2545;--accent:#0ea5b7;--go:#16a34a;--goBg:#dcfce7;--idle:#64748b;--idleBg:#f1f5f9;--warn:#b45309;--warnBg:#fef3c7;--bad:#b91c1c;--badBg:#fee2e2;--r:14px}
+:root{--bg:#eef2f6;--card:#fff;--ink:#0f1b2d;--muted:#526077;--line:#e2e8f0;--navy:#0b2545;--accent:#0ea5b7;--go:#166534;--goBg:#dcfce7;--idle:#475569;--idleBg:#eef2f6;--warn:#92400e;--warnBg:#fef3c7;--bad:#b91c1c;--badBg:#fee2e2;--r:14px}
 *{box-sizing:border-box}
 body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--ink);font-size:14px}
-header{background:linear-gradient(90deg,var(--navy),#13406e);color:#fff;padding:14px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+header{background:var(--navy);color:#fff;padding:14px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px}
 .logo{width:34px;height:34px;border-radius:9px;background:var(--accent);display:grid;place-items:center;font-size:13px;font-weight:700}
 .brand small{display:block;font-weight:500;font-size:12px;opacity:.7}
@@ -469,12 +482,12 @@ header{background:linear-gradient(90deg,var(--navy),#13406e);color:#fff;padding:
 .edl{display:flex;flex-direction:column;min-height:0}.edf{padding:12px 14px;border-bottom:1px solid var(--line);font-size:13px;color:var(--muted)}
 #edList{overflow:auto;flex:1}
 .eli{padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer;display:flex;justify-content:space-between;gap:8px;align-items:center}
-.eli:hover{background:var(--bg)}.eli.sel{background:#e0f2f5;box-shadow:inset 3px 0 var(--accent)}
+.eli:hover{background:var(--bg)}.eli.sel{background:#e0f2f5}.eli.sel b{color:#0b4f5c}
 .eli b{display:block;font-weight:600}.eli small{color:var(--muted)}
 .edc{padding:22px 26px;overflow:auto}
 .edh{display:flex;align-items:center;gap:12px;margin-bottom:6px}.edh h2{margin:0;font-size:20px}.edh .pos{margin-left:auto;color:var(--muted);font-size:13px}
 .miss{color:var(--warn);font-size:13px;margin-bottom:12px}
-fieldset{border:0;padding:0;margin:18px 0 0}legend{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:8px}
+fieldset{border:0;padding:0;margin:18px 0 0}legend{font-size:13px;font-weight:600;color:var(--ink);margin-bottom:8px}
 .fg{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
 .fg label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:var(--muted)}
 .fg input,.fg select{font:inherit;font-size:14px;font-weight:400;color:var(--ink);padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:#fff}
@@ -486,7 +499,7 @@ fieldset{border:0;padding:0;margin:18px 0 0}legend{font-size:12px;font-weight:70
 #edMsg{font-size:13px;margin-left:8px}
 .at{background:#f0f9fb;border:1px solid #cdeaf0;border-radius:12px;padding:12px 14px;margin-top:14px;font-size:13px}
 .at.off{background:var(--bg);border-color:var(--line);color:var(--muted)}
-.at h4{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#0e7490}
+.at h4{margin:0 0 8px;font-size:13px;font-weight:600;color:#0b4f5c}
 .at .kvs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px 14px}.at .kvs span{display:block;color:var(--muted);font-size:11px}
 .docs{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 .fromAt{align-self:flex-start;display:inline-block;font-size:10px;font-weight:700;color:#0e7490;background:#e0f2f5;border-radius:4px;padding:1px 5px;margin-left:6px}
@@ -495,20 +508,30 @@ fieldset{border:0;padding:0;margin:18px 0 0}legend{font-size:12px;font-weight:70
 @media(max-width:900px){#vEdit,#vDrv{padding:12px 16px}#drvRows td:nth-child(3){display:none}.ed{grid-template-columns:1fr;height:auto}#edList{max-height:35vh}}
 .panel{background:var(--card);border-radius:var(--r);box-shadow:0 1px 2px rgba(15,27,45,.06);overflow:auto}
 .panel .intro{padding:16px 20px;border-bottom:1px solid var(--line);color:var(--muted)}.panel .intro b{color:var(--ink)}
-table{width:100%;border-collapse:collapse}th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+table{width:100%;border-collapse:collapse}th{text-align:left;font-size:12px;font-weight:600;color:var(--muted);padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
 td{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
 td input{font:inherit;width:100%;min-width:110px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#fff}
 td input:focus{outline:2px solid var(--accent);border-color:transparent}td input.dirty{background:#fffbeb;border-color:#f59e0b}
 .save{font:inherit;font-weight:600;font-size:13px;color:#fff;background:var(--navy);border:0;padding:8px 14px;border-radius:8px;cursor:pointer}.save:disabled{opacity:.5;cursor:default}
 .msg{font-size:12px;margin-top:4px;max-width:220px}.msg.ok{color:var(--go)}.msg.bad{color:var(--bad)}
+::selection{background:#bfe9f0;color:var(--ink)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+*{scrollbar-width:thin;scrollbar-color:#c5d0dc transparent}
+.kv b,.pill,.t,td,.eli small{font-variant-numeric:tabular-nums}
+.btn2:hover:not(:disabled){border-color:#c5d0dc;background:#f8fafc}.btn2.pri:hover:not(:disabled){background:#123a6b}
+.btn{display:inline-flex;align-items:center;gap:6px}.ic{width:14px;height:14px;flex:none}
+.sk{background:linear-gradient(90deg,#eef2f6 25%,#e3e9f0 37%,#eef2f6 63%);background-size:400% 100%;animation:sk 1.4s ease infinite;border-radius:6px;height:12px;margin:6px 0}
+@keyframes sk{0%{background-position:100% 50%}100%{background-position:0 50%}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 #err{background:var(--badBg);color:var(--bad);padding:10px 24px;display:none;font-size:13px}
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:16px 24px 0}
-.stat{background:var(--card);border-radius:var(--r);padding:14px 16px;box-shadow:0 1px 2px rgba(15,27,45,.06)}
-.stat b{display:block;font-size:24px;font-weight:700}.stat span{color:var(--muted);font-size:12px;font-weight:500;text-transform:uppercase;letter-spacing:.04em}
-main{display:grid;grid-template-columns:360px 1fr;gap:16px;padding:16px 24px 24px;height:calc(100vh - 170px);min-height:560px}
+.sum{display:flex;gap:8px;flex-wrap:wrap;padding:14px 24px 0}
+.sum button{font:inherit;font-size:13px;display:inline-flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);color:var(--ink);padding:7px 12px;border-radius:999px;cursor:pointer;transition:background .15s,border-color .15s}
+.sum button:hover{border-color:#c5d0dc}.sum button[aria-pressed=true]{background:var(--navy);border-color:var(--navy);color:#fff}
+.sum b{font-weight:700;font-variant-numeric:tabular-nums}.sum .dot{width:8px;height:8px;border-radius:50%;animation:none;box-shadow:none}
+main{display:grid;grid-template-columns:360px 1fr;gap:16px;padding:14px 24px 24px;height:calc(100vh - 130px);min-height:560px}
 #list{overflow:auto;display:flex;flex-direction:column;gap:8px;padding-right:4px}
 .card{background:var(--card);border-radius:var(--r);padding:12px 14px;cursor:pointer;border:2px solid transparent;display:flex;gap:12px;box-shadow:0 1px 2px rgba(15,27,45,.06);transition:border-color .15s,transform .15s}
-.card:hover{transform:translateY(-1px);border-color:var(--line)}.card.sel{border-color:var(--accent)}
+.card:hover{border-color:var(--line)}.card.sel{border-color:var(--accent)}
 .av{flex:none;width:38px;height:38px;border-radius:50%;background:#e0f2f5;color:#0e7490;display:grid;place-items:center;font-weight:600;font-size:13px}
 .av.none{background:var(--idleBg);color:var(--idle)}
 .ci{min-width:0;flex:1}.ci .top{display:flex;justify-content:space-between;gap:8px;align-items:center}
@@ -523,14 +546,14 @@ main{display:grid;grid-template-columns:360px 1fr;gap:16px;padding:16px 24px 24p
 .empty{color:var(--muted);display:grid;place-items:center;height:100%;text-align:center}
 .dh{display:flex;align-items:center;gap:14px;margin-bottom:14px}.dh h2{margin:0;font-size:18px}.dh p{margin:2px 0 0;color:var(--muted)}
 .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px}
-.kv{background:var(--bg);border-radius:10px;padding:10px 12px}.kv span{display:block;color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}.kv b{font-weight:600;font-size:14px}
-h3{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:18px 0 8px}
+.kv{background:var(--bg);border-radius:10px;padding:10px 12px}.kv span{display:block;color:var(--muted);font-size:12px;font-weight:500}.kv b{font-weight:600;font-size:14px}
+h3{font-size:14px;font-weight:600;color:var(--ink);margin:22px 0 8px}
 .ev{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line);flex-wrap:wrap}
 .ev .t{color:var(--muted);font-size:12px;min-width:150px}.ev .clips{margin-left:auto;display:flex;gap:6px}
 .btn{font:inherit;font-size:12px;font-weight:600;color:var(--navy);background:#e0f2f5;padding:5px 10px;border-radius:8px;text-decoration:none}.btn:hover{background:#c7eaf0}
 .muted{color:var(--muted)}
 details{margin-top:18px}summary{cursor:pointer;color:var(--muted);font-size:12px}details pre{font-size:11px;background:var(--bg);padding:10px;border-radius:8px;overflow:auto;max-height:260px}
-@media(max-width:900px){.stats{grid-template-columns:repeat(2,1fr);padding:12px 16px 0}main{grid-template-columns:1fr;height:auto;padding:12px 16px}#list{max-height:45vh}#right{grid-template-rows:340px auto}.grid{grid-template-columns:repeat(2,1fr)}header{padding:12px 16px}.live{margin-left:auto}.search{flex-basis:100%;max-width:none;order:3}}
+@media(max-width:900px){.sum{padding:12px 16px 0}main{grid-template-columns:1fr;height:auto;padding:12px 16px}#list{max-height:45vh}#right{grid-template-rows:340px auto}.grid{grid-template-columns:repeat(2,1fr)}header{padding:12px 16px}.live{margin-left:auto}.search{flex-basis:100%;max-width:none;order:3}}
 </style></head><body>
 <header>
  <div class="brand"><div class="logo">MP</div><div>Fleet Dashboard<small>Millennial Pools</small></div></div>
@@ -539,13 +562,8 @@ details{margin-top:18px}summary{cursor:pointer;color:var(--muted);font-size:12px
 <nav class="tabs"><button data-v="vMap" class="on">Live map</button><button data-v="vEdit">Edit vehicles</button><button data-v="vDrv">Drivers</button></nav>
 </header>
 <div id="err"></div>
-<div id="vMap"><section class="stats">
- <div class="stat"><span>Vehicles</span><b id="sTotal">–</b></div>
- <div class="stat"><span>Moving now</span><b id="sMoving" style="color:var(--go)">–</b></div>
- <div class="stat"><span>Parked</span><b id="sParked">–</b></div>
- <div class="stat"><span>No driver assigned</span><b id="sNoDriver" style="color:var(--warn)">–</b></div>
-</section>
-<main><div id="list"><div class="empty">Loading vehicles...</div></div>
+<div id="vMap"><nav class="sum" id="sum" aria-label="Filter vehicles"></nav>
+<main><div id="list"><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div></div>
 <div id="right"><div id="map"></div><div id="detail"><div class="empty">Select a vehicle to see its driver, maintenance and camera footage.</div></div></div></main></div>
 <div id="vDrv" hidden><div class="panel">
  <div class="intro" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><div><b>Drivers</b> <span id="drvCount"></span><br>From your Airtable Drivers table. New drivers are saved to Airtable first, then added to Azuga.</div><span style="flex:1"></span><button class="btn2 pri" id="newDrvBtn">+ New driver</button></div>
@@ -571,6 +589,10 @@ details{margin-top:18px}summary{cursor:pointer;color:var(--muted);font-size:12px
 </div></div>
 <script>
 const $=id=>document.getElementById(id);
+const svg=d=>'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+d+'</svg>';
+const ICON={pin:svg('<path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/>'),
+ file:svg('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>'),
+ play:svg('<path d="M8 5v14l11-7z"/>'),check:svg('<path d="M5 12.5l4.5 4.5L19 7"/>')};
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
 // Azuga wraps lists differently per endpoint; grab the first array we find
 const list=x=>Array.isArray(x)?x:x&&typeof x==='object'?(Object.values(x).map(list).find(a=>a.length)||[]):[];
@@ -612,21 +634,24 @@ function all(){
   const byId={};vehicles.forEach(v=>byId[vid(v)]=v);
   return locs.length?locs.map(l=>({...byId[vid(l)],...l})):vehicles;
 }
+let filt='all';
+const FILTERS={all:['All vehicles',()=>true,''],moving:['Moving',moving,'#16a34a'],parked:['Parked',r=>!moving(r),'#94a3b8'],nodriver:['No driver',r=>!/[a-z]/i.test(dname(r)),'#d97706']};
 function rows(){
   const q=$('q').value.toLowerCase();
-  return all().filter(r=>!q||(vname(r)+' '+dname(r)).toLowerCase().includes(q))
+  return all().filter(r=>FILTERS[filt][1](r)&&(!q||(vname(r)+' '+dname(r)).toLowerCase().includes(q)))
     .sort((a,b)=>moving(b)-moving(a)||vname(a).localeCompare(vname(b)));
 }
 function render(){
   const a=all(),rs=rows();
-  $('sTotal').textContent=a.length;$('sMoving').textContent=a.filter(moving).length;
-  $('sParked').textContent=a.filter(r=>!moving(r)).length;$('sNoDriver').textContent=a.filter(r=>!/[a-z]/i.test(dname(r))).length;
-  $('list').innerHTML=rs.length?rs.map(r=>{const d=dname(r),named=/[a-z]/i.test(d);return '<div class="card'+(sel==vid(r)?' sel':'')+'" data-id="'+esc(vid(r))+'"><div class="av'+(named?'':' none')+'">'+esc(initials(d))+'</div><div class="ci"><div class="top"><b>'+esc(vname(r))+'</b>'+status(r)+'</div><div class="d">'+(named?esc(d):'<span class="muted">No driver name'+(d?' · '+esc(d):'')+'</span>')+'</div><div class="a">'+esc(pick(r,'address','landmark')||'Location unavailable')+'</div></div></div>'}).join(''):'<div class="empty">No vehicles match your search.</div>';
+  $('sum').innerHTML=Object.entries(FILTERS).map(([k,[label,fn,c]])=>'<button data-f="'+k+'" aria-pressed="'+(filt===k)+'">'+(c?'<span class="dot" style="background:'+c+'"></span>':'')+label+' <b>'+a.filter(fn).length+'</b></button>').join('');
+  $('sum').querySelectorAll('button').forEach(b=>b.onclick=()=>{filt=b.dataset.f;render()});
+  $('list').innerHTML=rs.length?rs.map(r=>{const d=dname(r),named=/[a-z]/i.test(d);return '<div class="card'+(sel==vid(r)?' sel':'')+'" data-id="'+esc(vid(r))+'"><div class="av'+(named?'':' none')+'">'+esc(initials(d))+'</div><div class="ci"><div class="top"><b>'+esc(vname(r))+'</b>'+status(r)+'</div><div class="d">'+(named?esc(d):'<span class="muted">No driver name'+(d?' · '+esc(d):'')+'</span>')+'</div><div class="a">'+esc(pick(r,'address','landmark')||'Location unavailable')+'</div></div></div>'}).join(''):'<div class="empty" style="padding:30px">'+(a.length?'No vehicles match. Clear the search or pick All vehicles above.':'No vehicles yet. Once Azuga reports your trucks, they appear here.')+'</div>';
   document.querySelectorAll('.card').forEach(c=>c.onclick=()=>select(c.dataset.id));
-  const pts=[];
+  const pts=[],shown=new Set(rs.map(vid));
+  Object.entries(markers).forEach(([id,m])=>{if(!shown.has(id))map.removeLayer(m)});
   rs.forEach(r=>{const lat=+pick(r,'latitude','lat'),lng=+pick(r,'longitude','lng','lon');if(!lat||!lng)return;pts.push([lat,lng]);
     const id=vid(r),isSel=sel==id,c=moving(r)?'#16a34a':'#0b2545';
-    const m=markers[id]||(markers[id]=L.circleMarker([lat,lng]).addTo(map).on('click',()=>select(id)));
+    const m=markers[id]||(markers[id]=L.circleMarker([lat,lng]).on('click',()=>select(id)));if(!map.hasLayer(m))m.addTo(map);
     m.setLatLng([lat,lng]).setStyle({radius:isSel?11:7,color:'#fff',weight:2,fillColor:isSel?'#0ea5b7':c,fillOpacity:1}).bindTooltip(esc(vname(r))+(dname(r)?' · '+esc(dname(r)):''));
     if(isSel)m.bringToFront();});
   if(!fitted&&pts.length){map.fitBounds(pts,{padding:[30,30]});fitted=true}
@@ -637,7 +662,7 @@ async function select(id){
   const d=dname(r),named=/[a-z]/i.test(d),mmy=[r.year,r.make,r.model].filter(Boolean).join(' ');
   $('detail').innerHTML='<div class="dh"><div class="av'+(named?'':' none')+'" style="width:46px;height:46px">'+esc(initials(d))+'</div><div><h2>'+esc(vname(r))+'</h2><p>'+(named?esc(d):'No driver name')+(mmy?' · '+esc(mmy):'')+'</p></div><div style="margin-left:auto">'+status(r)+'</div></div>'
    +'<div class="grid"><div class="kv"><span>Odometer</span><b>'+esc(odo(r))+'</b></div><div class="kv"><span>Speed</span><b>'+(moving(r)?Math.round(speed(r)):0)+' mph</b></div><div class="kv"><span>Group</span><b>'+esc(pick(r,'groupName')||'–')+'</b></div><div class="kv"><span>Plate</span><b>'+esc(pick(r,'licensePlate','licensePlateNo','plateNumber')||'–')+'</b></div></div>'
-   +'<div class="muted">📍 '+esc(pick(r,'address','landmark')||'Location unavailable')+'</div>'
+   +'<div class="muted" style="display:flex;gap:6px;align-items:center">'+ICON.pin+esc(pick(r,'address','landmark')||'Location unavailable')+'</div>'
    +atBox(id)
    +'<h3>Maintenance</h3><div id="m" class="muted">Loading...</div><h3>Camera events · last 7 days</h3><div id="vids" class="muted">Loading...</div>'
    +'<details><summary>All Azuga data for this vehicle</summary><pre>'+esc(JSON.stringify(r,null,2))+'</pre></details>';
@@ -646,7 +671,7 @@ async function select(id){
     $('m').innerHTML=m.length?m.map(x=>{const s=String(pick(x,'status','reminderStatus')||'');return '<div class="ev"><span class="pill '+(/over/i.test(s)?'bad':/up/i.test(s)?'warn':'idle')+'">'+esc(s||'Scheduled')+'</span><b>'+esc(pick(x,'serviceType','serviceName')||'Service')+'</b><span class="t">'+esc(when(pick(x,'nextServiceDate','dueDate')))+(pick(x,'nextServiceOdometer')?' · at '+esc(pick(x,'nextServiceOdometer'))+' mi':'')+'</span></div>'}).join(''):(r.maintenanceEnabled===false?'Maintenance tracking is turned off for this vehicle in Azuga.':'No maintenance scheduled.');
   }catch(e){$('m').textContent=e.message;retry(id)}
   try{const v=list(await get('/api/videos?vehicleId='+encodeURIComponent(id)));
-    $('vids').innerHTML=v.length?v.map(x=>{const e=pick(x,'eventType','eventName');const clips=links(x).filter(u=>!/thumb/i.test(u));return '<div class="ev"><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="t">'+esc(when(pick(x,'eventTime','startTime')))+'</span><span class="muted">'+esc(pick(x,'driverName')||'')+'</span><span class="clips">'+clips.map((u,i)=>'<a class="btn" target="_blank" rel="noopener" href="'+esc(u)+'">▶ Clip '+(i+1)+'</a>').join('')+'</span></div>'}).join(''):'No camera events in the last 7 days.';
+    $('vids').innerHTML=v.length?v.map(x=>{const e=pick(x,'eventType','eventName');const clips=links(x).filter(u=>!/thumb/i.test(u));return '<div class="ev"><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="t">'+esc(when(pick(x,'eventTime','startTime')))+'</span><span class="muted">'+esc(pick(x,'driverName')||'')+'</span><span class="clips">'+clips.map((u,i)=>'<a class="btn" target="_blank" rel="noopener" href="'+esc(u)+'">'+ICON.play+'Clip '+(i+1)+'</a>').join('')+'</span></div>'}).join(''):'No camera events in the last 7 days.';
   }catch(e){$('vids').textContent=e.message;retry(id)}
 }
 const retried=new Set();function retry(id){if(retried.has(id))return;retried.add(id);setTimeout(()=>{if(sel==id)select(id)},30000)}
@@ -654,7 +679,7 @@ const retried=new Set();function retry(id){if(retried.has(id))return;retried.add
 let AT=null;
 async function loadAT(){try{AT=await get('/api/airtable')}catch(e){AT={connected:true,error:e.message,links:{}}}if(!$('vEdit').hidden)renderEdit()}
 const link=id=>AT&&AT.links&&AT.links[id];
-const docBtns=t=>{const d=[...t.insCard.map(f=>['Insurance card',f]),...t.files.map(f=>[f.name,f])];return d.length?'<div class="docs">'+d.map(([n,f])=>'<a class="btn" target="_blank" rel="noopener" href="'+esc(f.url)+'">📄 '+esc(n)+'</a>').join('')+'</div>':'<div class="muted" style="margin-top:8px">No insurance card or files in Airtable yet.</div>'};
+const docBtns=t=>{const d=[...t.insCard.map(f=>['Insurance card',f]),...t.files.map(f=>[f.name,f])];return d.length?'<div class="docs">'+d.map(([n,f])=>'<a class="btn" target="_blank" rel="noopener" href="'+esc(f.url)+'">'+ICON.file+esc(n)+'</a>').join('')+'</div>':'<div class="muted" style="margin-top:8px">No insurance card or files in Airtable yet.</div>'};
 const drvLine=d=>d?esc(d.name)+(d.license?' · License '+esc(d.state?d.state+' ':'')+esc(d.license):''):'None';
 function atBox(id){
   if(!AT)return '<div class="at off">Loading Airtable...</div>';
@@ -687,7 +712,7 @@ const edRows=()=>{const q=$('q').value.toLowerCase();return vehicles.filter(v=>(
 const dirtyCount=()=>document.querySelectorAll('#edCard .dirty').length;
 function renderEdit(){
   const rs=edRows();
-  $('edList').innerHTML=rs.length?rs.map(v=>{const m=missing(v);return '<div class="eli'+(edSel==vid(v)?' sel':'')+'" data-id="'+esc(vid(v))+'"><div><b>'+esc(vname(v))+'</b><small>'+esc(/[a-z]/i.test(dname(v))?dname(v):'No driver')+(pick(v,'licensePlateNo','licensePlate')?' · '+esc(pick(v,'licensePlateNo','licensePlate')):'')+'</small></div>'+(outOfSync(v)?'<span class="pill warn">Sync</span>':m.length?'<span class="pill warn">Missing '+m.length+'</span>':'<span class="pill go">✓</span>')+'</div>'}).join(''):'<div class="empty" style="padding:30px">'+(vehicles.length?'No trucks match.':'Loading...')+'</div>';
+  $('edList').innerHTML=rs.length?rs.map(v=>{const m=missing(v);return '<div class="eli'+(edSel==vid(v)?' sel':'')+'" data-id="'+esc(vid(v))+'"><div><b>'+esc(vname(v))+'</b><small>'+esc(/[a-z]/i.test(dname(v))?dname(v):'No driver')+(pick(v,'licensePlateNo','licensePlate')?' · '+esc(pick(v,'licensePlateNo','licensePlate')):'')+'</small></div>'+(outOfSync(v)?'<span class="pill warn">Sync</span>':m.length?'<span class="pill warn">Missing '+m.length+'</span>':'<span class="pill go" aria-label="Complete">'+ICON.check+'</span>')+'</div>'}).join(''):'<div class="empty" style="padding:30px">'+(vehicles.length?'No trucks match.':'Loading...')+'</div>';
   document.querySelectorAll('.eli').forEach(e=>e.onclick=()=>openEd(e.dataset.id));
   const n=vehicles.filter(outOfSync).length;
   if(!syncing)$('syncBar').innerHTML=!AT?'':!AT.connected?'<span class="muted">Airtable not connected</span>':AT.error?'<span class="muted">Airtable unavailable</span>':n?'<button class="btn2 pri" id="syncAll" style="width:100%">Sync '+n+' truck'+(n>1?'s':'')+' from Airtable → Azuga</button>':'<span style="color:var(--go)">✓ Azuga matches Airtable</span>';
@@ -700,9 +725,13 @@ async function syncAll(){
   syncing=true;let ok=0;const bad=[];
   for(let i=0;i<todo.length;i++){
     $('syncBar').innerHTML='<span class="muted">Syncing '+(i+1)+' of '+todo.length+': '+esc(vname(todo[i]))+'...</span>';
-    try{const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({trackeeId:vid(todo[i])})});const j=await r.json();if(j.error)throw new Error(j.error);ok++}
-    catch(e){bad.push(vname(todo[i])+': '+e.message)}
-    await new Promise(r=>setTimeout(r,2500)); // stay under Azuga's per-minute limit
+    for(let tries=1;;tries++){
+      try{await post('/api/sync',{trackeeId:vid(todo[i])});ok++;break}
+      catch(e){
+        if(/limiting/i.test(e.message)&&tries<2){$('syncBar').innerHTML='<span class="muted">Azuga asked us to slow down. Waiting 60 seconds, then continuing...</span>';await new Promise(r=>setTimeout(r,60000));continue}
+        bad.push(vname(todo[i])+': '+e.message);break}
+    }
+    await new Promise(r=>setTimeout(r,5000)); // stay under Azuga's per-minute limit
   }
   syncing=false;vehicles=list(await get('/api/vehicles'));await loadAT();renderEdit();
   $('syncBar').insertAdjacentHTML('afterbegin','<div style="margin-bottom:8px;color:'+(bad.length?'var(--bad)':'var(--go)')+'">Synced '+ok+' of '+todo.length+'.'+(bad.length?' Problems:<br>'+bad.map(esc).join('<br>'):'')+'</div>');
@@ -766,7 +795,7 @@ function renderDrivers(){
   $('drvCount').innerHTML='<span class="muted">· '+PEOPLE.drivers.length+' total'+(PEOPLE.azugaOk&&missing?' · <span style="color:var(--warn)">'+missing+' not in Azuga</span>':'')+'</span>';
   $('policyList').innerHTML=[...new Set(PEOPLE.drivers.map(d=>d.policy).filter(Boolean))].map(p=>'<option value="'+esc(p)+'">').join('');
   $('drvRows').innerHTML=ds.length?ds.map(d=>'<tr data-id="'+esc(d.id)+'"><td><b>'+esc(d.name)+'</b>'+(d.notes?'<div class="sub">'+esc(d.notes)+'</div>':'')+'</td>'
-    +'<td>'+(d.license?esc((d.state?d.state+' ':'')+d.license):'<span class="muted">–</span>')+(d.pic.length?'<div><a class="btn" target="_blank" rel="noopener" href="'+esc(d.pic[0].url)+'">📄 License photo</a></div>':'')+'</td>'
+    +'<td>'+(d.license?esc((d.state?d.state+' ':'')+d.license):'<span class="muted">–</span>')+(d.pic.length?'<div><a class="btn" target="_blank" rel="noopener" href="'+esc(d.pic[0].url)+'">'+ICON.file+'License photo</a></div>':'')+'</td>'
     +'<td>'+esc(d.policy||'–')+'</td><td>'+(d.trucks.length?d.trucks.map(esc).join('<br>'):'<span class="muted">None</span>')+'</td>'
     +'<td>'+(!PEOPLE.azugaOk?'<span class="muted">?</span>':d.inAzuga?'<span class="pill go">In Azuga</span>':'<span class="pill warn">Not in Azuga</span><div class="azf"><input placeholder="Email (Azuga login)" type="email" class="aze"><input placeholder="Phone" type="tel" class="azp"><button class="btn2 azgo">Add to Azuga</button></div><div class="msg"></div>')+'</td></tr>').join('')
     :'<tr><td colspan="5" class="muted">No drivers match.</td></tr>';
