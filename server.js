@@ -161,15 +161,17 @@ const initials=n=>/[a-z]/i.test(n)?n.split(/ +/).map(w=>w[0]).slice(0,2).join(''
 // Azuga's odometer field name varies; take the first non-time numeric "odo" field
 const odo=r=>{const k=Object.keys(r).find(k=>/odo/i.test(k)&&!/time/i.test(k)&&typeof r[k]==='number'&&r[k]>0);return k?Math.round(r[k]).toLocaleString():'–'};
 const when=t=>+t>1e11?new Date(+t).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):(t||'');
-const speed=r=>+pick(r,'speed')||0;
-const moving=r=>speed(r)>0;
+// Azuga sends km/h unless a unit field says miles; convert to mph
+const speed=r=>{const s=+pick(r,'speed')||0;return /mi|mph/i.test(String(pick(r,'speedUnit','speedUom','unitOfMeasure','distanceUnit')||''))?s:s*0.621371};
+// Old (stored) locations and finished trips keep their last speed, so don't count them as moving
+const moving=r=>speed(r)>0&&r.storedLocation!==true&&!/stop|end|park|idle|off/i.test(String(pick(r,'tripState','tripStatus')||''));
 const status=r=>moving(r)?'<span class="pill go">Moving · '+Math.round(speed(r))+' mph</span>':'<span class="pill idle">Parked</span>';
 const evName=e=>String(e||'Event').replace(/^CAM_/,'').replace(/_MESSAGE$/,'').replace(/_/g,' ').toLowerCase().replace(/^./,c=>c.toUpperCase()).replace('Hard breaking','Hard braking');
 const evClass=e=>/FATIGUE|DISTRACT|VIOLENT|COLLISION|PHONE|SMOK|SPEED/i.test(e)?'bad':'warn';
 const links=o=>JSON.stringify(o).match(/https?:[^"\\\\]+/g)||[];
 let vehicles=[],locs=[],maint=[],sel=null,markers={};
 const map=L.map('map',{zoomControl:true}).setView([40.2,-74.8],8);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',{attribution:'&copy; OpenStreetMap &copy; CARTO',maxZoom:19}).addTo(map);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap',maxZoom:19}).addTo(map);
 let fitted=false;
 
 async function get(p){const r=await fetch(p);const j=await r.json();if(j.error)throw new Error(j.error);return j}
@@ -211,7 +213,7 @@ async function select(id){
   if(markers[id])map.setView(markers[id].getLatLng(),13);
   const d=dname(r),named=/[a-z]/i.test(d),mmy=[r.year,r.make,r.model].filter(Boolean).join(' ');
   $('detail').innerHTML='<div class="dh"><div class="av'+(named?'':' none')+'" style="width:46px;height:46px">'+esc(initials(d))+'</div><div><h2>'+esc(vname(r))+'</h2><p>'+(named?esc(d):'No driver name')+(mmy?' · '+esc(mmy):'')+'</p></div><div style="margin-left:auto">'+status(r)+'</div></div>'
-   +'<div class="grid"><div class="kv"><span>Odometer</span><b>'+esc(odo(r))+'</b></div><div class="kv"><span>Speed</span><b>'+Math.round(speed(r))+' mph</b></div><div class="kv"><span>Group</span><b>'+esc(pick(r,'groupName')||'–')+'</b></div><div class="kv"><span>Plate</span><b>'+esc(pick(r,'licensePlate','licensePlateNo','plateNumber')||'–')+'</b></div></div>'
+   +'<div class="grid"><div class="kv"><span>Odometer</span><b>'+esc(odo(r))+'</b></div><div class="kv"><span>Speed</span><b>'+(moving(r)?Math.round(speed(r)):0)+' mph</b></div><div class="kv"><span>Group</span><b>'+esc(pick(r,'groupName')||'–')+'</b></div><div class="kv"><span>Plate</span><b>'+esc(pick(r,'licensePlate','licensePlateNo','plateNumber')||'–')+'</b></div></div>'
    +'<div class="muted">📍 '+esc(pick(r,'address','landmark')||'Location unavailable')+'</div>'
    +'<h3>Maintenance</h3><div id="m" class="muted">Loading...</div><h3>Camera events · last 7 days</h3><div id="vids" class="muted">Loading...</div>'
    +'<details><summary>All Azuga data for this vehicle</summary><pre>'+esc(JSON.stringify(r,null,2))+'</pre></details>';
