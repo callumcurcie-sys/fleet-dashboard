@@ -66,7 +66,7 @@ function cached(key, ttlSec, fn) {
 const routes = {
   '/api/vehicles': () => cached('vehicles', 600, () => azuga('/trackees.json?limit=100&offset=0')),
   '/api/locations': () => cached('locations', 30, () => azuga('/vehicles/latestlocation', {})),
-  '/api/drivers': () => drivers(),
+  '/api/drivers': () => driverGroups(),
   '/api/airtable': () => atLinks(),
   '/api/people': () => people(),
   '/api/maintenance': () => cached('maintenance', 600, () => azuga('/maintanance/reports/scheduledreport.json?' + new URLSearchParams({
@@ -88,9 +88,20 @@ const list = x => Array.isArray(x) ? x : x && typeof x === 'object' ? (Object.va
 const rawDrivers = () => cached('rawDrivers', 600, async () => list(await azuga('/users.json?limit=500&offset=0&userType=driver', {})));
 const drivers = () => cached('drivers', 600, async () =>
   (await rawDrivers())
-    .map(u => ({ id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, '') }))
+    .map(u => ({ id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, ''), email: u.email || '' }))
     .filter(u => u.id && /[a-z]/i.test(u.name))
     .sort((x, y) => x.name.localeCompare(y.name)));
+
+// Azuga can hold several logins for one person. Group them by name; the "main" login is the one
+// already used on the most trucks (ties: the first listed). The dropdown shows one entry per person.
+async function driverGroups() {
+  const [ds, vs] = await Promise.all([drivers(), routes['/api/vehicles']().then(list).catch(() => [])]);
+  const uses = {}; vs.forEach(v => v.userId && (uses[v.userId] = (uses[v.userId] || 0) + 1));
+  const g = {};
+  ds.forEach(d => (g[d.name.toLowerCase().replace(/\s+/g, ' ')] = g[d.name.toLowerCase().replace(/\s+/g, ' ')] || []).push({ ...d, trucks: uses[d.id] || 0 }));
+  return Object.values(g).map(acc => { acc.sort((a, b) => b.trucks - a.trucks); return { id: acc[0].id, name: acc[0].name, ids: acc.map(a => a.id), accounts: acc }; })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
 
 const OWNERSHIP = ['Company', 'Employee', 'Leased', 'Rental'];
 const text = (v, max, label) => {
@@ -257,9 +268,9 @@ async function diffFor(v, t) {
   if (t.make && t.make.toLowerCase() !== clean(v.make).toLowerCase()) changes.make = t.make;
   if (t.model && t.model.toLowerCase() !== clean(v.model).toLowerCase()) changes.model = t.model;
   if (t.driver) {
-    const ad = (await drivers()).find(d => normName(d.name) === normName(t.driver.name));
+    const ad = (await driverGroups()).find(d => normName(d.name) === normName(t.driver.name));
     if (!ad) notes.push('Driver ' + t.driver.name + ' is not set up in Azuga yet.');
-    else if (ad.id !== v.userId) changes.userId = ad.id;
+    else if (!ad.ids.includes(v.userId)) changes.userId = ad.id;
   }
   return { changes, notes };
 }
@@ -315,9 +326,56 @@ async function people() {
   const [at, az] = await Promise.all([atData(), drivers().catch(() => null)]);
   const truckLabel = Object.fromEntries(at.trucks.map(t => [t.id, (t.truckNo ? '#' + t.truckNo.split(/[ ~(]/)[0] + ' ' : '') + [t.year, t.make, t.model].filter(Boolean).join(' ')]));
   const inAz = new Set((az || []).map(d => normName(d.name)));
-  return { connected: true, azugaOk: !!az, drivers: at.drivers.filter(d => d.name).sort((a, b) => a.name.localeCompare(b.name)).map(d => ({
+  const named = at.drivers.filter(d => d.name);
+  const azDupes = az ? (await driverGroups()).filter(g => g.ids.length > 1).map(g => ({ name: g.name, accounts: g.accounts.map(a => ({ email: a.email, trucks: a.trucks })) })) : [];
+  return { connected: true, azugaOk: !!az, azDupes, dupes: dupeGroups(named),
+    blank: at.drivers.filter(d => !d.name).map(d => ({ id: d.id, license: d.license, policy: d.policy, trucks: d.truckIds.map(id => truckLabel[id]).filter(Boolean) })),
+    drivers: named.sort((a, b) => a.name.localeCompare(b.name)).map(d => ({
     id: d.id, name: d.name, license: d.license, state: d.state, policy: d.policy, notes: d.notes, pic: d.pic,
     trucks: d.truckIds.map(id => truckLabel[id]).filter(Boolean), inAzuga: inAz.has(normName(d.name)) })) };
+}
+
+// Same person entered twice: same name (ignoring case, dots, Jr/Sr) or same license number.
+const dupeName = n => normName(n).replace(/[.,']/g, '').replace(/\s+(jr|sr|ii|iii|iv)$/, '');
+const dupeLic = l => clean(l).toUpperCase().replace(/[^A-Z0-9]/g, '');
+function dupeGroups(ds) {
+  const parent = {}, find = x => parent[x] === x ? x : (parent[x] = find(parent[x]));
+  ds.forEach(d => parent[d.id] = d.id);
+  const seen = {};
+  ds.forEach(d => ['n:' + dupeName(d.name), dupeLic(d.license).length >= 5 && 'l:' + dupeLic(d.license)].filter(Boolean).forEach(k => {
+    if (seen[k]) parent[find(d.id)] = find(seen[k]); else seen[k] = d.id;
+  }));
+  const groups = {};
+  ds.forEach(d => (groups[find(d.id)] = groups[find(d.id)] || []).push(d.id));
+  return Object.values(groups).filter(g => g.length > 1);
+}
+
+// Merge duplicates into one record: copy trucks and any missing details onto the keeper, then delete the extras.
+async function mergeDrivers(b) {
+  const at = await atData(), byId = Object.fromEntries(at.drivers.map(d => [d.id, d]));
+  const keep = byId[b.keepId], remove = (b.removeIds || []).map(id => byId[id]);
+  if (!keep || !remove.length || remove.some(r => !r)) throw new Error('Those drivers were not found. Refresh and try again.');
+  const group = dupeGroups(at.drivers.filter(d => d.name)).find(g => g.includes(keep.id));
+  if (!group || remove.some(r => !group.includes(r.id) || r.id === keep.id)) throw new Error('Only records flagged as duplicates of each other can be merged.');
+  const fields = { [D.trucks]: [...new Set([keep, ...remove].flatMap(d => d.truckIds))] };
+  for (const k of ['license', 'state', 'policy', 'notes']) if (!keep[k]) { const v = remove.map(r => r[k]).find(Boolean); if (v) fields[D[k]] = v; }
+  if (!keep.pic.length) { const pics = remove.flatMap(r => r.pic); if (pics.length) fields[D.pic] = pics.map(p => ({ url: p.url, filename: p.name })); }
+  await airtable(AT_DRIVERS + '/' + keep.id, { method: 'PATCH', body: JSON.stringify({ fields, typecast: true }) });
+  await airtable(AT_DRIVERS + '?' + remove.map(r => 'records[]=' + r.id).join('&'), { method: 'DELETE' });
+  cache.delete('airtable');
+  console.log(new Date().toISOString(), 'Merged drivers into', keep.name, '- removed', remove.length);
+  return { ok: true, kept: keep.name, removed: remove.length };
+}
+
+// Only records with no name can be deleted outright (leftover blank rows).
+async function deleteBlankDriver(b) {
+  const d = (await atData()).drivers.find(d => d.id === b.id);
+  if (!d) throw new Error('Record not found. Refresh and try again.');
+  if (d.name) throw new Error('Only blank, unnamed records can be deleted here.');
+  await airtable(AT_DRIVERS + '?records[]=' + d.id, { method: 'DELETE' });
+  cache.delete('airtable');
+  console.log(new Date().toISOString(), 'Deleted blank driver record', d.id);
+  return { ok: true };
 }
 
 const EMAIL_OK = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -425,7 +483,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/azuga': addDriverToAzuga };
+  const POSTS = { '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver };
   if (POSTS[url.pathname]) {
     // JSON-only + POST-only, so another website can't trigger a change with a plain form
     if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
@@ -610,29 +668,31 @@ table{width:100%;border-collapse:collapse}
 th{text-align:left;font-size:12px;font-weight:600;color:var(--muted);padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap;background:#fbfaf7}
 td{padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
 tbody tr:hover td{background:#fcfbf8}
-/* Crew roster */
-.crewhead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
-.crewhead h2{margin:0;font-size:22px;font-weight:800;letter-spacing:-.02em}.crewhead p{margin:2px 0 0}
-.nd{padding:18px 20px;margin-bottom:14px;border:1px solid var(--shallow2)}
-.crew{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:12px;align-items:start}
-.mate{background:var(--card);border-radius:14px;box-shadow:var(--sh);padding:16px;display:flex;gap:14px;align-items:flex-start;border:1px solid transparent;transition:border-color .15s,box-shadow .15s}
-.mate:hover{border-color:var(--line2);box-shadow:0 4px 14px rgba(16,34,46,.08)}
-.mav{flex:none;width:48px;height:48px;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:16px;letter-spacing:.02em}
-.mi{min-width:0;flex:1}
-.mi .nm{display:flex;align-items:center;justify-content:space-between;gap:8px}
-.mi .nm b{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
-.chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;padding:3px 9px;border-radius:7px;background:var(--deck);color:var(--ink2)}
-.chip.truck{background:var(--shallow);color:var(--poolInk)}.chip.none{background:transparent;border:1px dashed var(--line2);color:var(--muted);font-weight:500}
-.chip .ic{width:13px;height:13px}
-.mi .meta{font-size:12px;color:var(--muted);margin-top:8px;display:flex;flex-direction:column;gap:2px}
-.mi .meta span{display:flex;gap:6px;align-items:center}.mi .meta .ic{width:13px;height:13px}
-.mi .notes{font-size:12px;color:var(--ink2);margin-top:8px;font-style:italic}
-.azbtn{flex:none;white-space:nowrap;font:inherit;font-size:12px;font-weight:600;color:var(--warn);background:var(--warnBg);border:0;border-radius:999px;padding:3px 10px;cursor:pointer}
-.azbtn:hover{filter:brightness(.97)}
-.mate .azf{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line2)}
-.mate .azf input{flex:1 1 140px;width:auto}
-.crew .empty{grid-column:1/-1;background:var(--card);border-radius:14px;padding:40px}
+/* Driver roster: one calm list */
+.crewhead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.crewhead h2{margin:0;font-size:20px;font-weight:700;letter-spacing:-.01em}.crewhead p{margin:2px 0 0;font-size:13px}
+.nd{padding:18px 20px;margin-bottom:12px}
+.rrow{display:grid;grid-template-columns:36px minmax(160px,1.3fr) minmax(140px,1fr) 150px;gap:14px;align-items:center;padding:11px 18px;border-bottom:1px solid var(--line)}
+.rrow:last-child{border-bottom:0}.rrow:hover{background:#fcfbf8}
+.rrow.off{opacity:.55}.rrow.off:hover{opacity:.8}
+.mav{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:12px;background:var(--shallow);color:var(--poolInk)}
+.rn{min-width:0}.rn b{display:block;font-weight:600}.rn span{display:block;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rt{font-size:13px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rt.none{color:var(--muted)}
+.rs{font-size:13px;text-align:right;white-space:nowrap}
+.inaz{color:var(--go);display:inline-flex;align-items:center;gap:6px}.inaz::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--goDot)}
+.tag{font-size:11px;font-weight:600;color:var(--muted);border:1px solid var(--line2);border-radius:5px;padding:0 5px;margin-left:6px;vertical-align:1px}
+.link{font:inherit;font-size:13px;font-weight:600;color:var(--poolInk);background:none;border:0;padding:0;cursor:pointer;text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--shallow2)}
+.link:hover{text-decoration-color:currentColor}
+.rrow .azf{grid-column:2/-1;margin:2px 0 4px;display:flex;gap:6px;flex-wrap:wrap}
+.rrow .azf input{flex:1 1 160px;width:auto}
+.addrow{display:flex;align-items:center;gap:10px;width:100%;padding:13px 18px;font:inherit;font-weight:600;color:var(--poolInk);background:none;border:0;cursor:pointer;text-align:left}
+.addrow:hover{background:var(--shallow)}.addrow .mav{background:none;border:1.5px dashed var(--shallow2);font-size:18px;font-weight:500}
+.dup{background:var(--warnBg);border-radius:var(--r);padding:14px 18px;margin-bottom:12px;color:var(--ink2);font-size:13px}
+.dup h4{margin:0 0 4px;font-size:14px;color:var(--warn)}
+.dupg{background:#fff;border-radius:10px;padding:10px 12px;margin-top:10px}
+.dupg label{display:flex;gap:8px;align-items:baseline;padding:4px 0;cursor:pointer}.dupg label span{color:var(--muted)}
+.dupg .edb{margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
+@media(max-width:700px){.rrow{grid-template-columns:36px minmax(0,1fr) auto;row-gap:2px}.rt{grid-column:2/-1;grid-row:2;font-size:12px}.rs{grid-row:1;grid-column:3}.rrow .azf{grid-row:3}}
 .azf{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .azf input{font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line2);border-radius:7px;min-width:0;width:170px}
 .msg{font-size:12px;margin-top:4px;max-width:240px}.msg.ok{color:var(--go)}.msg.bad{color:var(--bad)}
@@ -660,10 +720,10 @@ tbody tr:hover td{background:#fcfbf8}
   <div><h2>Your crew</h2><p id="drvCount" class="muted">Loading drivers from Airtable...</p></div>
   <span style="flex:1"></span>
   <nav class="sum" id="dsum" aria-label="Filter drivers"></nav>
-  <button class="btn2 pri" id="newDrvBtn">+ New driver</button>
+  <button class="btn2 pri" id="newDrvBtn">+ Add driver</button>
  </div>
  <form id="newDrv" hidden autocomplete="off" class="panel nd">
-  <h3 style="margin:0 0 12px">New driver</h3><div class="fg">
+  <h3 style="margin:0 0 12px">Add a driver</h3><div class="fg">
    <label>Full name *<input name="name" maxlength="80" required></label>
    <label>License number<input name="license" maxlength="40"></label>
    <label>License state<input name="state" maxlength="20" placeholder="NJ"></label>
@@ -676,7 +736,8 @@ tbody tr:hover td{background:#fcfbf8}
   <div class="edb"><span id="ndMsg" style="font-size:13px"></span><span style="flex:1"></span><button type="button" class="btn2" id="ndCancel">Cancel</button><button class="btn2 pri" id="ndSave">Save driver</button></div>
  </form>
  <datalist id="policyList"></datalist>
- <div class="crew" id="drvRows"><div class="mate"><div class="mav sk" style="height:48px;width:48px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div></div></div><div class="mate"><div class="mav sk" style="height:48px;width:48px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div></div></div><div class="mate"><div class="mav sk" style="height:48px;width:48px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div></div></div><div class="mate"><div class="mav sk" style="height:48px;width:48px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div></div></div><div class="mate"><div class="mav sk" style="height:48px;width:48px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div></div></div><div class="mate"><div class="mav sk" style="height:48px;width:48px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div></div></div></div>
+ <div id="dupes"></div>
+ <div class="panel roster" id="drvRows"><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div></div>
 </div>
 <div id="vEdit" hidden><div class="ed">
  <aside class="panel edl"><div class="edf"><label><input type="checkbox" id="needs"> Only show trucks that need attention</label><div id="syncBar" style="margin-top:10px"></div></div><div id="edList"></div></aside>
@@ -857,7 +918,7 @@ async function openEd(id){
     const want=atWant(L,k);const fa=want!==undefined&&k!=='userId';
     if(fa)cur=want;
     if(type==='select')return '<label>'+label+'<select name="'+k+'" data-orig="'+esc(cur||'')+'"><option value="">–</option>'+opt.map(o=>'<option'+(o===cur?' selected':'')+'>'+o+'</option>').join('')+'</select></label>';
-    if(type==='driver'){const curId=v.userId||'',wantId=atWant(L,'userId'),selId=wantId||curId;const known=driverList.some(d=>d.id===curId);return '<label>'+label+'<select name="userId" data-orig="'+esc(curId)+'"'+(wantId?' class="dirty"':'')+'>'+(known?'':'<option value="'+esc(curId)+'" selected>'+esc(/[a-z]/i.test(dname(v))?dname(v):'No driver')+'</option>')+driverList.map(d=>'<option value="'+esc(d.id)+'"'+(d.id===selId?' selected':'')+'>'+esc(d.name)+'</option>').join('')+'</select>'+(wantId?'<span class="fromAt" style="align-self:flex-start">FROM AIRTABLE</span>':'')+(driverList.length?'':'<span class="hint">Could not load the driver list from Azuga.</span>')+'</label>'}
+    if(type==='driver'){const curId=v.userId||'',wantId=atWant(L,'userId'),curG=driverList.find(d=>d.ids.includes(curId)),selId=wantId||curId;const known=!!curG;return '<label>'+label+'<select name="userId" data-orig="'+esc(curId)+'"'+(wantId?' class="dirty"':'')+'>'+(known?'':'<option value="'+esc(curId)+'" selected>'+esc(/[a-z]/i.test(dname(v))?dname(v):'No driver')+'</option>')+driverList.map(d=>{const val=d===curG?curId:d.id;return '<option value="'+esc(val)+'"'+(val===selId?' selected':'')+'>'+esc(d.name)+'</option>'}).join('')+'</select>'+(wantId?'<span class="fromAt" style="align-self:flex-start">FROM AIRTABLE</span>':'')+(driverList.length?'':'<span class="hint">Could not load the driver list from Azuga.</span>')+'</label>'}
     return '<label>'+label+(fa?'<span class="fromAt">FROM AIRTABLE</span>':'')+'<input name="'+k+'" type="'+type+'" '+(opt?'maxlength="'+opt+'"':'')+' value="'+esc(cur??'')+'" data-orig="'+esc(orig??'')+'"'+(fa?' class="dirty"':'')+(k==='odometer'?' placeholder="Now: '+esc(odo(v))+'"':'')+'>'+(k==='odometer'?'<span class="hint">Leave blank to keep the current reading</span>':'')+'</label>'};
   $('edCard').innerHTML='<div class="edh"><h2>'+esc(vname(v))+'</h2><span class="pos">'+(i+1)+' of '+rs.length+'</span></div>'
    +(m.length?'<div class="miss">Missing: '+m.join(', ')+'</div>':'<div class="miss" style="color:var(--go)">All key info filled in</div>')
@@ -895,34 +956,50 @@ const AT_ONLY_KEYS={truckNo:1,policy:1,regRenew:1,ezpass:1};
 let PEOPLE=null;
 async function loadPeople(){try{PEOPLE=await get('/api/people')}catch(e){PEOPLE={connected:true,error:e.message,drivers:[]}}renderDrivers()}
 const post=async(u,b)=>{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.error)throw new Error(j.error);return j};
-// Each driver keeps the same avatar color everywhere (picked from their name)
-const HUES=[['#0b7f9e','#dff1f6'],['#0f766e','#dcf2ee'],['#1d4ed8','#e2eafd'],['#7c3aed','#efe7fd'],['#b45309','#fbeeda'],['#be185d','#fbe4ef'],['#15803d','#dff3e5'],['#9a3412','#fbe7dd']];
-const hueFor=n=>{let h=0;for(const c of n)h=(h*31+c.charCodeAt(0))>>>0;return HUES[h%HUES.length]};
 let dfilt='all';
-const DF={all:['Everyone',()=>true],truck:['On a truck',d=>d.trucks.length],free:['No truck',d=>!d.trucks.length],noaz:['Not in Azuga',d=>PEOPLE&&PEOPLE.azugaOk&&!d.inAzuga]};
+const inactive=d=>/inactive/i.test(d.policy);
+const DF={all:['Everyone',()=>true],truck:['On a truck',d=>d.trucks.length],free:['No truck',d=>!d.trucks.length&&!inactive(d)],noaz:['Not in Azuga',d=>PEOPLE&&PEOPLE.azugaOk&&!d.inAzuga&&!inactive(d)]};
+function renderDupes(){
+  const P=PEOPLE,by=Object.fromEntries(P.drivers.map(d=>[d.id,d])),groups=(P.dupes||[]).map(g=>g.map(id=>by[id]).filter(Boolean)).filter(g=>g.length>1),blank=P.blank||[];
+  const azd=P.azDupes||[];
+  if(!groups.length&&!blank.length&&!azd.length){$('dupes').innerHTML='';return}
+  const line=d=>[d.license&&((d.state?d.state+' ':'')+d.license),d.trucks.join(', '),d.policy].filter(Boolean).join(' · ')||'No details';
+  $('dupes').innerHTML='<div class="dup">'+(groups.length?'<h4>'+groups.length+' possible duplicate'+(groups.length>1?'s':'')+'</h4>Pick the record to keep. Its trucks and any missing details are copied over from the others, then the extras are deleted from Airtable.'
+    +groups.map((g,i)=>'<div class="dupg" data-g="'+i+'">'+g.map((d,j)=>'<label><input type="radio" name="keep'+i+'" value="'+esc(d.id)+'"'+(j===0?' checked':'')+'><b>'+esc(d.name)+'</b><span>'+esc(line(d))+'</span></label>').join('')
+      +'<div class="edb"><span class="msg"></span><span style="flex:1"></span><button class="btn2 pri mergeGo">Merge and delete extras</button></div></div>').join(''):'')
+    +(blank.length?'<h4 style="margin-top:'+(groups.length?'14px':'0')+'">'+blank.length+' blank record'+(blank.length>1?'s':'')+'</h4>These have no name in Airtable.'
+    +blank.map(d=>'<div class="dupg" data-id="'+esc(d.id)+'" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>'+esc([d.license,d.policy,d.trucks.join(', ')].filter(Boolean).join(' · ')||'Empty')+'</span><span style="flex:1"></span><span class="msg"></span><button class="btn2 delBlank">Delete</button></div>').join(''):'')
+    +(azd.length?'<h4 style="margin-top:'+(groups.length||blank.length?'14px':'0')+'">'+azd.length+' driver'+(azd.length>1?'s have':' has')+' more than one Azuga login</h4>The truck dropdown already shows each person once. To tidy Azuga itself, delete the unused logins in Azuga (Admin, then Users).'
+      +azd.map(g=>'<div class="dupg"><b>'+esc(g.name)+'</b>'+g.accounts.map((a,i)=>'<div style="display:flex;gap:8px;padding-top:4px"><span>'+esc(a.email||'No email')+'</span><span class="muted">'+(a.trucks?'on '+a.trucks+' truck'+(a.trucks>1?'s':'')+(i===0?' · keep this one':''):'not on any truck')+'</span></div>').join('')+'</div>').join(''):'')+'</div>';
+  document.querySelectorAll('.mergeGo').forEach(b=>b.onclick=async()=>{const box=b.closest('.dupg'),g=groups[box.dataset.g],keep=box.querySelector('input:checked').value,rm=g.filter(d=>d.id!==keep),m=box.querySelector('.msg');
+    if(!confirm('Keep '+by[keep].name+' and delete '+rm.length+' duplicate'+(rm.length>1?'s':'')+' from Airtable?\\n\\nTrucks and missing details are copied to the kept record first. This can not be undone.'))return;
+    b.disabled=true;m.textContent='Merging...';try{await post('/api/driver/merge',{keepId:keep,removeIds:rm.map(d=>d.id)});await loadPeople()}catch(e){m.className='msg bad';m.textContent=e.message;b.disabled=false}});
+  document.querySelectorAll('.delBlank').forEach(b=>b.onclick=async()=>{const box=b.closest('.dupg'),m=box.querySelector('.msg');
+    if(!confirm('Delete this blank record from Airtable? This can not be undone.'))return;
+    b.disabled=true;try{await post('/api/driver/delete',{id:box.dataset.id});await loadPeople()}catch(e){m.className='msg bad';m.textContent=e.message;b.disabled=false}});
+}
 function renderDrivers(){
   if(!PEOPLE)return;
-  if(!PEOPLE.connected){$('drvRows').innerHTML='<div class="empty"><b>Airtable is not connected yet</b>Add AIRTABLE_TOKEN in Render to see your crew here.</div>';$('newDrvBtn').disabled=true;$('drvCount').textContent='';return}
+  if(!PEOPLE.connected){$('drvRows').innerHTML='<div class="empty"><b>Airtable is not connected yet</b>Add AIRTABLE_TOKEN in Render to see your drivers here.</div>';$('newDrvBtn').disabled=true;$('drvCount').textContent='';return}
   if(PEOPLE.error){$('drvRows').innerHTML='<div class="empty"><b>Airtable is not answering</b>'+esc(PEOPLE.error)+'</div>';return}
-  const all=PEOPLE.drivers,on=all.filter(d=>d.trucks.length).length,miss=all.filter(d=>PEOPLE.azugaOk&&!d.inAzuga).length;
-  $('drvCount').innerHTML=all.length+' drivers · '+on+' on a truck'+(miss?' · <span style="color:var(--warn)">'+miss+' still need Azuga</span>':'');
+  const all=PEOPLE.drivers,on=all.filter(d=>d.trucks.length).length,miss=all.filter(DF.noaz[1]).length;
+  $('drvCount').innerHTML=all.length+' drivers · '+on+' on a truck'+(miss?' · '+miss+' not in Azuga yet':'');
   $('dsum').innerHTML=Object.entries(DF).map(([k,[l,fn]])=>'<button data-f="'+k+'" aria-pressed="'+(dfilt===k)+'">'+l+' <b>'+all.filter(fn).length+'</b></button>').join('');
   $('dsum').querySelectorAll('button').forEach(b=>b.onclick=()=>{dfilt=b.dataset.f;renderDrivers()});
   $('policyList').innerHTML=[...new Set(all.map(d=>d.policy).filter(Boolean))].map(p=>'<option value="'+esc(p)+'">').join('');
-  const q=$('q').value.toLowerCase(),ds=all.filter(d=>DF[dfilt][1](d)&&(!q||(d.name+' '+d.trucks.join(' ')+' '+d.license).toLowerCase().includes(q)));
-  const ID=svg('<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="12" r="2.2"/><path d="M14 10h4M14 14h3"/>'),SH=svg('<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/>');
-  $('drvRows').innerHTML=ds.length?ds.map(d=>{const [fg,bg]=hueFor(d.name);
-    return '<div class="mate" data-id="'+esc(d.id)+'"><div class="mav" style="background:'+bg+';color:'+fg+'">'+esc(initials(d.name))+'</div><div class="mi">'
-    +'<div class="nm"><b>'+esc(d.name)+'</b>'+(!PEOPLE.azugaOk?'':d.inAzuga?'<span class="pill go">'+ICON.check+'Azuga</span>':'<button class="azbtn">Add to Azuga</button>')+'</div>'
-    +'<div class="chips">'+(d.trucks.length?d.trucks.map(t=>'<span class="chip truck">'+ICON.truck+esc(t)+'</span>').join(''):'<span class="chip none">No truck assigned</span>')+'</div>'
-    +'<div class="meta">'+(d.license?'<span>'+ID+esc((d.state?d.state+' · ':'')+d.license)+'</span>':'<span>'+ID+'No license on file</span>')+(d.policy?'<span>'+SH+esc(d.policy)+'</span>':'')+'</div>'
-    +(d.notes?'<div class="notes">'+esc(d.notes)+'</div>':'')
-    +(d.pic.length?'<div class="chips"><a class="btn" target="_blank" rel="noopener" href="'+esc(d.pic[0].url)+'">'+ICON.file+'License photo</a></div>':'')
-    +'<div class="azf" hidden><input placeholder="Email (their Azuga login)" type="email" class="aze"><input placeholder="Phone (optional)" type="tel" class="azp"><button class="btn2 pri azgo">Add</button><div class="msg" style="flex-basis:100%"></div></div>'
-    +'</div></div>'}).join('')
-    :'<div class="empty"><b>'+(dfilt==='noaz'&&!q?'Everyone is in Azuga':'No drivers match')+'</b>'+(dfilt==='noaz'&&!q?'The whole crew can be assigned to trucks.':'Try a different search or filter.')+'</div>';
-  document.querySelectorAll('.azbtn').forEach(b=>b.onclick=()=>{const f=b.closest('.mate').querySelector('.azf');f.hidden=!f.hidden;if(!f.hidden)f.querySelector('.aze').focus()});
-  document.querySelectorAll('.azgo').forEach(b=>b.onclick=async()=>{const t=b.closest('.mate'),m=t.querySelector('.msg');b.disabled=true;m.className='msg';m.textContent='Adding to Azuga...';
+  renderDupes();
+  const q=$('q').value.toLowerCase(),ds=all.filter(d=>DF[dfilt][1](d)&&(!q||(d.name+' '+d.trucks.join(' ')+' '+d.license).toLowerCase().includes(q)))
+    .sort((a,b)=>inactive(a)-inactive(b)||a.name.localeCompare(b.name));
+  $('drvRows').innerHTML=(ds.length?ds.map(d=>'<div class="rrow'+(inactive(d)?' off':'')+'" data-id="'+esc(d.id)+'"><div class="mav">'+esc(initials(d.name))+'</div>'
+    +'<div class="rn"><b>'+esc(d.name)+(inactive(d)?'<span class="tag">Inactive</span>':'')+'</b><span>'+esc([d.license&&((d.state?d.state+' ':'')+d.license),!inactive(d)&&d.policy].filter(Boolean).join(' · ')||'No license on file')+(d.notes?' · '+esc(d.notes):'')+'</span></div>'
+    +'<div class="rt'+(d.trucks.length?'':' none')+'">'+(d.trucks.length?d.trucks.map(esc).join(', '):'No truck')+'</div>'
+    +'<div class="rs">'+(!PEOPLE.azugaOk||inactive(d)?'':d.inAzuga?'<span class="inaz">In Azuga</span>':'<button class="link azbtn">Add to Azuga</button>')+'</div>'
+    +'<div class="azf" hidden><input placeholder="Email (their Azuga login)" type="email" class="aze"><input placeholder="Phone (optional)" type="tel" class="azp"><button class="btn2 pri azgo">Add to Azuga</button><div class="msg" style="flex-basis:100%"></div></div></div>').join('')
+    :'<div class="empty" style="padding:36px"><b>'+(dfilt==='noaz'&&!q?'Everyone is in Azuga':'No drivers match')+'</b>'+(dfilt==='noaz'&&!q?'The whole crew can be assigned to trucks.':'Try a different search or filter.')+'</div>')
+    +'<button class="addrow" id="addRow"><span class="mav">+</span>Add a driver</button>';
+  $('addRow').onclick=()=>$('newDrvBtn').click();
+  document.querySelectorAll('.azbtn').forEach(b=>b.onclick=()=>{const f=b.closest('.rrow').querySelector('.azf');f.hidden=!f.hidden;if(!f.hidden)f.querySelector('.aze').focus()});
+  document.querySelectorAll('.azgo').forEach(b=>b.onclick=async()=>{const t=b.closest('.rrow'),m=t.querySelector('.msg');b.disabled=true;m.className='msg';m.textContent='Adding to Azuga...';
     try{await post('/api/driver/azuga',{airtableId:t.dataset.id,email:t.querySelector('.aze').value,phone:t.querySelector('.azp').value});driverList=null;await loadPeople()}
     catch(e){m.className='msg bad';m.textContent=e.message;b.disabled=false}});
 }
