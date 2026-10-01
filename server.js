@@ -313,7 +313,7 @@ async function saveTruck(b) {
 async function people() {
   if (!AIRTABLE_TOKEN) return { connected: false };
   const [at, az] = await Promise.all([atData(), drivers().catch(() => null)]);
-  const truckLabel = Object.fromEntries(at.trucks.map(t => [t.id, (t.truckNo ? '#' + t.truckNo + ' ' : '') + [t.year, t.make, t.model].filter(Boolean).join(' ')]));
+  const truckLabel = Object.fromEntries(at.trucks.map(t => [t.id, (t.truckNo ? '#' + t.truckNo.split(/[ ~(]/)[0] + ' ' : '') + [t.year, t.make, t.model].filter(Boolean).join(' ')]));
   const inAz = new Set((az || []).map(d => normName(d.name)));
   return { connected: true, azugaOk: !!az, drivers: at.drivers.filter(d => d.name).sort((a, b) => a.name.localeCompare(b.name)).map(d => ({
     id: d.id, name: d.name, license: d.license, state: d.state, policy: d.policy, notes: d.notes, pic: d.pic,
@@ -527,14 +527,26 @@ main{display:grid;grid-template-columns:350px 1fr;gap:14px;padding:12px 24px 24p
 .pill .ic{width:12px;height:12px}
 #right{display:grid;grid-template-rows:minmax(260px,50%) 1fr;gap:14px;min-height:0}
 #map{border-radius:var(--r);box-shadow:var(--sh);background:#dfe7e6}
-.leaflet-tile-pane{filter:saturate(.35) contrast(.95) brightness(1.04)}
+.leaflet-tile-pane{filter:saturate(.85) contrast(1.02)}
+#map{position:relative}
+/* Truck pins: number labels, colored by status */
+.tm{background:none;border:0}
+.pin{position:absolute;left:0;top:0;transform:translate(-50%,-50%);display:grid;place-items:center;min-width:26px;height:26px;padding:0 6px;border-radius:13px;font:700 12px/1 Figtree,system-ui,sans-serif;color:#fff;background:var(--deep);border:2px solid #fff;box-shadow:0 2px 6px rgba(10,44,64,.35);white-space:nowrap;transition:transform .15s}
+.pin svg{width:14px;height:14px}
+.pin.mv{background:#16a34a}
+.pin.mv::after{content:'';position:absolute;inset:-2px;border-radius:inherit;border:2px solid #16a34a;animation:ripple 2.2s cubic-bezier(.2,.7,.3,1) infinite}
+.pin.sel{background:var(--pool);transform:translate(-50%,-50%) scale(1.25);z-index:2}
+.tm:hover .pin{transform:translate(-50%,-50%) scale(1.12)}
+.legend{background:#fff;border-radius:10px;box-shadow:0 2px 8px rgba(16,34,46,.15);padding:8px 10px;font:12px/1.3 Figtree,system-ui,sans-serif;color:var(--ink2);display:flex;gap:12px;align-items:center}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.08)}
+.legend button{font:inherit;font-weight:600;color:var(--poolInk);background:var(--shallow);border:0;border-radius:7px;padding:4px 9px;cursor:pointer}
+.legend button:hover{background:var(--shallow2)}
 .leaflet-container{font:inherit}
 .leaflet-tooltip{font:inherit;font-size:12px;border-radius:7px;border:0;box-shadow:0 2px 8px rgba(16,34,46,.18)}
 /* The one flourish: moving trucks ripple like a disturbance on water */
-.mv{animation:ripple 2.2s cubic-bezier(.2,.7,.3,1) infinite}
-@keyframes ripple{0%{stroke-width:2;stroke-opacity:.9}100%{stroke-width:22;stroke-opacity:0}}
+@keyframes ripple{0%{transform:scale(1);opacity:.9}100%{transform:scale(2.3);opacity:0}}
 #detail{background:var(--card);border-radius:var(--r);padding:20px 22px;overflow:auto;box-shadow:var(--sh)}
-.empty{color:var(--muted);display:grid;place-items:center;height:100%;text-align:center;padding:24px;gap:6px}
+.empty{color:var(--muted);display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;text-align:center;padding:24px;gap:4px}
 .empty b{color:var(--ink);font-size:15px}
 .dh{display:flex;align-items:center;gap:13px;margin-bottom:14px}
 .dh h2{margin:0;font-size:19px;font-weight:700;letter-spacing:-.01em;display:flex;align-items:center;gap:8px}
@@ -598,7 +610,29 @@ table{width:100%;border-collapse:collapse}
 th{text-align:left;font-size:12px;font-weight:600;color:var(--muted);padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap;background:#fbfaf7}
 td{padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
 tbody tr:hover td{background:#fcfbf8}
-#drvRows td{font-size:13px}#drvRows .sub{color:var(--muted);font-size:12px}
+/* Crew roster */
+.crewhead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.crewhead h2{margin:0;font-size:22px;font-weight:800;letter-spacing:-.02em}.crewhead p{margin:2px 0 0}
+.nd{padding:18px 20px;margin-bottom:14px;border:1px solid var(--shallow2)}
+.crew{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:12px;align-items:start}
+.mate{background:var(--card);border-radius:14px;box-shadow:var(--sh);padding:16px;display:flex;gap:14px;align-items:flex-start;border:1px solid transparent;transition:border-color .15s,box-shadow .15s}
+.mate:hover{border-color:var(--line2);box-shadow:0 4px 14px rgba(16,34,46,.08)}
+.mav{flex:none;width:48px;height:48px;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:16px;letter-spacing:.02em}
+.mi{min-width:0;flex:1}
+.mi .nm{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.mi .nm b{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;padding:3px 9px;border-radius:7px;background:var(--deck);color:var(--ink2)}
+.chip.truck{background:var(--shallow);color:var(--poolInk)}.chip.none{background:transparent;border:1px dashed var(--line2);color:var(--muted);font-weight:500}
+.chip .ic{width:13px;height:13px}
+.mi .meta{font-size:12px;color:var(--muted);margin-top:8px;display:flex;flex-direction:column;gap:2px}
+.mi .meta span{display:flex;gap:6px;align-items:center}.mi .meta .ic{width:13px;height:13px}
+.mi .notes{font-size:12px;color:var(--ink2);margin-top:8px;font-style:italic}
+.azbtn{flex:none;white-space:nowrap;font:inherit;font-size:12px;font-weight:600;color:var(--warn);background:var(--warnBg);border:0;border-radius:999px;padding:3px 10px;cursor:pointer}
+.azbtn:hover{filter:brightness(.97)}
+.mate .azf{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line2)}
+.mate .azf input{flex:1 1 140px;width:auto}
+.crew .empty{grid-column:1/-1;background:var(--card);border-radius:14px;padding:40px}
 .azf{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .azf input{font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line2);border-radius:7px;min-width:0;width:170px}
 .msg{font-size:12px;margin-top:4px;max-width:240px}.msg.ok{color:var(--go)}.msg.bad{color:var(--bad)}
@@ -621,10 +655,15 @@ tbody tr:hover td{background:#fcfbf8}
 <div id="vMap">
 <main><div id="list"><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div></div>
 <div id="right"><div id="map"></div><div id="detail"><div class="empty"><b>Pick a truck</b>Its driver, paperwork, maintenance and camera footage show up here.</div></div></div></main></div>
-<div id="vDrv" hidden><div class="panel">
- <div class="intro" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><div><b>Drivers</b> <span id="drvCount"></span><br>From your Airtable Drivers table. New drivers are saved to Airtable first, then added to Azuga.</div><span style="flex:1"></span><button class="btn2 pri" id="newDrvBtn">+ New driver</button></div>
- <form id="newDrv" hidden autocomplete="off" style="padding:16px 20px;border-bottom:1px solid var(--line);background:#fafcfd">
-  <div class="fg">
+<div id="vDrv" hidden>
+ <div class="crewhead">
+  <div><h2>Your crew</h2><p id="drvCount" class="muted">Loading drivers from Airtable...</p></div>
+  <span style="flex:1"></span>
+  <nav class="sum" id="dsum" aria-label="Filter drivers"></nav>
+  <button class="btn2 pri" id="newDrvBtn">+ New driver</button>
+ </div>
+ <form id="newDrv" hidden autocomplete="off" class="panel nd">
+  <h3 style="margin:0 0 12px">New driver</h3><div class="fg">
    <label>Full name *<input name="name" maxlength="80" required></label>
    <label>License number<input name="license" maxlength="40"></label>
    <label>License state<input name="state" maxlength="20" placeholder="NJ"></label>
@@ -637,8 +676,8 @@ tbody tr:hover td{background:#fcfbf8}
   <div class="edb"><span id="ndMsg" style="font-size:13px"></span><span style="flex:1"></span><button type="button" class="btn2" id="ndCancel">Cancel</button><button class="btn2 pri" id="ndSave">Save driver</button></div>
  </form>
  <datalist id="policyList"></datalist>
- <table><thead><tr><th>Driver</th><th>License</th><th>Insurance policy</th><th>Truck</th><th>Azuga</th></tr></thead><tbody id="drvRows"><tr><td colspan="5" class="muted">Loading...</td></tr></tbody></table>
-</div></div>
+ <div class="crew" id="drvRows"><div class="mate"><div class="mav sk" style="height:48px;width:48px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div></div></div><div class="mate"><div class="mav sk" style="height:48px;width:48px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div></div></div><div class="mate"><div class="mav sk" style="height:48px;width:48px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div></div></div><div class="mate"><div class="mav sk" style="height:48px;width:48px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div></div></div><div class="mate"><div class="mav sk" style="height:48px;width:48px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div></div></div><div class="mate"><div class="mav sk" style="height:48px;width:48px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div></div></div></div>
+</div>
 <div id="vEdit" hidden><div class="ed">
  <aside class="panel edl"><div class="edf"><label><input type="checkbox" id="needs"> Only show trucks that need attention</label><div id="syncBar" style="margin-top:10px"></div></div><div id="edList"></div></aside>
  <section class="panel edc" id="edCard"><div class="empty">Pick a truck on the left to edit it.</div></section>
@@ -676,6 +715,9 @@ const links=o=>JSON.stringify(o).match(/https?:[^"\\\\]+/g)||[];
 let vehicles=[],locs=[],maint=[],sel=null,markers={};
 const map=L.map('map',{zoomControl:true}).setView([40.2,-74.8],8);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap',maxZoom:19}).addTo(map);
+const Legend=L.Control.extend({onAdd(){const d=L.DomUtil.create('div','legend');d.innerHTML='<span><i style="background:#16a34a"></i>Moving</span><span><i style="background:#0a2c40"></i>Parked</span><button type="button">Show all trucks</button>';L.DomEvent.disableClickPropagation(d);d.querySelector('button').onclick=fitAll;return d}});
+new Legend({position:'topright'}).addTo(map);
+let lastPts=[];function fitAll(){if(lastPts.length)map.fitBounds(lastPts,{padding:[40,40],maxZoom:13})}
 let fitted=false;
 
 async function get(p){const r=await fetch(p);const j=await r.json();if(j.error)throw new Error(j.error);return j}
@@ -714,12 +756,14 @@ function render(){
   const pts=[],shown=new Set(rs.map(vid));
   Object.entries(markers).forEach(([id,m])=>{if(!shown.has(id))map.removeLayer(m)});
   rs.forEach(r=>{const lat=+pick(r,'latitude','lat'),lng=+pick(r,'longitude','lng','lon');if(!lat||!lng)return;pts.push([lat,lng]);
-    const id=vid(r),isSel=sel==id,mv=moving(r),c=mv?'#16a34a':'#0a2c40';
-    const m=markers[id]||(markers[id]=L.circleMarker([lat,lng]).on('click',()=>select(id)));if(!map.hasLayer(m))m.addTo(map);
-    m.setLatLng([lat,lng]).setStyle({radius:isSel?10:6.5,color:mv?'#16a34a':'#fff',weight:2,fillColor:isSel?'#0b7f9e':c,fillOpacity:1}).bindTooltip(esc(vname(r))+(/[a-z]/i.test(dname(r))?' · '+esc(dname(r)):''));
-    const el=m.getElement();if(el)el.classList.toggle('mv',mv);
-    if(isSel)m.bringToFront();});
-  if(!fitted&&pts.length){map.fitBounds(pts,{padding:[30,30]});fitted=true}
+    const id=vid(r),isSel=sel==id,mv=moving(r),L2=link(id),num=L2&&L2.linked&&L2.truck.truckNo?L2.truck.truckNo.split(/[ ~(]/)[0]:'';
+    const label=num||(/[a-z]/i.test(dname(r))?initials(dname(r)):'')||ICON.truck;
+    const html='<span class="pin'+(mv?' mv':'')+(isSel?' sel':'')+'">'+(num||!/</.test(label)?esc(label):label)+'</span>';
+    const m=markers[id]||(markers[id]=L.marker([lat,lng],{icon:L.divIcon({className:'tm',html,iconSize:[0,0]}),keyboard:false}).on('click',()=>select(id)));if(!map.hasLayer(m))m.addTo(map);
+    if(m._html!==html){m.setIcon(L.divIcon({className:'tm',html,iconSize:[0,0]}));m._html=html}
+    m.setLatLng([lat,lng]).setZIndexOffset(isSel?1000:mv?500:0).bindTooltip(esc(vname(r))+(/[a-z]/i.test(dname(r))?' · '+esc(dname(r)):'')+(mv?' · '+Math.round(speed(r))+' mph':''),{direction:'top',offset:[0,-14]});
+  });
+  lastPts=pts;if(!fitted&&pts.length){fitAll();fitted=true}
 }
 async function select(id){
   sel=id;render();const r=all().find(x=>vid(x)==id)||{};
@@ -851,24 +895,38 @@ const AT_ONLY_KEYS={truckNo:1,policy:1,regRenew:1,ezpass:1};
 let PEOPLE=null;
 async function loadPeople(){try{PEOPLE=await get('/api/people')}catch(e){PEOPLE={connected:true,error:e.message,drivers:[]}}renderDrivers()}
 const post=async(u,b)=>{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.error)throw new Error(j.error);return j};
+// Each driver keeps the same avatar color everywhere (picked from their name)
+const HUES=[['#0b7f9e','#dff1f6'],['#0f766e','#dcf2ee'],['#1d4ed8','#e2eafd'],['#7c3aed','#efe7fd'],['#b45309','#fbeeda'],['#be185d','#fbe4ef'],['#15803d','#dff3e5'],['#9a3412','#fbe7dd']];
+const hueFor=n=>{let h=0;for(const c of n)h=(h*31+c.charCodeAt(0))>>>0;return HUES[h%HUES.length]};
+let dfilt='all';
+const DF={all:['Everyone',()=>true],truck:['On a truck',d=>d.trucks.length],free:['No truck',d=>!d.trucks.length],noaz:['Not in Azuga',d=>PEOPLE&&PEOPLE.azugaOk&&!d.inAzuga]};
 function renderDrivers(){
   if(!PEOPLE)return;
-  if(!PEOPLE.connected){$('drvRows').innerHTML='<tr><td colspan="5" class="muted">Airtable is not connected yet. Add AIRTABLE_TOKEN in Render.</td></tr>';$('newDrvBtn').disabled=true;return}
-  if(PEOPLE.error){$('drvRows').innerHTML='<tr><td colspan="5" class="muted">Airtable unavailable: '+esc(PEOPLE.error)+'</td></tr>';return}
-  const q=$('q').value.toLowerCase(),ds=PEOPLE.drivers.filter(d=>!q||(d.name+' '+d.trucks.join(' ')+' '+d.license).toLowerCase().includes(q));
-  const missing=PEOPLE.drivers.filter(d=>!d.inAzuga).length;
-  $('drvCount').innerHTML='<span class="muted">· '+PEOPLE.drivers.length+' total'+(PEOPLE.azugaOk&&missing?' · <span style="color:var(--warn)">'+missing+' not in Azuga</span>':'')+'</span>';
-  $('policyList').innerHTML=[...new Set(PEOPLE.drivers.map(d=>d.policy).filter(Boolean))].map(p=>'<option value="'+esc(p)+'">').join('');
-  $('drvRows').innerHTML=ds.length?ds.map(d=>'<tr data-id="'+esc(d.id)+'"><td><b>'+esc(d.name)+'</b>'+(d.notes?'<div class="sub">'+esc(d.notes)+'</div>':'')+'</td>'
-    +'<td>'+(d.license?esc((d.state?d.state+' ':'')+d.license):'<span class="muted">–</span>')+(d.pic.length?'<div><a class="btn" target="_blank" rel="noopener" href="'+esc(d.pic[0].url)+'">'+ICON.file+'License photo</a></div>':'')+'</td>'
-    +'<td>'+esc(d.policy||'–')+'</td><td>'+(d.trucks.length?d.trucks.map(esc).join('<br>'):'<span class="muted">None</span>')+'</td>'
-    +'<td>'+(!PEOPLE.azugaOk?'<span class="muted">?</span>':d.inAzuga?'<span class="pill go">In Azuga</span>':'<span class="pill warn">Not in Azuga</span><div class="azf"><input placeholder="Email (Azuga login)" type="email" class="aze"><input placeholder="Phone" type="tel" class="azp"><button class="btn2 azgo">Add to Azuga</button></div><div class="msg"></div>')+'</td></tr>').join('')
-    :'<tr><td colspan="5" class="muted">No drivers match.</td></tr>';
-  document.querySelectorAll('.azgo').forEach(b=>b.onclick=async()=>{const tr=b.closest('tr'),m=tr.querySelector('.msg');b.disabled=true;m.className='msg';m.textContent='Adding to Azuga...';
-    try{await post('/api/driver/azuga',{airtableId:tr.dataset.id,email:tr.querySelector('.aze').value,phone:tr.querySelector('.azp').value});driverList=null;await loadPeople()}
+  if(!PEOPLE.connected){$('drvRows').innerHTML='<div class="empty"><b>Airtable is not connected yet</b>Add AIRTABLE_TOKEN in Render to see your crew here.</div>';$('newDrvBtn').disabled=true;$('drvCount').textContent='';return}
+  if(PEOPLE.error){$('drvRows').innerHTML='<div class="empty"><b>Airtable is not answering</b>'+esc(PEOPLE.error)+'</div>';return}
+  const all=PEOPLE.drivers,on=all.filter(d=>d.trucks.length).length,miss=all.filter(d=>PEOPLE.azugaOk&&!d.inAzuga).length;
+  $('drvCount').innerHTML=all.length+' drivers · '+on+' on a truck'+(miss?' · <span style="color:var(--warn)">'+miss+' still need Azuga</span>':'');
+  $('dsum').innerHTML=Object.entries(DF).map(([k,[l,fn]])=>'<button data-f="'+k+'" aria-pressed="'+(dfilt===k)+'">'+l+' <b>'+all.filter(fn).length+'</b></button>').join('');
+  $('dsum').querySelectorAll('button').forEach(b=>b.onclick=()=>{dfilt=b.dataset.f;renderDrivers()});
+  $('policyList').innerHTML=[...new Set(all.map(d=>d.policy).filter(Boolean))].map(p=>'<option value="'+esc(p)+'">').join('');
+  const q=$('q').value.toLowerCase(),ds=all.filter(d=>DF[dfilt][1](d)&&(!q||(d.name+' '+d.trucks.join(' ')+' '+d.license).toLowerCase().includes(q)));
+  const ID=svg('<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="12" r="2.2"/><path d="M14 10h4M14 14h3"/>'),SH=svg('<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/>');
+  $('drvRows').innerHTML=ds.length?ds.map(d=>{const [fg,bg]=hueFor(d.name);
+    return '<div class="mate" data-id="'+esc(d.id)+'"><div class="mav" style="background:'+bg+';color:'+fg+'">'+esc(initials(d.name))+'</div><div class="mi">'
+    +'<div class="nm"><b>'+esc(d.name)+'</b>'+(!PEOPLE.azugaOk?'':d.inAzuga?'<span class="pill go">'+ICON.check+'Azuga</span>':'<button class="azbtn">Add to Azuga</button>')+'</div>'
+    +'<div class="chips">'+(d.trucks.length?d.trucks.map(t=>'<span class="chip truck">'+ICON.truck+esc(t)+'</span>').join(''):'<span class="chip none">No truck assigned</span>')+'</div>'
+    +'<div class="meta">'+(d.license?'<span>'+ID+esc((d.state?d.state+' · ':'')+d.license)+'</span>':'<span>'+ID+'No license on file</span>')+(d.policy?'<span>'+SH+esc(d.policy)+'</span>':'')+'</div>'
+    +(d.notes?'<div class="notes">'+esc(d.notes)+'</div>':'')
+    +(d.pic.length?'<div class="chips"><a class="btn" target="_blank" rel="noopener" href="'+esc(d.pic[0].url)+'">'+ICON.file+'License photo</a></div>':'')
+    +'<div class="azf" hidden><input placeholder="Email (their Azuga login)" type="email" class="aze"><input placeholder="Phone (optional)" type="tel" class="azp"><button class="btn2 pri azgo">Add</button><div class="msg" style="flex-basis:100%"></div></div>'
+    +'</div></div>'}).join('')
+    :'<div class="empty"><b>'+(dfilt==='noaz'&&!q?'Everyone is in Azuga':'No drivers match')+'</b>'+(dfilt==='noaz'&&!q?'The whole crew can be assigned to trucks.':'Try a different search or filter.')+'</div>';
+  document.querySelectorAll('.azbtn').forEach(b=>b.onclick=()=>{const f=b.closest('.mate').querySelector('.azf');f.hidden=!f.hidden;if(!f.hidden)f.querySelector('.aze').focus()});
+  document.querySelectorAll('.azgo').forEach(b=>b.onclick=async()=>{const t=b.closest('.mate'),m=t.querySelector('.msg');b.disabled=true;m.className='msg';m.textContent='Adding to Azuga...';
+    try{await post('/api/driver/azuga',{airtableId:t.dataset.id,email:t.querySelector('.aze').value,phone:t.querySelector('.azp').value});driverList=null;await loadPeople()}
     catch(e){m.className='msg bad';m.textContent=e.message;b.disabled=false}});
 }
-$('newDrvBtn').onclick=()=>{$('newDrv').hidden=false;$('newDrv').querySelector('[name=name]').focus()};
+$('newDrvBtn').onclick=()=>{$('newDrv').hidden=false;$('newDrv').scrollIntoView({block:'nearest'});$('newDrv').querySelector('[name=name]').focus()};
 $('ndCancel').onclick=()=>{$('newDrv').reset();$('newDrv').hidden=true;$('ndMsg').textContent=''};
 $('newDrv').addToAzuga.onchange=e=>{$('azFields').hidden=!e.target.checked};
 $('newDrv').onsubmit=async e=>{
