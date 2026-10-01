@@ -671,6 +671,20 @@ h3{font-size:14px;font-weight:700;color:var(--ink);margin:22px 0 4px}
 .ev{display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid var(--line);flex-wrap:wrap}
 .ev:first-of-type{border-top:0}
 .ev .t{color:var(--muted);font-size:13px;min-width:140px}.ev .clips{margin-left:auto;display:flex;gap:6px}
+.evb{width:100%;font:inherit;text-align:left;background:none;border:0;border-top:1px solid var(--line);cursor:pointer;color:inherit;padding:10px 6px;border-radius:8px;flex-wrap:nowrap}
+.ev.evb:first-of-type{border-top:0}.evb:hover:not(:disabled){background:#faf8f4}.evb:disabled{cursor:default}
+.evth{position:relative;flex:none;width:96px;height:54px;border-radius:7px;overflow:hidden;background:var(--deck2);display:grid;place-items:center;font-size:11px;color:var(--muted)}
+.evth img{width:100%;height:100%;object-fit:cover}
+.evth i{position:absolute;inset:0;display:grid;place-items:center;background:rgba(10,44,64,.35);color:#fff}.evth i svg{width:22px;height:22px}
+.evi{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}.evi .pill{align-self:flex-start}
+.evgo{flex:none;font-size:13px;font-weight:600;color:var(--poolInk)}
+dialog#media{border:0;border-radius:16px;padding:0;width:min(1000px,94vw);max-height:92vh;box-shadow:0 20px 60px rgba(10,44,64,.4);background:var(--card)}
+dialog#media::backdrop{background:rgba(10,30,45,.6)}
+#mbody{padding:18px 20px 20px}
+.mhead{display:flex;align-items:flex-start;gap:12px;margin-bottom:12px}.mhead>div{flex:1}.mhead h3{margin:6px 0 2px;font-size:16px}.mhead p{margin:0;font-size:13px}
+.mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.mgrid figure{margin:0}.mgrid img,.mgrid video{width:100%;border-radius:10px;background:#000;display:block;max-height:60vh;object-fit:contain}
+.mgrid figcaption{font-size:12px;color:var(--muted);margin-top:5px}
 .btn{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:12px;font-weight:600;color:var(--poolInk);background:var(--shallow);padding:5px 10px;border-radius:8px;text-decoration:none;transition:background .15s}
 .btn:hover{background:var(--shallow2)}.ic{width:14px;height:14px;flex:none}
 details{margin-top:22px}summary{cursor:pointer;color:var(--muted);font-size:12px}
@@ -786,6 +800,7 @@ tbody tr:hover td{background:#fcfbf8}
 </header>
 <div class="bar"><div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search trucks or drivers" aria-label="Search trucks or drivers"></div><nav class="sum" id="sum" aria-label="Filter vehicles"></nav></div>
 <div id="err"></div>
+<dialog id="media" aria-label="Camera event"><div id="mbody"></div></dialog>
 <div id="vMap">
 <main><div id="list"><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div></div>
 <div id="right"><div id="map"></div><div id="detail"></div></div></main></div>
@@ -933,12 +948,36 @@ async function select(id){
     $('m').innerHTML=m.length?m.map(x=>{const s=String(pick(x,'status','reminderStatus')||'');return '<div class="ev"><span class="pill '+(/over/i.test(s)?'bad':/up/i.test(s)?'warn':'idle')+'">'+esc(s||'Scheduled')+'</span><b>'+esc(pick(x,'serviceType','serviceName')||'Service')+'</b><span class="t">'+esc(when(pick(x,'nextServiceDate','dueDate')))+(pick(x,'nextServiceOdometer')?' · at '+esc(pick(x,'nextServiceOdometer'))+' mi':'')+'</span></div>'}).join(''):'<span class="muted">'+(r.maintenanceEnabled===false?'Maintenance tracking is off for this truck in Azuga.':'Nothing due.')+'</span>';
   }catch(e){$('m').innerHTML='<span class="muted">'+esc(e.message)+'</span>';retry(id)}
   try{const v=list(await get('/api/videos?vehicleId='+encodeURIComponent(id)));
-    $('vids').innerHTML=v.length?v.map(x=>{const e=pick(x,'eventType','eventName');const clips=links(x).filter(u=>!/thumb/i.test(u));return '<div class="ev"><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="t">'+esc(when(pick(x,'eventTime','startTime')))+'</span><span class="muted">'+esc(pick(x,'driverName')||'')+'</span><span class="clips">'+clips.map((u,i)=>'<a class="btn" target="_blank" rel="noopener" href="'+esc(u)+'">'+ICON.play+'Clip '+(i+1)+'</a>').join('')+'</span></div>'}).join(''):'<span class="muted">No camera events this week. Safe driving.</span>';
+    VIDS=v;
+    $('vids').innerHTML=v.length?v.map((x,i)=>{const e=pick(x,'eventType','eventName'),md=evMedia(x),th=md.videos[0]&&md.videos[0].poster||md.snaps[0]&&md.snaps[0].url;
+      const drv=[x.firstName,x.lastName].filter(Boolean).join(' ')||pick(x,'driverName')||'';
+      return '<button class="ev evb" data-i="'+i+'"'+(md.videos.length||md.snaps.length?'':' disabled')+'>'
+        +(th?'<span class="evth"><img src="'+esc(th)+'" alt="" loading="lazy">'+(md.videos.length?'<i>'+ICON.play+'</i>':'')+'</span>':'<span class="evth none">No media</span>')
+        +'<span class="evi"><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="t">'+esc(when(pick(x,'eventTime','startTime')))+(drv?' · '+esc(drv):'')+'</span>'
+        +'<span class="muted" style="font-size:12px">'+esc(pick(x,'address')||'')+'</span></span>'
+        +'<span class="evgo">'+(md.videos.length?'Watch':md.snaps.length?'View photos':'')+'</span></button>'}).join(''):'<span class="muted">No camera events this week. Safe driving.</span>';
   }catch(e){$('vids').innerHTML='<span class="muted">'+esc(e.message)+'</span>';retry(id)}
 }
 function closeDetail(){sel=null;$('right').classList.remove('open');setTimeout(()=>map.invalidateSize(),0);render()}
 document.addEventListener('click',e=>{if(e.target.id==='dclose')closeDetail()});
-document.addEventListener('keydown',e=>{if(e.key==='Escape'&&sel&&!$('vMap').hidden)closeDetail()});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('media').open&&sel&&!$('vMap').hidden)closeDetail()});
+// Camera events: Azuga gives video links when a clip has uploaded, otherwise still photos from both cameras
+let VIDS=[];
+function evMedia(x){
+  const videos=(x.videoLinks||[]).filter(v=>v&&v.videoLink).map(v=>({name:v.videoName||(v.videoIndex===2?'Driver facing':'Road facing'),url:v.videoLink,poster:v.thumbnailLink||''}));
+  const snaps=(x.snapshotLinks||[]).filter(s=>s&&s.snapshotLink).map(s=>({name:s.snapshotName||(s.snapshotIndex===2?'Driver facing':'Road facing'),url:s.snapshotLink}));
+  return {videos,snaps};
+}
+function openMedia(i){
+  const x=VIDS[i];if(!x)return;const md=evMedia(x),e=pick(x,'eventType','eventName'),drv=[x.firstName,x.lastName].filter(Boolean).join(' ');
+  $('mbody').innerHTML='<div class="mhead"><div><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><h3>'+esc(when(pick(x,'eventTime','startTime')))+(drv?' · '+esc(drv):'')+'</h3><p class="muted">'+esc(pick(x,'address')||'')+(x.speed?' · '+Math.round(x.speed*0.621371)+' mph':'')+'</p></div><button class="dclose" id="mclose" aria-label="Close">×</button></div>'
+   +'<div class="mgrid">'+(md.videos.length?md.videos.map(v=>'<figure><video src="'+esc(v.url)+'" controls playsinline preload="metadata"'+(v.poster?' poster="'+esc(v.poster)+'"':'')+'></video><figcaption>'+esc(v.name)+'</figcaption></figure>').join('')
+     :md.snaps.map(s=>'<figure><img src="'+esc(s.url)+'" alt="'+esc(s.name)+'"><figcaption>'+esc(s.name)+'</figcaption></figure>').join(''))+'</div>'
+   +(md.videos.length?'':'<p class="muted" style="margin:10px 0 0;font-size:13px">Azuga only has photos for this event; the video clip has not been uploaded. You can request the clip on the Azuga website.</p>');
+  $('media').showModal();const v=$('mbody').querySelector('video');if(v)v.play().catch(()=>{});
+}
+document.addEventListener('click',e=>{const b=e.target.closest('.evb');if(b&&!b.disabled)openMedia(+b.dataset.i);if(e.target.id==='mclose'||e.target.id==='media')closeMedia()});
+function closeMedia(){$('mbody').querySelectorAll('video').forEach(v=>v.pause());$('media').close()}
 const retried=new Set();function retry(id){if(retried.has(id))return;retried.add(id);setTimeout(()=>{if(sel==id)select(id)},30000)}
 // ---- Airtable (source of truth) ----
 let AT=null;
