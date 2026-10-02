@@ -658,7 +658,6 @@ main{display:grid;grid-template-columns:350px 1fr;gap:14px;padding:12px 24px 24p
 #right.open{grid-template-columns:minmax(300px,34%) 1fr;grid-template-rows:minmax(240px,40%) 1fr;grid-template-areas:"donut map" "cams detail"}
 #right:not(.open) #detail,#right:not(.open) .pane{display:none}
 #right:not(.open) .bigbtn{display:none}
-#right.open.noev:not(.big){grid-template-columns:1fr;grid-template-areas:"map" "detail"}#right.open.noev .pane{display:none}
 #right.open.big{grid-template-columns:1fr;grid-template-rows:1fr;grid-template-areas:"map"}#right.open.big>:not(#map){display:none}
 #right.open #map{grid-area:map}#donut{grid-area:donut}#cams{grid-area:cams}#detail{grid-area:detail}
 .pane{background:var(--card);border-radius:var(--r);box-shadow:var(--sh);padding:16px 18px;overflow:auto;min-height:0}
@@ -741,7 +740,7 @@ details pre{font-size:11px;background:var(--deck);padding:10px;border-radius:8px
 .note{color:var(--warn);font-size:12px;margin-top:6px}
 
 /* Panels, edit tab, drivers tab */
-#vEdit,#vDrv{padding:14px 24px 24px}
+#vEdit,#vDrv{padding:14px 24px 24px}#vDrv{max-width:1240px;margin:0 auto}body[data-v=vDrv] .bar{max-width:1240px;margin:0 auto}
 .panel{background:var(--card);border-radius:var(--r);box-shadow:var(--sh);overflow:auto}
 .panel .intro{padding:16px 20px;border-bottom:1px solid var(--line);color:var(--muted)}.panel .intro b{color:var(--ink);font-size:15px}
 .ed{display:grid;grid-template-columns:320px 1fr;gap:14px;height:calc(100vh - 140px);min-height:520px}
@@ -789,7 +788,7 @@ tbody tr:hover td{background:#fcfbf8}
 .rrow:last-child{border-bottom:0}.rrow:hover{background:#fcfbf8}
 .rrow.off{opacity:.55}.rrow.off:hover{opacity:.8}
 .mav{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:12px;background:var(--shallow);color:var(--poolInk)}
-.rn{min-width:0}.rn b{display:block;font-weight:600}.rn>span{display:block;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rn{min-width:0}.rn b{display:block;font-weight:600}.nolic{font-style:normal;color:var(--warn);font-weight:600}.rn>span{display:block;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rt{font-size:13px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rt.none{color:var(--muted)}
 .rs{font-size:13px;text-align:right;white-space:nowrap}
 .inaz{color:var(--go);display:inline-flex;align-items:center;gap:6px}.inaz::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--goDot)}
@@ -834,6 +833,7 @@ header{background:linear-gradient(180deg,#0c3550 0%,var(--deep) 100%);box-shadow
 .sum button[aria-pressed=true]{box-shadow:0 0 0 1px var(--line2),0 1px 2px rgba(16,34,46,.06)}
 @media (prefers-reduced-motion:reduce){.evb,.card{transition:none}}
 @media(max-width:900px){
+ .legend>span{display:none}
  header{padding:12px 16px}.bar{padding:12px 16px 0}.search{flex:1 1 100%}
  main{grid-template-columns:1fr;height:auto;padding:12px 16px}#list{max-height:45vh}#right,#right.open{grid-template-columns:1fr;grid-template-rows:auto;grid-template-areas:none}#right>*{grid-area:auto!important}#map{height:300px}#right.big #map{height:70vh}#detail{order:1}#donut{order:2}#cams{order:3}#donut{flex-wrap:wrap;justify-content:center}
  .grid{grid-template-columns:repeat(2,1fr)}.kv:nth-child(3){border-left:0}.kv:nth-child(n+3){border-top:1px solid var(--line)}
@@ -1029,12 +1029,12 @@ function camGroups(v){const c={};v.forEach(x=>{const t=evName(pick(x,'eventType'
   if(rest.length)top.push({t:'Other',n:rest.reduce((a,b)=>a+b[1],0),col:CAMOTHER,others:rest.map(r=>r[0])});return top}
 function drawCams(){const v=TRUCKV,ev=v.filter(x=>!x.requested),g=camGroups(ev),tot=ev.length,R=70,C=2*Math.PI*R;let off=0;
   const arcs=g.map(x=>{const len=x.n/tot*C,a='<circle class="arc'+(camType&&camType!==x.t?' dim':'')+'" data-t="'+esc(x.t)+'" r="'+R+'" cx="90" cy="90" fill="none" stroke="'+x.col+'" stroke-width="26" stroke-dasharray="'+Math.max(len-(g.length>1?2:0),.5)+' '+C+'" stroke-dashoffset="'+(-off)+'"><title>'+esc(x.t)+': '+x.n+' ('+Math.round(x.n/tot*100)+'%)</title></circle>';off+=len;return a}).join('');
-  $('right').classList.toggle('noev',!v.length);$('donut').innerHTML='<div class="ph"><h3>Events by type</h3><span>'+(camType?'Showing '+esc(camType.toLowerCase())+' · <button class="link" data-t="'+esc(camType)+'">show all</button>':'last 7 days · tap to filter')+'</span></div>'+(tot?'<div class="dbody"><svg viewBox="0 0 180 180" role="img" aria-label="Camera events by type"><g transform="rotate(-90 90 90)">'+arcs+'</g><text x="90" y="88" class="dn">'+tot+'</text><text x="90" y="108" class="dl">events, 7 days</text></svg>'
+  const tr=all().find(x=>vid(x)==sel)||{},hasCam=!!(tr.safetyCam||tr.safetyCamSerialNumber);$('donut').innerHTML='<div class="ph"><h3>Events by type</h3><span>'+(camType?'Showing '+esc(camType.toLowerCase())+' · <button class="link" data-t="'+esc(camType)+'">show all</button>':'last 7 days · tap to filter')+'</span></div>'+(tot?'<div class="dbody"><svg viewBox="0 0 180 180" role="img" aria-label="Camera events by type"><g transform="rotate(-90 90 90)">'+arcs+'</g><text x="90" y="88" class="dn">'+tot+'</text><text x="90" y="108" class="dl">events, 7 days</text></svg>'
     +'<ul class="leg">'+g.map(x=>'<li><button data-t="'+esc(x.t)+'" class="'+(camType===x.t?'on':camType?'dim':'')+'"><i style="background:'+x.col+'"></i><span>'+esc(x.t)+'</span><b>'+x.n+'</b><em>'+Math.round(x.n/tot*100)+'%</em></button></li>').join('')+'</ul></div>'
-    :'<p class="muted" style="margin:auto">No camera events this week. Safe driving.</p>');
+    :'<div class="empty">'+(hasCam?'<b>No camera events this week</b>Camera '+esc(tr.safetyCam||tr.safetyCamSerialNumber)+' is installed. Safe driving.':'<b>No camera on this truck</b>Azuga has no SafetyCam linked to it.')+'</div>');
   const oth=(g.find(x=>x.t==='Other')||{}).others||[];
   VIDS=v.filter(x=>{const t=evName(pick(x,'eventType','eventName'));return !camType||t===camType||(camType==='Other'&&oth.includes(t))});
-  $('camN').textContent=VIDS.length+' event'+(VIDS.length==1?'':'s')+(camType?' · '+camType.toLowerCase():' · last 7 days');$('vids').innerHTML=VIDS.length?VIDS.map((x,i)=>evRow(x,i)).join(''):'<span class="muted">No camera events this week.</span>'}
+  $('camN').textContent=VIDS.length+' event'+(VIDS.length==1?'':'s')+(camType?' · '+camType.toLowerCase():' · last 7 days');$('vids').innerHTML=VIDS.length?VIDS.map((x,i)=>evRow(x,i)).join(''):'<span class="muted">'+(hasCam?'Nothing recorded in the last 7 days.':'No camera installed.')+'</span>'}
 document.addEventListener('click',e=>{const t=e.target.closest('#donut [data-t]');if(t){camType=camType===t.dataset.t?'':t.dataset.t;drawCams()}});
 function evMedia(x){
   const videos=(x.videoLinks||[]).flat().filter(v=>v&&v.videoLink).map(v=>({name:v.videoName||(v.videoIndex===2?'Driver facing':'Road facing'),url:v.videoLink,poster:v.thumbnailLink||''}));
@@ -1256,7 +1256,7 @@ function renderDrivers(){
     .sort((a,b)=>inactive(a)-inactive(b)||a.name.localeCompare(b.name));
   [...picked].forEach(id=>{if(!all.some(d=>d.id===id))picked.delete(id)});
   $('drvRows').innerHTML=(ds.length?ds.map(d=>'<div class="rrow'+(inactive(d)?' off':'')+(picked.has(d.id)?' picked':'')+'" data-id="'+esc(d.id)+'"><input type="checkbox" class="pick" aria-label="Select '+esc(d.name)+'"'+(picked.has(d.id)?' checked':'')+'><div class="mav">'+esc(initials(d.name))+'</div>'
-    +'<div class="rn"><b>'+esc(d.name)+(inactive(d)?'<span class="tag">Inactive</span>':!d.license?'<span class="bang" title="No license on file">!</span>':'')+'</b><span>'+esc([d.license&&((d.state?d.state+' ':'')+d.license),!inactive(d)&&d.policy].filter(Boolean).join(' · ')||'No license on file')+(d.notes?' · '+esc(d.notes):'')+'</span></div>'
+    +'<div class="rn"><b>'+esc(d.name)+(inactive(d)?'<span class="tag">Inactive</span>':'')+'</b><span>'+(!d.license&&!inactive(d)?'<em class="nolic">No license #</em>'+(d.policy?' · ':''):'')+esc([d.license&&((d.state?d.state+' ':'')+d.license),!inactive(d)&&d.policy].filter(Boolean).join(' · '))+(d.notes?' · '+esc(d.notes):'')+'</span></div>'
     +'<div class="rt'+(d.trucks.length?'':' none')+'">'+(d.trucks.length?d.trucks.map(esc).join(', '):'No truck')+'</div>'
     +'<div class="rs">'+(!PEOPLE.azugaOk||inactive(d)?'':d.inAzuga?'<span class="inaz">In Azuga</span>':'<button class="link azbtn">Add to Azuga</button>')+'</div>'
     +'</div>').join('')
@@ -1322,7 +1322,7 @@ function fleetVids(){if(FV&&Date.now()-FVat<3e5)return FV;FVat=Date.now();const 
 fleetVids();
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
-  ['vMap','vEdit','vDrv'].forEach(v=>$(v).hidden=b.dataset.v!==v);$('sum').hidden=b.dataset.v!=='vMap';
+  ['vMap','vEdit','vDrv'].forEach(v=>$(v).hidden=b.dataset.v!==v);document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
   if(b.dataset.v==='vEdit')renderEdit();else if(b.dataset.v==='vDrv'){if(!PEOPLE)loadPeople();else renderDrivers()}else map.invalidateSize();
 });
 $('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();};
