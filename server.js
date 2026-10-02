@@ -657,10 +657,13 @@ main{display:grid;grid-template-columns:350px 1fr;gap:14px;padding:12px 24px 24p
 #right{display:grid;grid-template-rows:1fr;gap:14px;min-height:0}
 #right.open{grid-template-columns:minmax(300px,34%) 1fr;grid-template-rows:minmax(240px,40%) 1fr;grid-template-areas:"donut map" "cams detail"}
 #right:not(.open) #detail,#right:not(.open) .pane{display:none}
+#right:not(.open) .bigbtn{display:none}
+#right.open.noev:not(.big){grid-template-columns:1fr;grid-template-areas:"map" "detail"}#right.open.noev .pane{display:none}
+#right.open.big{grid-template-columns:1fr;grid-template-rows:1fr;grid-template-areas:"map"}#right.open.big>:not(#map){display:none}
 #right.open #map{grid-area:map}#donut{grid-area:donut}#cams{grid-area:cams}#detail{grid-area:detail}
 .pane{background:var(--card);border-radius:var(--r);box-shadow:var(--sh);padding:16px 18px;overflow:auto;min-height:0}
 #cams h3{margin-top:0}#cams .evth{width:72px;height:44px}
-#donut{display:flex;gap:14px;align-items:center}#donut svg{flex:0 0 140px;width:140px}#donut .leg{flex:1;min-width:0}
+#donut{display:flex;flex-direction:column}.dbody{flex:1;display:flex;gap:18px;align-items:center;min-height:0}#donut svg{flex:0 0 150px;width:150px}#donut .leg{flex:1;min-width:0}
 #donut .arc{cursor:pointer;transition:opacity .15s}#donut .arc.dim{opacity:.18}
 #donut .dn{font-size:30px;font-weight:700;text-anchor:middle;fill:var(--deep)}#donut .dl{font-size:12px;text-anchor:middle;fill:var(--muted)}
 .leg{list-style:none;margin:0;padding:0}.leg button{display:grid;grid-template-columns:10px 1fr auto 34px;gap:8px;align-items:center;width:100%;min-height:30px;border:0;background:none;font:inherit;font-size:12.5px;text-align:left;padding:2px 6px;border-radius:7px;cursor:pointer;color:inherit}
@@ -781,12 +784,12 @@ tbody tr:hover td{background:#fcfbf8}
 .scan{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--line)}
 .scan label{display:inline-flex;align-items:center;cursor:pointer}.scan .hint{font-size:12px;color:var(--muted)}
 #frontPrev{height:44px;border-radius:6px;border:1px solid var(--line2)}
-.roster{max-width:1100px}
+.roster{max-width:none}
 .rrow{display:grid;grid-template-columns:18px 36px minmax(200px,1fr) minmax(180px,.9fr) 130px;gap:14px;align-items:center;padding:11px 18px;border-bottom:1px solid var(--line)}
 .rrow:last-child{border-bottom:0}.rrow:hover{background:#fcfbf8}
 .rrow.off{opacity:.55}.rrow.off:hover{opacity:.8}
 .mav{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:12px;background:var(--shallow);color:var(--poolInk)}
-.rn{min-width:0}.rn b{display:block;font-weight:600}.rn span{display:block;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rn{min-width:0}.rn b{display:block;font-weight:600}.rn>span{display:block;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rt{font-size:13px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rt.none{color:var(--muted)}
 .rs{font-size:13px;text-align:right;white-space:nowrap}
 .inaz{color:var(--go);display:inline-flex;align-items:center;gap:6px}.inaz::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--goDot)}
@@ -810,9 +813,29 @@ tbody tr:hover td{background:#fcfbf8}
 .azf input{font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line2);border-radius:7px;min-width:0;width:170px}
 .msg{font-size:12px;margin-top:4px;max-width:240px}.msg.ok{color:var(--go)}.msg.bad{color:var(--bad)}
 
+/* ---- Polish: clearer surfaces, one header style, stronger numbers ---- */
+:root{--sh:0 0 0 1px rgba(16,34,46,.06),0 1px 2px rgba(16,34,46,.05),0 4px 14px -6px rgba(16,34,46,.10)}
+header{background:linear-gradient(180deg,#0c3550 0%,var(--deep) 100%);box-shadow:inset 0 -1px 0 rgba(255,255,255,.06)}
+.logo{background:linear-gradient(135deg,#14a3c7,var(--pool));box-shadow:inset 0 1px 0 rgba(255,255,255,.25)}
+.ph{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:0 0 10px;padding-bottom:9px;border-bottom:1px solid var(--line)}
+.ph h3{margin:0;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2)}
+.ph span{font-size:12px;color:var(--muted)}.ph .link{font-size:12px}
+.card{position:relative}
+.card.sel::before{content:'';position:absolute;left:0;top:8px;bottom:8px;width:3px;border-radius:0 3px 3px 0;background:var(--pool)}
+.card:focus-visible{outline-offset:-2px}
+.grid{border:1px solid var(--line);gap:1px;overflow:hidden;padding:0;background:var(--line)}
+#detail h3{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2);margin:22px 0 6px}
+.kv{background:#fff;border-left:0!important;border-top:0!important;padding:11px 14px}
+.kv span{font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase}.kv b{font-size:17px;font-weight:700;letter-spacing:-.01em}
+.evb{border-top:0;padding:8px;margin:2px 0;transition:background .12s}.evb+.evb{box-shadow:0 -1px 0 var(--line)}
+.evb:hover{background:var(--shallow)}.evb:hover .evgo{text-decoration:underline}
+#cams .evth{width:88px;height:52px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.06)}
+.dh h2{font-size:21px}
+.sum button[aria-pressed=true]{box-shadow:0 0 0 1px var(--line2),0 1px 2px rgba(16,34,46,.06)}
+@media (prefers-reduced-motion:reduce){.evb,.card{transition:none}}
 @media(max-width:900px){
  header{padding:12px 16px}.bar{padding:12px 16px 0}.search{flex:1 1 100%}
- main{grid-template-columns:1fr;height:auto;padding:12px 16px}#list{max-height:45vh}#right,#right.open{grid-template-columns:1fr;grid-template-rows:auto;grid-template-areas:none}#right>*{grid-area:auto!important}#map{height:300px}#detail{order:1}#donut{order:2}#cams{order:3}#donut{flex-wrap:wrap;justify-content:center}
+ main{grid-template-columns:1fr;height:auto;padding:12px 16px}#list{max-height:45vh}#right,#right.open{grid-template-columns:1fr;grid-template-rows:auto;grid-template-areas:none}#right>*{grid-area:auto!important}#map{height:300px}#right.big #map{height:70vh}#detail{order:1}#donut{order:2}#cams{order:3}#donut{flex-wrap:wrap;justify-content:center}
  .grid{grid-template-columns:repeat(2,1fr)}.kv:nth-child(3){border-left:0}.kv:nth-child(n+3){border-top:1px solid var(--line)}
  #vEdit,#vDrv{padding:12px 16px}.ed{grid-template-columns:1fr;height:auto}#edList{max-height:35vh}#drvRows td:nth-child(3){display:none}
 }
@@ -836,7 +859,7 @@ tbody tr:hover td{background:#fcfbf8}
 <dialog id="media" aria-label="Camera event"><div id="mbody"></div></dialog>
 <div id="vMap">
 <main><div id="list"><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div></div>
-<div id="right"><div id="donut" class="pane"></div><div id="map"></div><div id="cams" class="pane"><h3>Camera events, last 7 days</h3><div id="vids"></div></div><div id="detail"></div></div></main></div>
+<div id="right"><div id="donut" class="pane"></div><div id="map"></div><div id="cams" class="pane"><div class="ph"><h3>Camera events</h3><span id="camN">last 7 days</span></div><div id="vids"></div></div><div id="detail"></div></div></main></div>
 <div id="vDrv" hidden>
  <div class="crewhead">
   <div><h2>Your crew</h2><p id="drvCount" class="muted">Loading drivers from Airtable...</p></div>
@@ -887,7 +910,7 @@ const vid=v=>pick(v,'trackeeId','vehicleId','id');
 const vname=v=>pick(v,'trackeeName','vehicleName','name')||'Vehicle';
 // Clean name from Airtable when linked ("2009 Chevrolet Colorado"); Azuga's own name otherwise
 const atTitle=id=>{const L=link(id);if(!L||!L.linked)return '';const t=L.truck;return [t.year,t.make,t.model].map(x=>String(x||'').trim()).filter(Boolean).join(' ')};
-const title=r=>atTitle(vid(r))||vname(r);
+const title=r=>atTitle(vid(r))||(/^\d+$/.test(vname(r))?'Unnamed tracker '+vname(r):vname(r));
 const azSub=r=>{const t=atTitle(vid(r));return t&&t.toLowerCase()!==vname(r).toLowerCase()?'<small class="azn">Azuga: '+esc(vname(r))+'</small>':''};
 // Unnamed drivers come through as a phone number like "9052487042 ."
 // Driver shown on the map: Azuga's, or Airtable's when Azuga has none
@@ -905,13 +928,14 @@ const moving=r=>speed(r)>0&&r.storedLocation!==true&&!/stop|end|park|idle|off/i.
 const status=r=>moving(r)?'<span class="pill go">'+Math.round(speed(r))+' mph</span>':'<span class="pill idle">Parked</span>';
 const tno=id=>{const L=link(id);return L&&L.linked&&L.truck.truckNo?'<span class="tno">#'+esc(L.truck.truckNo.split(/[ ~(]/)[0])+'</span>':''};
 const avatar=(d,big)=>{const named=/[a-z]/i.test(d);return '<div class="av'+(named?'':' none')+'"'+(big?' style="width:44px;height:44px;font-size:14px"':'')+'>'+(named?esc(initials(d)):ICON.truck)+'</div>'};
-const evName=e=>String(e||'Event').replace(/^CAM_/,'').replace(/_MESSAGE$/,'').replace(/_/g,' ').toLowerCase().replace(/^./,c=>c.toUpperCase()).replace('Hard breaking','Hard braking');
+const evName=e=>String(e||'Event').replace(/^CAM_/,'').replace(/_MESSAGE$/,'').replace(/_/g,' ').toLowerCase().replace(/^./,c=>c.toUpperCase()).replace('Hard breaking','Hard braking').replace('Real time disconnect event','Camera disconnected');
 const evClass=e=>/FATIGUE|DISTRACT|VIOLENT|COLLISION|PHONE|SMOK|SPEED/i.test(e)?'bad':'warn';
 const links=o=>JSON.stringify(o).match(/https?:[^"\\\\]+/g)||[];
 let vehicles=[],locs=[],maint=null,sel=null,markers={};
 const map=L.map('map',{zoomControl:true}).setView([40.2,-74.8],8);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap',maxZoom:19}).addTo(map);
-const Legend=L.Control.extend({onAdd(){const d=L.DomUtil.create('div','legend');d.innerHTML='<span><i style="background:#16a34a"></i>Moving</span><span><i style="background:#0a2c40"></i>Parked</span><button type="button">Show all trucks</button>';L.DomEvent.disableClickPropagation(d);d.querySelector('button').onclick=fitAll;return d}});
+const Legend=L.Control.extend({onAdd(){const d=L.DomUtil.create('div','legend');d.innerHTML='<span><i style="background:#16a34a"></i>Moving</span><span><i style="background:#0a2c40"></i>Parked</span><button type="button">Show all trucks</button><button type="button" class="bigbtn" aria-pressed="false">Bigger map</button>';L.DomEvent.disableClickPropagation(d);d.querySelector('button').onclick=fitAll;d.querySelector('.bigbtn').onclick=()=>bigMap(!$('right').classList.contains('big'));return d}});
+function bigMap(on){$('right').classList.toggle('big',on);const b=document.querySelector('.bigbtn');if(b){b.textContent=on?'Smaller map':'Bigger map';b.setAttribute('aria-pressed',on)}setTimeout(()=>{map.invalidateSize();const m=sel&&markers[sel];if(m)map.panTo(m.getLatLng(),{animate:false})},0)}
 new Legend({position:'topright'}).addTo(map);
 // Nearby trucks merge into one numbered bubble; trucks parked on the same spot fan out when clicked
 const cluster=L.markerClusterGroup({showCoverageOnHover:false,maxClusterRadius:42,spiderfyOnMaxZoom:true,
@@ -970,7 +994,7 @@ async function select(id){
   sel=id;$('right').classList.add('open');setTimeout(()=>map.invalidateSize(),0);render();const r=all().find(x=>vid(x)==id)||{};
   const mk=markers[id];if(mk)map.setView(mk.getLatLng(),Math.max(map.getZoom(),15),{animate:false});  // one jump; the step-by-step cluster zoom felt slow
   const d=who(r),named=/[a-z]/i.test(d),mmy=[r.year,r.make,r.model].filter(Boolean).join(' ');
-  $('detail').innerHTML='<div class="dh">'+avatar(d,1)+'<div><h2>'+tno(id)+esc(title(r))+'</h2>'+azSub(r)+'<p>'+(named?esc(d):'No driver assigned')+(mmy?' · '+esc(mmy):'')+'</p></div><div style="margin-left:auto;display:flex;align-items:center">'+status(r)+'<button class="dclose" id="dclose" aria-label="Close details">×</button></div></div>'
+  $('detail').innerHTML='<div class="dh">'+avatar(d,1)+'<div><h2>'+tno(id)+esc(title(r))+'</h2>'+azSub(r)+'<p>'+(named?esc(d):'No driver assigned')+(mmy&&!title(r).includes(mmy)?' · '+esc(mmy):'')+'</p></div><div style="margin-left:auto;display:flex;align-items:center">'+status(r)+'<button class="dclose" id="dclose" aria-label="Close details">×</button></div></div>'
    +'<div class="grid"><div class="kv"><span>Odometer</span><b>'+esc(odo(r))+'</b></div><div class="kv"><span>Speed</span><b>'+(moving(r)?Math.round(speed(r)):0)+' mph</b></div><div class="kv"><span>Group</span><b>'+esc(pick(r,'groupName')||'–')+'</b></div><div class="kv"><span>Plate</span><b>'+esc(pick(r,'licensePlate','licensePlateNo','plateNumber')||'–')+'</b></div></div>'
    +'<div class="addr">'+ICON.pin+esc(pick(r,'address','landmark')||'Location unavailable')+'</div>'
    +atBox(id)
@@ -985,7 +1009,7 @@ async function select(id){
     TRUCKV=v;camType='';drawCams();
   }catch(e){if(sel!=id)return;$('vids').innerHTML='<span class="muted">'+esc(e.message)+'</span>';$('donut').innerHTML='';retry(id)}
 }
-function closeDetail(){sel=null;$('right').classList.remove('open');setTimeout(()=>map.invalidateSize(),0);render()}
+function closeDetail(){sel=null;$('right').classList.remove('open','big');const bb=document.querySelector('.bigbtn');if(bb){bb.textContent='Bigger map';bb.setAttribute('aria-pressed',false)}setTimeout(()=>map.invalidateSize(),0);render()}
 document.addEventListener('click',e=>{if(e.target.id==='dclose')closeDetail()});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('media').open&&sel&&!$('vMap').hidden)closeDetail()});
 // Camera events: Azuga gives video links when a clip has uploaded, otherwise still photos from both cameras
@@ -1003,14 +1027,14 @@ const CAMCOL=['#2a78d6','#eb6834','#1baf7a','#eda100','#e87ba4','#008300'],CAMOT
 function camGroups(v){const c={};v.forEach(x=>{const t=evName(pick(x,'eventType','eventName'));c[t]=(c[t]||0)+1});
   const g=Object.entries(c).sort((a,b)=>b[1]-a[1]),top=g.slice(0,6).map(([t,n],k)=>({t,n,col:CAMCOL[k]})),rest=g.slice(6);
   if(rest.length)top.push({t:'Other',n:rest.reduce((a,b)=>a+b[1],0),col:CAMOTHER,others:rest.map(r=>r[0])});return top}
-function drawCams(){const v=TRUCKV,g=camGroups(v),tot=v.length,R=70,C=2*Math.PI*R;let off=0;
+function drawCams(){const v=TRUCKV,ev=v.filter(x=>!x.requested),g=camGroups(ev),tot=ev.length,R=70,C=2*Math.PI*R;let off=0;
   const arcs=g.map(x=>{const len=x.n/tot*C,a='<circle class="arc'+(camType&&camType!==x.t?' dim':'')+'" data-t="'+esc(x.t)+'" r="'+R+'" cx="90" cy="90" fill="none" stroke="'+x.col+'" stroke-width="26" stroke-dasharray="'+Math.max(len-(g.length>1?2:0),.5)+' '+C+'" stroke-dashoffset="'+(-off)+'"><title>'+esc(x.t)+': '+x.n+' ('+Math.round(x.n/tot*100)+'%)</title></circle>';off+=len;return a}).join('');
-  $('donut').innerHTML=tot?'<svg viewBox="0 0 180 180" role="img" aria-label="Camera events by type"><g transform="rotate(-90 90 90)">'+arcs+'</g><text x="90" y="88" class="dn">'+tot+'</text><text x="90" y="108" class="dl">events, 7 days</text></svg>'
-    +'<ul class="leg">'+g.map(x=>'<li><button data-t="'+esc(x.t)+'" class="'+(camType===x.t?'on':camType?'dim':'')+'"><i style="background:'+x.col+'"></i><span>'+esc(x.t)+'</span><b>'+x.n+'</b><em>'+Math.round(x.n/tot*100)+'%</em></button></li>').join('')+'</ul>'
-    :'<p class="muted" style="margin:auto">No camera events this week. Safe driving.</p>';
+  $('right').classList.toggle('noev',!v.length);$('donut').innerHTML='<div class="ph"><h3>Events by type</h3><span>'+(camType?'Showing '+esc(camType.toLowerCase())+' · <button class="link" data-t="'+esc(camType)+'">show all</button>':'last 7 days · tap to filter')+'</span></div>'+(tot?'<div class="dbody"><svg viewBox="0 0 180 180" role="img" aria-label="Camera events by type"><g transform="rotate(-90 90 90)">'+arcs+'</g><text x="90" y="88" class="dn">'+tot+'</text><text x="90" y="108" class="dl">events, 7 days</text></svg>'
+    +'<ul class="leg">'+g.map(x=>'<li><button data-t="'+esc(x.t)+'" class="'+(camType===x.t?'on':camType?'dim':'')+'"><i style="background:'+x.col+'"></i><span>'+esc(x.t)+'</span><b>'+x.n+'</b><em>'+Math.round(x.n/tot*100)+'%</em></button></li>').join('')+'</ul></div>'
+    :'<p class="muted" style="margin:auto">No camera events this week. Safe driving.</p>');
   const oth=(g.find(x=>x.t==='Other')||{}).others||[];
   VIDS=v.filter(x=>{const t=evName(pick(x,'eventType','eventName'));return !camType||t===camType||(camType==='Other'&&oth.includes(t))});
-  $('vids').innerHTML=VIDS.length?VIDS.map((x,i)=>evRow(x,i)).join(''):'<span class="muted">No camera events this week.</span>'}
+  $('camN').textContent=VIDS.length+' event'+(VIDS.length==1?'':'s')+(camType?' · '+camType.toLowerCase():' · last 7 days');$('vids').innerHTML=VIDS.length?VIDS.map((x,i)=>evRow(x,i)).join(''):'<span class="muted">No camera events this week.</span>'}
 document.addEventListener('click',e=>{const t=e.target.closest('#donut [data-t]');if(t){camType=camType===t.dataset.t?'':t.dataset.t;drawCams()}});
 function evMedia(x){
   const videos=(x.videoLinks||[]).flat().filter(v=>v&&v.videoLink).map(v=>({name:v.videoName||(v.videoIndex===2?'Driver facing':'Road facing'),url:v.videoLink,poster:v.thumbnailLink||''}));
@@ -1091,6 +1115,7 @@ function renderEdit(){
   const n=vehicles.filter(outOfSync).length;
   if(!syncing)$('syncBar').innerHTML=!AT?'':!AT.connected?'<span class="muted">Airtable not connected</span>':AT.error?'<span class="muted">Airtable unavailable</span>':n?'<button class="btn2 pri" id="syncAll" style="width:100%">Sync '+n+' truck'+(n>1?'s':'')+' from Airtable → Azuga</button>':'<span style="color:var(--go);display:inline-flex;gap:6px;align-items:center">'+ICON.check+'Azuga matches Airtable</span>';
   if($('syncAll'))$('syncAll').onclick=syncAll;
+  if(!edSel&&rs.length)openEd(vid(rs[0]));
 }
 let syncing=false;
 async function syncAll(){
@@ -1242,7 +1267,7 @@ function renderDrivers(){
   renderSelbar();
   document.querySelectorAll('.azbtn').forEach(b=>b.onclick=async()=>{const t=b.closest('.rrow');b.disabled=true;b.textContent='Adding...';
     try{await post('/api/driver/azuga',{airtableId:t.dataset.id});driverList=null;await loadPeople()}
-    catch(e){b.disabled=false;b.textContent='Try again';b.title=e.message;t.querySelector('.rn span').textContent='Azuga said: '+e.message}});
+    catch(e){b.disabled=false;b.textContent='Try again';b.title=e.message;t.querySelector('.rn>span').textContent='Azuga said: '+e.message}});
 }
 $('newDrvBtn').onclick=()=>{$('newDrv').hidden=false;$('newDrv').scrollIntoView({block:'nearest'});$('newDrv').querySelector('[name=name]').focus()};
 $('ndCancel').onclick=()=>{frontPhoto=null;$('frontPrev').hidden=true;$('newDrv').reset();$('newDrv').hidden=true;$('ndMsg').textContent=''};
