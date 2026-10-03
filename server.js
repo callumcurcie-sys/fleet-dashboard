@@ -467,7 +467,8 @@ async function createAzugaDriver(name, email, phone) {
   if (!groupId) throw new Error('Could not find your Azuga group.');
   const body = {
     firstName: parts.slice(0, -1).join(' '), lastName: parts[parts.length - 1], userName: login, email,
-    timeZone: tpl.timeZone || 'US/Eastern',   // Azuga's own zone names; it rejects 'America/New_York' groupIds: [groupId], userTypeName: 'driver', emailVerification: false,
+    timeZone: tpl.timeZone || 'US/Eastern',   // Azuga's own zone names; it rejects 'America/New_York'
+    groupIds: [groupId], userTypeName: 'driver', emailVerification: false,
     // Random password, never shown; reset it in Azuga if the driver needs the Azuga app.
     // Azuga caps passwords at 15 characters: 14 here, with upper, lower, digit and symbol
     password: 'Mp!' + require('crypto').randomBytes(9).toString('base64url').slice(0, 9) + '7a',
@@ -706,6 +707,12 @@ async function reconcile(mode) {
       } else if (dHow === 'toAz') {
         if (tD) toAz.userId = tD; else if (t.driver) res.notes.push('Truck ' + (t.truckNo || v.name) + ': ' + t.driver.name + ' is not in Azuga yet.');
       } else if (aD === tD) snap.driver = aD;
+      // Mavericks are named "<year> Maverick <driver>" in Azuga, e.g. "2026 Maverick Adam Salem"
+      if (/maverick/i.test(t.model || v.model)) {
+        const who = t.driver ? t.driver.name : ((azp.find(p => p.id === aD) || {}).name || '');
+        const want = [Number(t.year) || Number(v.year) || '', 'Maverick', clean(who)].filter(Boolean).join(' ');
+        if (clean(v.name) !== want) { toAz.name = want; logSync('Renamed "' + clean(v.name) + '" → "' + want + '" in Azuga'); }
+      }
       if (Object.keys(toAz).length) {
         try { await sendUpdate(await buildUpdate({ trackeeId: v.trackeeId, ...toAz }, vs)); Object.assign(snap, Object.fromEntries(Object.entries(toAz).map(([k, val]) => [{ licensePlateNo: 'plate', userId: 'driver' }[k] || k, String(val)]))); res.toAzuga++; await sleep(1500); }
         catch (e) { res.notes.push('Truck ' + (t.truckNo || v.name) + ': ' + e.message); }
