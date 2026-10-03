@@ -172,7 +172,9 @@ async function buildUpdate(b, vs) {
     if (!Number.isInteger(o) || o < 0 || o > 2000000) throw new Error('Odometer must be a whole number of miles.');
     body.odometerReading = o; set('currentOdometerReading', o, 'odometer=' + o);
   }
-  if ('userId' in b) {
+  if ('userId' in b && !b.userId) {   // no driver: trucks without one simply have no userId in Azuga
+    delete body.userId; delete body.userName; delete body.userFirstName; delete body.userLastName; changed.push('driver removed');
+  } else if ('userId' in b) {
     const d = (await drivers()).find(d => d.id === b.userId);
     if (!d) throw new Error('Pick a driver from the list.');
     body.userName = d.name; set('userId', d.id, 'driver=' + d.name);
@@ -704,12 +706,12 @@ async function reconcile(mode) {
         if (d) { f[F.driver] = [d.id]; snap.driver = aD; res.backup.push({ table: 'Trucks', id: t.id, who: t.truckNo || t.vin, field: 'driver', was: t.driver ? t.driver.name : '', now: d.name }); logSync('Truck ' + (t.truckNo || v.name) + ': driver → ' + d.name + ' (from Azuga)'); }
         else res.notes.push('Truck ' + (t.truckNo || v.name) + ': its Azuga driver ' + ((azp.find(p => p.id === aD) || {}).name || '') + ' is not linked to an Airtable driver yet.');
       } else if (dHow === 'toAz') {
-        if (tD) toAz.userId = tD; else if (t.driver) res.notes.push('Truck ' + (t.truckNo || v.name) + ': ' + t.driver.name + ' is not in Azuga yet.');
+        if (tD) toAz.userId = tD; else if (t.driver) res.notes.push('Truck ' + (t.truckNo || v.name) + ': ' + t.driver.name + ' is not in Azuga yet.'); else toAz.userId = '';   // removed in Airtable
       } else if (aD === tD) snap.driver = aD;
       // Every truck is named "<year> <model> <driver>" in Azuga, e.g. "2026 Maverick Adam Salem"
       {
         const azName = (azp.find(p => p.id === aD) || {}).name || '';
-        const who = dHow === 'toAt' ? ((drvByAz[aD] || {}).name || azName) : t.driver ? t.driver.name : azName;   // the driver after this sync
+        const who = dHow === 'toAt' ? ((drvByAz[aD] || {}).name || azName) : t.driver ? t.driver.name : dHow === 'toAz' ? '' : azName;   // the driver after this sync
         const want = [Number(after.year) || '', clean(after.model).replace(/\s+/g, ' '), clean(who)].filter(Boolean).join(' ');
         // Azuga names must be unique. If another truck still has this name (two trucks swapping drivers),
         // park this one on "<name> (2)" so the other can move; the next sync gives it the real name.
@@ -719,7 +721,7 @@ async function reconcile(mode) {
       }
       if (Object.keys(toAz).length) {
         const oldName = clean(v.name);
-        try { await sendUpdate(await buildUpdate({ trackeeId: v.trackeeId, ...toAz }, vs)); if (toAz.name) logSync('Renamed "' + oldName + '" → "' + toAz.name + '" in Azuga'); if (toAz.userId) logSync('Truck ' + (t.truckNo || toAz.name || v.name) + ': driver sent to Azuga'); Object.assign(snap, Object.fromEntries(Object.entries(toAz).map(([k, val]) => [{ licensePlateNo: 'plate', userId: 'driver' }[k] || k, String(val)]))); res.toAzuga++; await sleep(1500); }
+        try { await sendUpdate(await buildUpdate({ trackeeId: v.trackeeId, ...toAz }, vs)); if (toAz.name) logSync('Renamed "' + oldName + '" → "' + toAz.name + '" in Azuga'); if ('userId' in toAz && !toAz.userId) logSync('Truck ' + (toAz.name || v.name) + ': driver removed in Azuga (none in Airtable)'); if (toAz.userId) logSync('Truck ' + (t.truckNo || toAz.name || v.name) + ': driver sent to Azuga'); Object.assign(snap, Object.fromEntries(Object.entries(toAz).map(([k, val]) => [{ licensePlateNo: 'plate', userId: 'driver' }[k] || k, String(val)]))); res.toAzuga++; await sleep(1500); }
         catch (e) { res.notes.push('Truck ' + (t.truckNo || v.name) + ': ' + e.message); }
       }
       if (JSON.stringify(snap) !== JSON.stringify(t.snap || {})) f[F.snap] = JSON.stringify(snap);
@@ -1194,7 +1196,8 @@ const azSub=r=>{const t=atTitle(vid(r));return t&&t.toLowerCase()!==vname(r).toL
 // Unnamed drivers come through as a phone number like "9052487042 ."
 // Driver shown on the map: Azuga's, or Airtable's when Azuga has none
 // Airtable's Current Driver wins (it's the master); Azuga's driver only when the truck isn't linked or has none there
-const who=r=>{const L=link(vid(r));if(L&&L.linked&&L.truck.driver)return L.truck.driver.name;return dname(r)};
+// Linked trucks: Airtable's Current Driver only (blank = no driver). Unlinked: Azuga's, ignoring device placeholders like "9012302049 ."
+const who=r=>{const L=link(vid(r));if(L&&L.linked)return L.truck.driver?L.truck.driver.name:'';const d=dname(r);return /[a-z]/i.test(d)?d:''};
 const dname=v=>{const n=String(pick(v,'driverName','userName','driverFullName')||[v.driverFirstName,v.driverLastName].filter(Boolean).join(' ')).replace(/[ .]+$/,'').trim();return n};
 const initials=n=>/[a-z]/i.test(n)?n.split(/ +/).map(w=>w[0]).slice(0,2).join('').toUpperCase():'?';
 // Azuga sends several odometers: prefer the truck's own reading, then Azuga's current estimate.
