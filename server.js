@@ -606,8 +606,6 @@ async function pushDriverToAzuga(az, vals, vs) {
     const body = { userId: id, vehicleId: veh ? veh.trackeeId : '' };
     if ('name' in vals) Object.assign(body, splitName(vals.name));
     if ('phone' in vals && vals.phone) body.primaryContactNumber = '+1-' + vals.phone;
-    if ('license' in vals) body.licenseNumber = vals.license;
-    if ('state' in vals) body.licenseIssuedState = vals.state;
     const r = await azuga('/user/update.json', body, 'PATCH');
     if (azErr(r)) throw new Error('Azuga rejected the driver update: ' + JSON.stringify(azErr(r)).slice(0, 200));
     if (az.ids.length > 1) await sleep(800);
@@ -654,7 +652,7 @@ async function reconcile(mode) {
         const a = azVals[k], t = k === 'phone' ? digits10(d.phone) : d[k];
         const how = imp ? (DRIVER_SYNC[k](a) && DRIVER_SYNC[k](a) !== DRIVER_SYNC[k](t) ? 'toAt' : 'same') : decide(a, t, d.snap ? d.snap[k] : undefined, DRIVER_SYNC[k]);
         if (how === 'toAt') { f[D[k]] = a; snap[k] = a; res.backup.push({ table: 'Drivers', id: d.id, who: d.name, field: k, was: t, now: a }); logSync(d.name + ': ' + k + ' "' + (t || '') + '" → "' + a + '" (from Azuga)'); }
-        else if (how === 'toAz') { toAz[k] = t; }
+        else if (how === 'toAz') { if (k !== 'license' && k !== 'state') toAz[k] = t; }   // Azuga won't take a license without issue/expiry dates, so licenses only flow Azuga → Airtable
         else if (DRIVER_SYNC[k](a) === DRIVER_SYNC[k](t)) snap[k] = t;
       }
       if (Object.keys(toAz).length) {
