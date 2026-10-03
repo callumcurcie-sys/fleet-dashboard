@@ -687,10 +687,11 @@ async function reconcile(mode) {
     const m = matchAll(vs, at2.trucks), tPatch = [];
     for (const v of vs) {
       const x = m[v.trackeeId]; if (!x || !x.truck) continue;
-      const t = at2.trucks.find(y => y.id === x.truck.id), f = {}, snap = { ...(t.snap || {}) }, toAz = {};
+      const t = at2.trucks.find(y => y.id === x.truck.id), f = {}, snap = { ...(t.snap || {}) }, toAz = {}, after = {};
       for (const k in TRUCK_SYNC) {
         const [ga, gt, norm] = TRUCK_SYNC[k], a = ga(v), tv = gt(t);
         const how = imp ? (a && norm(a) !== norm(tv) ? 'toAt' : 'same') : decide(a, tv, t.snap ? t.snap[k] : undefined, norm);
+        after[k] = how === 'toAt' ? a : tv || a;   // value once this sync is done
         if (how === 'toAt') { f[{ plate: F.plate, year: F.year, make: F.make, model: F.model }[k]] = a; snap[k] = a; res.backup.push({ table: 'Trucks', id: t.id, who: t.truckNo || t.vin, field: k, was: tv, now: a }); logSync('Truck ' + (t.truckNo || v.name) + ': ' + k + ' "' + (tv || '') + '" → "' + a + '" (from Azuga)'); }
         else if (how === 'toAz') {
           if (k === 'plate' && !PLATE_OK.test(tv)) res.notes.push('Truck ' + (t.truckNo || v.name) + ': Airtable plate "' + t.plate + '" is not a plate number, so it was not sent to Azuga.');
@@ -707,14 +708,19 @@ async function reconcile(mode) {
       } else if (dHow === 'toAz') {
         if (tD) toAz.userId = tD; else if (t.driver) res.notes.push('Truck ' + (t.truckNo || v.name) + ': ' + t.driver.name + ' is not in Azuga yet.');
       } else if (aD === tD) snap.driver = aD;
-      // Mavericks are named "<year> Maverick <driver>" in Azuga, e.g. "2026 Maverick Adam Salem"
-      if (/maverick/i.test(t.model || v.model)) {
-        const who = t.driver ? t.driver.name : ((azp.find(p => p.id === aD) || {}).name || '');
-        const want = [Number(t.year) || Number(v.year) || '', 'Maverick', clean(who)].filter(Boolean).join(' ');
-        if (clean(v.name) !== want) { toAz.name = want; logSync('Renamed "' + clean(v.name) + '" → "' + want + '" in Azuga'); }
+      // Every truck is named "<year> <model> <driver>" in Azuga, e.g. "2026 Maverick Adam Salem"
+      {
+        const azName = (azp.find(p => p.id === aD) || {}).name || '';
+        const who = dHow === 'toAt' ? ((drvByAz[aD] || {}).name || azName) : t.driver ? t.driver.name : azName;   // the driver after this sync
+        const want = [Number(after.year) || '', clean(after.model).replace(/\s+/g, ' '), clean(who)].filter(Boolean).join(' ');
+        // Azuga names must be unique. If another truck still has this name (two trucks swapping drivers),
+        // park this one on "<name> (2)" so the other can move; the next sync gives it the real name.
+        const taken = vs.some(o => o.trackeeId !== v.trackeeId && lc(o.name) === lc(want));
+        const target = taken ? want + ' (2)' : want;
+        if (clean(v.name) !== target && !(taken && clean(v.name).startsWith(want))) toAz.name = target;
       }
       if (Object.keys(toAz).length) {
-        try { await sendUpdate(await buildUpdate({ trackeeId: v.trackeeId, ...toAz }, vs)); Object.assign(snap, Object.fromEntries(Object.entries(toAz).map(([k, val]) => [{ licensePlateNo: 'plate', userId: 'driver' }[k] || k, String(val)]))); res.toAzuga++; await sleep(1500); }
+        try { await sendUpdate(await buildUpdate({ trackeeId: v.trackeeId, ...toAz }, vs)); if (toAz.name) logSync('Renamed "' + clean(v.name) + '" → "' + toAz.name + '" in Azuga'); if (toAz.userId) logSync('Truck ' + (t.truckNo || toAz.name || v.name) + ': driver sent to Azuga'); Object.assign(snap, Object.fromEntries(Object.entries(toAz).map(([k, val]) => [{ licensePlateNo: 'plate', userId: 'driver' }[k] || k, String(val)]))); res.toAzuga++; await sleep(1500); }
         catch (e) { res.notes.push('Truck ' + (t.truckNo || v.name) + ': ' + e.message); }
       }
       if (JSON.stringify(snap) !== JSON.stringify(t.snap || {})) f[F.snap] = JSON.stringify(snap);
