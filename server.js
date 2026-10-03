@@ -228,7 +228,7 @@ const normPlate = v => clean(v).toUpperCase().replace(/\s+/g, '');
 const PLATE_OK = /^[A-Z0-9]{2,8}$/;  // real plates; skips notes like "HALDEMAN FORD" or "Not registered yet"
 
 const parseSnap = v => { try { const o = JSON.parse(v || ''); return o && typeof o === 'object' ? o : null; } catch { return null; } };
-const atData = () => cached('airtable', 120, async () => {
+const atData = () => cached('airtable', 60, async () => {
   const [trucks, drv] = await Promise.all([atAll(AT_TRUCKS, Object.values(F)), atAll(AT_DRIVERS, Object.values(D))]);
   const att = a => (a || []).map(x => ({ name: x.filename, url: x.url, type: x.type, thumb: x.thumbnails?.small?.url }));
   const drivers = drv.map(r => ({ id: r.id, name: clean(r.fields[D.name]), license: clean(r.fields[D.license]), state: clean(r.fields[D.state]),
@@ -580,7 +580,7 @@ const DRIVER_SYNC = { name: n => dupeName(n), phone: digits10, license: x => cle
 function decide(a, t, base, norm) {
   const na = norm(a), nt = norm(t), nb = base == null ? undefined : norm(base);
   if (na === nt) return 'same';
-  if (!na) return 'same';                  // Azuga blank: keep Airtable's value
+  if (!na) return nt ? 'toAz' : 'same';   // Azuga blank: never erase Airtable; fill Azuga from it
   if (nb === undefined) return nt ? 'toAz' : 'toAt';  // no history: Airtable wins, but fill its blanks
   if (nt === nb) return 'toAt';
   return 'toAz';                           // Airtable changed (or both did: Airtable wins)
@@ -720,7 +720,8 @@ async function reconcile(mode) {
         if (clean(v.name) !== target && !(taken && clean(v.name).startsWith(want))) toAz.name = target;
       }
       if (Object.keys(toAz).length) {
-        try { await sendUpdate(await buildUpdate({ trackeeId: v.trackeeId, ...toAz }, vs)); if (toAz.name) logSync('Renamed "' + clean(v.name) + '" → "' + toAz.name + '" in Azuga'); if (toAz.userId) logSync('Truck ' + (t.truckNo || toAz.name || v.name) + ': driver sent to Azuga'); Object.assign(snap, Object.fromEntries(Object.entries(toAz).map(([k, val]) => [{ licensePlateNo: 'plate', userId: 'driver' }[k] || k, String(val)]))); res.toAzuga++; await sleep(1500); }
+        const oldName = clean(v.name);
+        try { await sendUpdate(await buildUpdate({ trackeeId: v.trackeeId, ...toAz }, vs)); if (toAz.name) logSync('Renamed "' + oldName + '" → "' + toAz.name + '" in Azuga'); if (toAz.userId) logSync('Truck ' + (t.truckNo || toAz.name || v.name) + ': driver sent to Azuga'); Object.assign(snap, Object.fromEntries(Object.entries(toAz).map(([k, val]) => [{ licensePlateNo: 'plate', userId: 'driver' }[k] || k, String(val)]))); res.toAzuga++; await sleep(1500); }
         catch (e) { res.notes.push('Truck ' + (t.truckNo || v.name) + ': ' + e.message); }
       }
       if (JSON.stringify(snap) !== JSON.stringify(t.snap || {})) f[F.snap] = JSON.stringify(snap);
@@ -735,7 +736,8 @@ async function reconcile(mode) {
   }
 }
 // Every 5 minutes while the server is awake
-if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) setInterval(() => reconcile().catch(e => { SYNC.last = { at: Date.now(), error: e.message }; console.error('Sync failed:', e.message); }), 5 * 60e3);
+const autoSync = () => reconcile().catch(e => { if (!/already running/.test(e.message)) { SYNC.last = { at: Date.now(), error: e.message }; console.error('Sync failed:', e.message); } });
+if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) { setTimeout(autoSync, 30e3); setInterval(autoSync, 5 * 60e3); }   // first pass soon after a restart/wake-up
 
 async function readJson(req, max = 10000) {
   let s = '';
@@ -1193,7 +1195,8 @@ const title=r=>atTitle(vid(r))||(/^\d+$/.test(vname(r))?'Unnamed tracker '+vname
 const azSub=r=>{const t=atTitle(vid(r));return t&&t.toLowerCase()!==vname(r).toLowerCase()?'<small class="azn">Azuga: '+esc(vname(r))+'</small>':''};
 // Unnamed drivers come through as a phone number like "9052487042 ."
 // Driver shown on the map: Azuga's, or Airtable's when Azuga has none
-const who=r=>{const d=dname(r);if(/[a-z]/i.test(d))return d;const L=link(vid(r));return L&&L.linked&&L.truck.driver?L.truck.driver.name:d};
+// Airtable's Current Driver wins (it's the master); Azuga's driver only when the truck isn't linked or has none there
+const who=r=>{const L=link(vid(r));if(L&&L.linked&&L.truck.driver)return L.truck.driver.name;return dname(r)};
 const dname=v=>{const n=String(pick(v,'driverName','userName','driverFullName')||[v.driverFirstName,v.driverLastName].filter(Boolean).join(' ')).replace(/[ .]+$/,'').trim();return n};
 const initials=n=>/[a-z]/i.test(n)?n.split(/ +/).map(w=>w[0]).slice(0,2).join('').toUpperCase():'?';
 // Azuga sends several odometers: prefer the truck's own reading, then Azuga's current estimate.
@@ -1498,7 +1501,7 @@ new MutationObserver(()=>MSG_IDS.forEach(id=>{const e=$(id);if(e&&e.textContent&
 setInterval(()=>MSG_IDS.forEach(id=>{const e=$(id);if(e&&msgAt[id]&&Date.now()-msgAt[id]>9000){e.textContent='';e.style.color='';delete msgAt[id]}}),2000);
 let lastAct=Date.now(),hiddenAt=0;['pointerdown','keydown','wheel','touchstart'].forEach(ev=>addEventListener(ev,()=>lastAct=Date.now(),{passive:true}));
 const busy=()=>document.querySelector('dialog[open]')||document.querySelector('#edCard .dirty')||($('newDrv')&&!$('newDrv').hidden)||(SYNCST&&SYNCST.running);
-const freshen=()=>{if(busy())return;if(!$('vDrv').hidden){driverList=null;loadPeople();loadSync()}else if(!$('vEdit').hidden){loadAT();loadSync()}};
+const freshen=()=>{if(busy())return;if(!$('vDrv').hidden){driverList=null;loadPeople();loadSync()}else if(!$('vEdit').hidden){loadAT();loadSync()}else loadAT()};   // map tab: pick up Airtable driver changes
 setInterval(freshen,120e3);
 setInterval(()=>{if(Date.now()-lastAct>10*60e3&&!busy())location.reload()},60e3);
 document.addEventListener('visibilitychange',()=>{if(document.hidden)hiddenAt=Date.now();else if(hiddenAt&&Date.now()-hiddenAt>10*60e3&&!busy())location.reload();else freshen()});
