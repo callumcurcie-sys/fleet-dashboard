@@ -73,6 +73,7 @@ const routes = {
   '/api/drivers': () => driverGroups(),
   '/api/airtable': () => atLinks(),
   '/api/people': () => people(),
+  '/api/sync/status': async () => ({ running: SYNC.running, last: SYNC.last, log: SYNC.log.slice(0, 20), imported: AIRTABLE_TOKEN ? (await atData()).trucks.some(t => t.snap) || (await atData()).drivers.some(d => d.snap) : false }),
   '/api/maintenance': () => cached('maintenance', 600, () => azuga('/maintanance/reports/scheduledreport.json?' + new URLSearchParams({
     startTime: fmt(daysAgo(365)), endTime: fmt(daysAgo(-365)), isCount: 'false',
   }))),
@@ -195,10 +196,11 @@ const { AIRTABLE_TOKEN } = process.env;
 const AT_BASE = 'appxOcqhRSdoWgHE3', AT_TRUCKS = 'tbl3aU0dRPvn79Ba1', AT_DRIVERS = 'tbl9oEuseNwk23jdg';
 const F = { vin: 'fldT4fSSnXnZuj2Jr', year: 'fldqjqyAK1ZJfn0oT', make: 'fldOhan3is4yEhucl', model: 'fldM01jCShSILujYB',
   truckNo: 'fldYmYqWTfoYoRvjB', policy: 'fldWlS28YbpsipR7r', driver: 'fldEO66ezgMWnguAu', plate: 'fldLGLwnLOAfpw88W',
-  insCard: 'fldH0Pe6EKyQEBmMR', files: 'fldS5YJgDrLDbxSiK', regRenew: 'fldjFFBZ0UoO4SUXV', ezpass: 'fld1utE81nDdDiqgi', active: 'fldBpQ0MA5cD9YJ06' };
+  insCard: 'fldH0Pe6EKyQEBmMR', files: 'fldS5YJgDrLDbxSiK', regRenew: 'fldjFFBZ0UoO4SUXV', ezpass: 'fld1utE81nDdDiqgi', active: 'fldBpQ0MA5cD9YJ06', snap: 'fldOaFfl7ZzS72xLK' };
 // Drivers. Date of birth is only ever written (new driver form), never read or shown.
 const D = { name: 'fldMrVtrXN6WDaOjj', license: 'fldcSIYqy5FCEC0Xn', state: 'fld1NdVP4v6QcckK2', pic: 'fldZeCHS22kI7Ythi',
-  policy: 'fldVo5IrWedsKvumK', trucks: 'fld47HPqHRrw9GUL7', notes: 'fldSnexzpxIG22gF0', status: 'fldVuSDYSZVHk0fWN' };
+  policy: 'fldVo5IrWedsKvumK', trucks: 'fld47HPqHRrw9GUL7', notes: 'fldSnexzpxIG22gF0', status: 'fldVuSDYSZVHk0fWN',
+  phone: 'fldNxN3OyrU3TFAjQ', azId: 'fldgBxpfEnLCwdIzS', snap: 'fldhuLqirXbDaAy89' };
 const D_DOB = 'fldFMJ06wrdGolZkS';
 
 async function airtable(path, opt = {}) {
@@ -225,12 +227,14 @@ const normName = v => clean(v).toLowerCase().replace(/\s+/g, ' ');
 const normPlate = v => clean(v).toUpperCase().replace(/\s+/g, '');
 const PLATE_OK = /^[A-Z0-9]{2,8}$/;  // real plates; skips notes like "HALDEMAN FORD" or "Not registered yet"
 
+const parseSnap = v => { try { const o = JSON.parse(v || ''); return o && typeof o === 'object' ? o : null; } catch { return null; } };
 const atData = () => cached('airtable', 120, async () => {
   const [trucks, drv] = await Promise.all([atAll(AT_TRUCKS, Object.values(F)), atAll(AT_DRIVERS, Object.values(D))]);
   const att = a => (a || []).map(x => ({ name: x.filename, url: x.url, type: x.type, thumb: x.thumbnails?.small?.url }));
   const drivers = drv.map(r => ({ id: r.id, name: clean(r.fields[D.name]), license: clean(r.fields[D.license]), state: clean(r.fields[D.state]),
     policy: clean(r.fields[D.policy]?.name ?? r.fields[D.policy]), notes: clean(r.fields[D.notes]), truckIds: r.fields[D.trucks] || [], pic: att(r.fields[D.pic]),
-    status: clean(r.fields[D.status]?.name ?? r.fields[D.status]) || 'Active' }));
+    status: clean(r.fields[D.status]?.name ?? r.fields[D.status]) || 'Active',
+    phone: clean(r.fields[D.phone]), azId: clean(r.fields[D.azId]), snap: parseSnap(r.fields[D.snap]) }));
   const byId = Object.fromEntries(drivers.map(d => [d.id, d]));
   return {
     drivers,
@@ -238,7 +242,7 @@ const atData = () => cached('airtable', 120, async () => {
       id: r.id, vin: normVin(f[F.vin]), year: clean(f[F.year]), make: clean(f[F.make]), model: clean(f[F.model]),
       truckNo: clean(f[F.truckNo]), policy: clean(f[F.policy]?.name ?? f[F.policy]), plate: clean(f[F.plate]),
       regRenew: clean(f[F.regRenew]), ezpass: clean(f[F.ezpass]), active: !!f[F.active],
-      driver: (f[F.driver] || []).map(id => byId[id]).filter(Boolean)[0] || null,
+      driver: (f[F.driver] || []).map(id => byId[id]).filter(Boolean)[0] || null, snap: parseSnap(f[F.snap]),
       insCard: att(f[F.insCard]), files: att(f[F.files]),
     }; }),
   };
@@ -507,7 +511,9 @@ async function updateDriver(b) {
   if (b.photo) await uploadLicense(d.id, name, b.photo);
   cache.delete('airtable');
   console.log(new Date().toISOString(), 'Airtable driver updated', name);
-  return { ok: true };
+  // Push to Azuga right away instead of waiting for the 5-minute sync
+  try { const r = await reconcile(); return { ok: true, synced: true, notes: r.notes.filter(n => n.startsWith(name)) }; }
+  catch (e) { return { ok: true, warning: 'Saved to Airtable. Azuga will be updated by the next automatic sync (' + e.message + ')' }; }
 }
 
 async function addDriverToAzuga(b) {
@@ -527,6 +533,155 @@ async function syncOne(id) {
   const changed = await sendUpdate(await buildUpdate({ trackeeId: id, ...d.changes }, vs));
   return { ok: true, changed, notes: d.notes };
 }
+
+// ================= Two-way sync: Azuga <-> Airtable =================
+// Azuga doesn't record when something was edited, so each Airtable record keeps a "Sync snapshot"
+// of the values both sides last agreed on. Whichever side no longer matches its snapshot is the one
+// that changed, and its value is copied to the other side. Both changed in the same window: Airtable wins.
+// A blank in Azuga never erases Airtable. VIN is the truck link key, so it is not synced here.
+const digits10 = v => { const d = clean(v).replace(/\D/g, ''); return d.length >= 10 ? d.slice(-10) : ''; };
+const lc = v => clean(v).toLowerCase();
+const TRUCK_SYNC = {   // key: [Azuga value, Airtable value, compare form]
+  plate: [v => normPlate(v.licensePlateNo), t => normPlate(t.plate), x => x],
+  year: [v => (Number(v.year) ? String(Number(v.year)) : ''), t => (Number(t.year) ? String(Number(t.year)) : ''), x => x],
+  make: [v => clean(v.make), t => t.make, lc],
+  model: [v => clean(v.model), t => t.model, lc],
+};
+const DRIVER_SYNC = { name: lc, phone: digits10, license: x => clean(x).toUpperCase().replace(/[\s-]/g, ''), state: x => clean(x).toUpperCase() };
+// 'same' | 'toAt' (Azuga changed) | 'toAz' (Airtable changed)
+function decide(a, t, base, norm) {
+  const na = norm(a), nt = norm(t), nb = base == null ? undefined : norm(base);
+  if (na === nt) return 'same';
+  if (!na) return 'same';                  // Azuga blank: keep Airtable's value
+  if (nb === undefined) return nt ? 'toAz' : 'toAt';  // no history: Airtable wins, but fill its blanks
+  if (nt === nb) return 'toAt';
+  return 'toAz';                           // Airtable changed (or both did: Airtable wins)
+}
+// Azuga drivers, one entry per person (the login used on the most trucks), with their raw record.
+async function azPeopleList(fresh) {
+  if (fresh) { cache.delete('rawDrivers'); cache.delete('drivers'); }
+  const [raw, groups] = await Promise.all([rawDrivers(), driverGroups()]);
+  const byId = Object.fromEntries(raw.map(u => [u.id, u]));
+  return groups.map(g => {
+    const u = byId[g.id] || {}, has = k => Object.prototype.hasOwnProperty.call(u, k);
+    return { id: g.id, ids: g.ids, name: g.name, raw: u,
+      phone: digits10(u.primaryContactNumber || u.phoneNumber || u.phone || u.mobileNumber),
+      license: has('licenseNumber') ? clean(u.licenseNumber) : null,          // null = Azuga does not report it
+      state: has('licenseIssuedState') ? clean(u.licenseIssuedState) : null };
+  });
+}
+const splitName = n => { const p = clean(n).split(/\s+/); if (p.length < 2) p.push('.'); return { firstName: p.slice(0, -1).join(' '), lastName: p[p.length - 1] }; };
+// Same change on every Azuga login the person has, so duplicate logins stay grouped as one person.
+async function pushDriverToAzuga(az, vals, vs) {
+  for (const id of az.ids) {
+    const veh = vs.find(v => v.userId === id);
+    const body = { userId: id, vehicleId: veh ? veh.trackeeId : '' };
+    if ('name' in vals) Object.assign(body, splitName(vals.name));
+    if ('phone' in vals && vals.phone) body.primaryContactNumber = '+1-' + vals.phone;
+    if ('license' in vals) body.licenseNumber = vals.license;
+    if ('state' in vals) body.licenseIssuedState = vals.state;
+    const r = await azuga('/user/update.json', body, 'PATCH');
+    if (azErr(r)) throw new Error('Azuga rejected the driver update: ' + JSON.stringify(azErr(r)).slice(0, 200));
+    if (az.ids.length > 1) await sleep(800);
+  }
+}
+const SYNC = { running: false, last: null, log: [] };
+const logSync = (what) => { SYNC.log.unshift({ at: Date.now(), what }); SYNC.log.length = Math.min(SYNC.log.length, 60); console.log(new Date().toISOString(), 'SYNC', what); };
+const atBatch = async (table, records, method = 'PATCH') => { for (let i = 0; i < records.length; i += 10) await airtable(table, { method, body: JSON.stringify({ records: records.slice(i, i + 10), typecast: true }) }); };
+
+// One pass. mode 'import' = Azuga overwrites Airtable (the one-time first copy); otherwise two-way.
+async function reconcile(mode) {
+  if (!AIRTABLE_TOKEN) throw new Error('Airtable is not connected.');
+  if (SYNC.running) throw new Error('A sync is already running. Try again in a minute.');
+  SYNC.running = true;
+  const res = { toAirtable: 0, toAzuga: 0, created: 0, notes: [], backup: [] };
+  try {
+    cache.delete('airtable'); cache.delete('fresh');
+    const [at, vs, azp] = await Promise.all([atData(), freshVehicles(), azPeopleList(true)]);
+    const imported = mode === 'import' || at.trucks.some(t => t.snap) || at.drivers.some(d => d.snap);
+    if (!imported) { res.notes.push('Waiting for the first copy from Azuga.'); return res; }
+    const imp = mode === 'import';
+
+    // ---- Drivers: link each Azuga person to one Airtable record (by Azuga ID, else by unique name)
+    const atPatch = [], atCreate = [];
+    const byAzId = {}; at.drivers.forEach(d => d.azId && (byAzId[d.azId] = d));
+    for (const az of azp) {
+      let d = az.ids.map(i => byAzId[i]).find(Boolean);
+      if (!d) {
+        const same = at.drivers.filter(x => normName(x.name) === normName(az.name));
+        if (same.length > 1) { res.notes.push(az.name + ' appears ' + same.length + ' times in Airtable; merge the duplicates in the Drivers tab so it can sync.'); continue; }
+        d = same[0];
+      }
+      const azVals = { name: az.name, phone: az.phone, license: az.license, state: az.state };
+      if (!d) {   // Azuga driver missing from Airtable: add them
+        const f = { [D.name]: az.name, [D.azId]: az.id, [D.status]: 'Active' }, snap = { name: az.name };
+        for (const k of ['phone', 'license', 'state']) if (azVals[k]) { f[D[k]] = azVals[k]; snap[k] = azVals[k]; }
+        f[D.snap] = JSON.stringify(snap); atCreate.push({ fields: f }); res.created++; logSync('Added ' + az.name + ' to Airtable from Azuga'); continue;
+      }
+      const f = {}, snap = { ...(d.snap || {}) }, toAz = {};
+      if (d.azId !== az.id) f[D.azId] = az.id;
+      for (const k in DRIVER_SYNC) {
+        if (azVals[k] === null) continue;                       // Azuga does not report this field
+        const a = azVals[k], t = k === 'phone' ? digits10(d.phone) : d[k];
+        const how = imp ? (DRIVER_SYNC[k](a) && DRIVER_SYNC[k](a) !== DRIVER_SYNC[k](t) ? 'toAt' : 'same') : decide(a, t, d.snap ? d.snap[k] : undefined, DRIVER_SYNC[k]);
+        if (how === 'toAt') { f[D[k]] = a; snap[k] = a; res.backup.push({ table: 'Drivers', id: d.id, who: d.name, field: k, was: t, now: a }); logSync(d.name + ': ' + k + ' "' + (t || '') + '" → "' + a + '" (from Azuga)'); }
+        else if (how === 'toAz') { toAz[k] = t; }
+        else if (DRIVER_SYNC[k](a) === DRIVER_SYNC[k](t)) snap[k] = t;
+      }
+      if (Object.keys(toAz).length) {
+        try { await pushDriverToAzuga(az, toAz, vs); Object.assign(snap, toAz); res.toAzuga++; logSync(d.name + ': sent ' + Object.keys(toAz).join(', ') + ' to Azuga'); await sleep(1500); }
+        catch (e) { res.notes.push(d.name + ': ' + e.message); }
+      }
+      if (JSON.stringify(snap) !== JSON.stringify(d.snap || {})) f[D.snap] = JSON.stringify(snap);
+      if (Object.keys(f).length) { atPatch.push({ id: d.id, fields: f }); if (Object.keys(f).some(k => k !== D.snap && k !== D.azId)) res.toAirtable++; }
+    }
+    await atBatch(AT_DRIVERS, atPatch); if (atCreate.length) await atBatch(AT_DRIVERS, atCreate, 'POST');
+    if (atPatch.length || atCreate.length) cache.delete('airtable');
+    const at2 = atPatch.length || atCreate.length ? await atData() : at;
+    const drvByAz = {}; at2.drivers.forEach(d => d.azId && (drvByAz[d.azId] = d));
+    const primary = {}; azp.forEach(p => p.ids.forEach(i => (primary[i] = p.id)));
+
+    // ---- Trucks (matched by VIN)
+    const m = matchAll(vs, at2.trucks), tPatch = [];
+    for (const v of vs) {
+      const x = m[v.trackeeId]; if (!x || !x.truck) continue;
+      const t = at2.trucks.find(y => y.id === x.truck.id), f = {}, snap = { ...(t.snap || {}) }, toAz = {};
+      for (const k in TRUCK_SYNC) {
+        const [ga, gt, norm] = TRUCK_SYNC[k], a = ga(v), tv = gt(t);
+        const how = imp ? (a && norm(a) !== norm(tv) ? 'toAt' : 'same') : decide(a, tv, t.snap ? t.snap[k] : undefined, norm);
+        if (how === 'toAt') { f[{ plate: F.plate, year: F.year, make: F.make, model: F.model }[k]] = a; snap[k] = a; res.backup.push({ table: 'Trucks', id: t.id, who: t.truckNo || t.vin, field: k, was: tv, now: a }); logSync('Truck ' + (t.truckNo || v.name) + ': ' + k + ' "' + (tv || '') + '" → "' + a + '" (from Azuga)'); }
+        else if (how === 'toAz') {
+          if (k === 'plate' && !PLATE_OK.test(tv)) res.notes.push('Truck ' + (t.truckNo || v.name) + ': Airtable plate "' + t.plate + '" is not a plate number, so it was not sent to Azuga.');
+          else toAz[{ plate: 'licensePlateNo', year: 'year', make: 'make', model: 'model' }[k]] = tv;
+        } else if (norm(a) === norm(tv)) snap[k] = tv;
+      }
+      // Assigned driver, compared as the person's main Azuga login
+      const aD = primary[v.userId] || '', tD = t.driver ? (t.driver.azId ? (primary[t.driver.azId] || t.driver.azId) : '') : '';
+      const dHow = imp ? (aD && aD !== tD ? 'toAt' : 'same') : decide(aD, tD, t.snap ? t.snap.driver : undefined, x => x);
+      if (dHow === 'toAt') {
+        const d = drvByAz[aD];
+        if (d) { f[F.driver] = [d.id]; snap.driver = aD; res.backup.push({ table: 'Trucks', id: t.id, who: t.truckNo || t.vin, field: 'driver', was: t.driver ? t.driver.name : '', now: d.name }); logSync('Truck ' + (t.truckNo || v.name) + ': driver → ' + d.name + ' (from Azuga)'); }
+        else res.notes.push('Truck ' + (t.truckNo || v.name) + ': its Azuga driver ' + ((azp.find(p => p.id === aD) || {}).name || '') + ' is not linked to an Airtable driver yet.');
+      } else if (dHow === 'toAz') {
+        if (tD) toAz.userId = tD; else if (t.driver) res.notes.push('Truck ' + (t.truckNo || v.name) + ': ' + t.driver.name + ' is not in Azuga yet.');
+      } else if (aD === tD) snap.driver = aD;
+      if (Object.keys(toAz).length) {
+        try { await sendUpdate(await buildUpdate({ trackeeId: v.trackeeId, ...toAz }, vs)); Object.assign(snap, Object.fromEntries(Object.entries(toAz).map(([k, val]) => [{ licensePlateNo: 'plate', userId: 'driver' }[k] || k, String(val)]))); res.toAzuga++; await sleep(1500); }
+        catch (e) { res.notes.push('Truck ' + (t.truckNo || v.name) + ': ' + e.message); }
+      }
+      if (JSON.stringify(snap) !== JSON.stringify(t.snap || {})) f[F.snap] = JSON.stringify(snap);
+      if (Object.keys(f).length) { tPatch.push({ id: t.id, fields: f }); if (Object.keys(f).some(k => k !== F.snap)) res.toAirtable++; }
+    }
+    await atBatch(AT_TRUCKS, tPatch);
+    cache.delete('airtable'); cache.delete('vehicles');
+    return res;
+  } finally {
+    SYNC.running = false;
+    SYNC.last = { at: Date.now(), mode: mode || 'auto', toAirtable: res.toAirtable, toAzuga: res.toAzuga, created: res.created, notes: res.notes.slice(0, 30) };
+  }
+}
+// Every 5 minutes while the server is awake
+if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) setInterval(() => reconcile().catch(e => { SYNC.last = { at: Date.now(), error: e.message }; console.error('Sync failed:', e.message); }), 5 * 60e3);
 
 async function readJson(req, max = 10000) {
   let s = '';
@@ -578,7 +733,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
+  const POSTS = { '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   if (POSTS[url.pathname]) {
     // JSON-only + POST-only, so another website can't trigger a change with a plain form
     if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
@@ -812,6 +967,13 @@ th{text-align:left;font-size:12px;font-weight:600;color:var(--muted);padding:10p
 td{padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
 tbody tr:hover td{background:#fcfbf8}
 /* Driver roster: one calm list */
+.syncp{margin:0 0 12px}.syncp:empty{display:none}.syncp.sm{margin:10px 0 0;font-size:12px}
+.sbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--card);border-radius:10px;box-shadow:var(--sh);padding:9px 14px;font-size:13px}
+.sbar .sd{width:8px;height:8px;border-radius:50%;background:var(--goDot)}.sbar.bad .sd{background:var(--warnDot)}.sbar .sp{flex:1}
+.sbar button{font:inherit;font-size:12px;font-weight:600;color:var(--poolInk);background:var(--shallow);border:0;border-radius:7px;padding:5px 10px;cursor:pointer}.sbar button:disabled{opacity:.6;cursor:default}
+.slog{margin:6px 0 0;padding:10px 14px;background:var(--card);border-radius:10px;box-shadow:var(--sh);font-size:12.5px;list-style:none;max-height:220px;overflow:auto}.slog li{padding:3px 0;border-bottom:1px solid var(--line)}.slog li:last-child{border:0}.slog time{color:var(--muted);margin-right:8px}.slog .n{color:var(--warn)}
+.simp{background:var(--warnBg);border-radius:12px;padding:14px 16px;font-size:13px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}.simp p{margin:2px 0 0;flex:1 1 380px;color:var(--ink2)}.simp b{color:var(--warn)}
+.syncp.sm .sbar{box-shadow:none;background:var(--deck);padding:7px 10px}.syncp.sm .slog{display:none}
 .crewhead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
 .crewhead h2{margin:0;font-size:20px;font-weight:700;letter-spacing:-.01em}.crewhead p{margin:2px 0 0;font-size:13px}
 .nd{padding:18px 20px;margin-bottom:12px}
@@ -893,7 +1055,7 @@ header{background:linear-gradient(180deg,#0c3550 0%,var(--deep) 100%);box-shadow
 <div id="err"></div>
 <dialog id="media" aria-label="Camera event"><div id="mbody"></div></dialog>
 <dialog id="drvEd" aria-label="Edit driver"><form id="drvForm" autocomplete="off">
- <div class="mhead"><div><h3 id="deTitle" style="margin:0">Edit driver</h3><p class="muted" style="margin:2px 0 0">Saves to Airtable</p></div><button type="button" class="dclose" id="deClose" aria-label="Close">×</button></div>
+ <div class="mhead"><div><h3 id="deTitle" style="margin:0">Edit driver</h3><p class="muted" style="margin:2px 0 0">Saves to Airtable and Azuga</p></div><button type="button" class="dclose" id="deClose" aria-label="Close">×</button></div>
  <div class="fg">
   <label>Full name *<input name="name" maxlength="80" required></label>
   <label>License number<input name="license" maxlength="40"></label>
@@ -938,11 +1100,12 @@ header{background:linear-gradient(180deg,#0c3550 0%,var(--deep) 100%);box-shadow
   <div class="edb"><span id="ndMsg" style="font-size:13px"></span><span style="flex:1"></span><button type="button" class="btn2" id="ndCancel">Cancel</button><button class="btn2 pri" id="ndSave">Save driver</button></div>
  </form>
  <datalist id="policyList"></datalist>
+ <div class="syncp" id="syncD"></div>
  <div id="dupes"></div>
  <div class="panel roster" id="drvRows"><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div></div>
 </div>
 <div id="vEdit" hidden><div class="ed">
- <aside class="panel edl"><div class="edf"><label><input type="checkbox" id="needs"> Only show trucks that need attention</label><div id="syncBar" style="margin-top:10px"></div></div><div id="edList"></div></aside>
+ <aside class="panel edl"><div class="edf"><label><input type="checkbox" id="needs"> Only show trucks that need attention</label><div id="syncBar" style="margin-top:10px"></div><div class="syncp sm" id="syncE"></div></div><div id="edList"></div></aside>
  <section class="panel edc" id="edCard"><div class="empty">Pick a truck on the left to edit it.</div></section>
 </div></div>
 <script>
@@ -1241,6 +1404,26 @@ const AT_ONLY_KEYS={truckNo:1,policy:1,regRenew:1,ezpass:1};
 
 // ---- Drivers tab ----
 let PEOPLE=null;
+// ---- Azuga <-> Airtable sync status (Drivers + Edit vehicles tabs) ----
+let SYNCST=null,syncOpen=false;
+const ago=t=>{const m=Math.round((Date.now()-t)/6e4);return m<1?'just now':m<60?m+' min ago':Math.round(m/60)+' h ago'};
+async function loadSync(){try{SYNCST=await get('/api/sync/status')}catch(e){SYNCST=null}drawSync()}
+function drawSync(){const S=SYNCST;let h='';
+  if(S&&!S.imported)h='<div class="simp"><div style="flex:1 1 380px"><b>Azuga and Airtable are not linked yet</b><p>First copy: the Azuga values replace the Airtable values for driver names, phones, license numbers and states, and truck plates, years, makes, models and drivers. Drivers only in Azuga get added to Airtable. A backup of the old Airtable values downloads first. After that, changes on either side sync every 5 minutes.</p></div><button class="btn2 pri" id="syncImp">Copy everything from Azuga</button></div>';
+  else if(S){const L=S.last||{},n=(L.notes||[]).length;
+    h='<div class="sbar'+(L.error?' bad':'')+'"><span class="sd"></span><span class="sp">'+(S.running?'Syncing with Azuga...':L.error?'Last sync failed: '+esc(L.error):L.at?'Synced with Azuga '+ago(L.at)+(L.toAirtable||L.toAzuga||L.created?' · '+[L.toAirtable&&L.toAirtable+' to Airtable',L.toAzuga&&L.toAzuga+' to Azuga',L.created&&L.created+' new'].filter(Boolean).join(', '):' · everything matches'):'Syncs with Azuga every 5 minutes')+(n?' · '+n+' need'+(n>1?'':'s')+' attention':'')+'</span>'
+     +'<button id="syncLog">'+(syncOpen?'Hide details':'Details')+'</button><button id="syncNow"'+(S.running?' disabled':'')+'>Sync now</button></div>'
+     +(syncOpen?'<ul class="slog">'+(L.notes||[]).map(x=>'<li class="n">'+esc(x)+'</li>').join('')+((S.log||[]).map(x=>'<li><time>'+ago(x.at)+'</time>'+esc(x.what)+'</li>').join('')||'<li class="muted">No changes yet.</li>')+'</ul>':'')}
+  ['syncD','syncE'].forEach(id=>{if($(id))$(id).innerHTML=h});
+  document.querySelectorAll('#syncNow').forEach(b=>b.onclick=()=>runSync('/api/sync/now',{}));
+  document.querySelectorAll('#syncLog').forEach(b=>b.onclick=()=>{syncOpen=!syncOpen;drawSync()});
+  document.querySelectorAll('#syncImp').forEach(b=>b.onclick=()=>{if(confirm('Copy everything from Azuga into Airtable?\\n\\nThe Azuga values will replace what Airtable has for driver names, phones and licenses, and truck plates, years, makes, models and drivers. A backup file of the old values downloads when it finishes.'))runSync('/api/sync/import',{confirm:'COPY'})})}
+async function runSync(url,body){document.querySelectorAll('#syncNow,#syncImp').forEach(b=>{b.disabled=true;b.textContent='Syncing...'});
+  try{const r=await post(url,body);
+    if(r.backup&&r.backup.length){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(r.backup,null,2)],{type:'application/json'}));a.download='airtable-backup-'+new Date().toISOString().slice(0,16).replace(':','')+'.json';document.body.appendChild(a);a.click();a.remove()}
+    syncOpen=!!(r.notes&&r.notes.length);driverList=null;await Promise.all([loadSync(),loadPeople(),loadAT()]);vehicles=list(await get('/api/vehicles'));render()}
+  catch(e){alert(e.message);loadSync()}}
+setInterval(()=>{if(!$('vDrv').hidden||!$('vEdit').hidden)loadSync()},60e3);
 async function loadPeople(){try{PEOPLE=await get('/api/people')}catch(e){PEOPLE={connected:true,error:e.message,drivers:[]}}renderDrivers()}
 const post=async(u,b)=>{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.error)throw new Error(j.error);return j};
 let dfilt='all';
@@ -1373,7 +1556,7 @@ $('deCancel').onclick=$('deClose').onclick=()=>$('drvEd').close();
 $('drvEd').onclick=e=>{if(e.target.id==='drvEd')$('drvEd').close()};
 $('drvForm').onsubmit=async e=>{e.preventDefault();const f=$('drvForm'),m=$('deMsg'),b=Object.fromEntries(new FormData(f));b.id=deId;b.truckIds=[...deSel];if(dePhoto)b.photo=dePhoto;
   $('deSave').disabled=true;m.style.color='';m.textContent='Saving to Airtable...';
-  try{await post('/api/driver/update',b);m.style.color='var(--go)';m.textContent='Saved.';driverList=null;await loadPeople();loadAT();setTimeout(()=>$('drvEd').close(),500)}
+  try{const r=await post('/api/driver/update',b);m.style.color=r.warning?'var(--warn)':'var(--go)';m.textContent=r.warning||(r.synced?'Saved to Airtable and Azuga.':'Saved.');loadSync();driverList=null;await loadPeople();loadAT();if(!r.warning)setTimeout(()=>$('drvEd').close(),900)}
   catch(err){$('deSave').disabled=false;m.style.color='var(--bad)';m.textContent=err.message}};
 $('newDrv').onsubmit=async e=>{
   e.preventDefault();const f=$('newDrv'),m=$('ndMsg'),b=Object.fromEntries(new FormData(f));b.addToAzuga=f.addToAzuga.checked;if(frontPhoto)b.photo=frontPhoto;
@@ -1392,7 +1575,7 @@ fleetVids();
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
   ['vMap','vEdit','vDrv'].forEach(v=>$(v).hidden=b.dataset.v!==v);document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
-  if(b.dataset.v==='vEdit')renderEdit();else if(b.dataset.v==='vDrv'){if(!PEOPLE)loadPeople();else renderDrivers()}else map.invalidateSize();
+  if(b.dataset.v!=='vMap')loadSync();if(b.dataset.v==='vEdit')renderEdit();else if(b.dataset.v==='vDrv'){if(!PEOPLE)loadPeople();else renderDrivers()}else map.invalidateSize();
 });
 $('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();};
 window.addEventListener('beforeunload',e=>{if(dirtyCount())e.preventDefault()});
