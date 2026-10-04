@@ -1031,7 +1031,7 @@ th{text-align:left;font-size:12px;font-weight:600;color:var(--muted);padding:10p
 td{padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
 tbody tr:hover td{background:#fcfbf8}
 /* Driver roster: one calm list */
-.vopt{position:relative;margin-left:auto}
+.vopt{position:relative;margin-left:auto}body[data-v=vEdit] .vopt,body[data-v=vDrv] .vopt{display:none}
 #voBtn{font:inherit;font-size:13px;font-weight:600;display:inline-flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--line2);color:var(--ink);padding:7px 12px;border-radius:999px;cursor:pointer;transition:transform .15s,box-shadow .15s}
 #voBtn:hover{box-shadow:0 4px 14px -6px rgba(10,44,64,.35);transform:translateY(-1px)}
 .vohid{font-size:11px;font-weight:700;background:var(--warnBg);color:var(--warn);border-radius:999px;padding:1px 7px}
@@ -1041,7 +1041,7 @@ tbody tr:hover td{background:#fcfbf8}
 @keyframes pop{from{opacity:0;transform:scale(.92) translateY(-4px)}}
 /* ---- Personality: things arrive, respond and breathe ---- */
 header{position:relative;overflow:hidden}
-.hwave{position:absolute;left:0;bottom:-2px;width:200%;height:30px;fill:rgba(20,163,199,.26);animation:wave 14s linear infinite;pointer-events:none}
+.hwave{position:absolute;left:0;bottom:-2px;width:200%;height:46px;z-index:0;fill:rgba(20,163,199,.26);animation:wave 14s linear infinite;pointer-events:none}
 @keyframes wave{to{transform:translateX(-50%)}}
 .logo{animation:bob 4s ease-in-out infinite}@keyframes bob{50%{transform:translateY(-2px) rotate(-3deg)}}
 .tabs button{transition:background .2s,color .2s,transform .15s}.tabs button:active{transform:scale(.95)}
@@ -1139,6 +1139,17 @@ header{background:linear-gradient(180deg,#0c3550 0%,var(--deep) 100%);box-shadow
 body{background:radial-gradient(1200px 600px at 100% -10%,#d3f3f8 0%,transparent 60%),radial-gradient(900px 500px at -10% 110%,#fdeee0 0%,transparent 55%),var(--deck);background-attachment:fixed}
 header{background:linear-gradient(110deg,#082a3d 0%,#0b4a63 55%,#0e7490 100%)}
 .hwave{fill:rgba(103,232,249,.28)}
+header{padding-bottom:30px}
+header>.brand,header>.live,header>.tabs{position:relative;z-index:3}
+.hwave.front{z-index:2;height:24px;bottom:-4px;fill:rgba(103,232,249,.35);animation-duration:9s;animation-direction:reverse}
+#floaty{position:absolute;left:0;right:0;bottom:4px;height:56px;z-index:1;pointer-events:none}
+.fl{position:absolute;left:0;bottom:0;height:52px;animation:drift linear forwards;filter:drop-shadow(0 3px 2px rgba(3,30,45,.35))}
+.fl::after{content:'';position:absolute;left:8%;right:8%;bottom:2px;height:8px;border-radius:50%;border:2px solid rgba(207,250,254,.7);animation:ripple2 2.8s ease-out infinite;z-index:-1}
+@keyframes ripple2{0%{transform:scale(.7);opacity:.9}100%{transform:scale(1.25);opacity:0}}
+.fl .bob{height:100%;animation:float 2.8s ease-in-out infinite;transform-origin:50% 90%}.fl svg{height:100%;width:auto;display:block;overflow:visible}
+@keyframes drift{from{transform:translateX(-110px)}to{transform:translateX(var(--x))}}
+@keyframes float{0%,100%{transform:translateY(0) rotate(-4deg)}50%{transform:translateY(-5px) rotate(4deg)}}
+@media (prefers-reduced-motion:reduce){#floaty,.hwave.front{display:none}}
 .logo{background:linear-gradient(135deg,#22d3ee,#0891b2 60%,#0e7490)}
 .tabs{background:rgba(255,255,255,.1)}.tabs button:hover:not(.on){background:rgba(255,255,255,.12)}
 .tabs button.on{background:#fff;color:#0b4a63;box-shadow:0 4px 14px -6px rgba(0,0,0,.4)}
@@ -1196,6 +1207,8 @@ header{background:linear-gradient(110deg,#082a3d 0%,#0b4a63 55%,#0e7490 100%)}
 </style></head><body>
 <header>
  <svg class="hwave" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
+ <div id="floaty" aria-hidden="true"></div>
+ <svg class="hwave front" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M3 9c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0"/><path d="M3 15c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0" opacity=".6"/></svg></div><div>Millennial Pools<small>Fleet</small></div></div>
  <div class="live" id="live"><span class="dot"></span><span id="upd">Connecting to Azuga...</span></div>
  <nav class="tabs"><button data-v="vMap" class="on">Live map</button><button data-v="vEdit">Edit vehicles</button><button data-v="vDrv">Drivers</button></nav>
@@ -1644,6 +1657,48 @@ async function runSync(url,body){document.querySelectorAll('#syncNow,#syncImp').
     syncOpen=!!(r.notes&&r.notes.length);driverList=null;await Promise.all([loadSync(),loadPeople(),loadAT()]);vehicles=list(await get('/api/vehicles'));render()}
   catch(e){toast(e.message,'bad');loadSync()}}
 setInterval(()=>{if(!$('vDrv').hidden||!$('vEdit').hidden)loadSync()},60e3);
+// ---- Pool party in the header: one floater at a time drifts across on the wave ----
+const FLOATS={
+ flamingo:'<svg viewBox="0 0 100 70"><defs><linearGradient id="fgR" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff9ccb"/><stop offset="1" stop-color="#e2457f"/></linearGradient><radialGradient id="fgS" cx=".4" cy=".35" r=".7"><stop offset="0" stop-color="#ffe1c7"/><stop offset="1" stop-color="#e9a074"/></radialGradient><linearGradient id="fgN" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ff8fc2"/><stop offset="1" stop-color="#f05a96"/></linearGradient></defs>'
+  +'<ellipse cx="46" cy="54" rx="35" ry="11" fill="url(#fgR)" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><ellipse cx="46" cy="52" rx="20" ry="5" fill="#7a1d45" opacity=".55"/>'
+  +'<path d="M21 36l-10-12" stroke="#e9a074" stroke-width="5.5" stroke-linecap="round"/><circle cx="10" cy="22.5" r="3.6" fill="#ffd2b0" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/>'
+  +'<ellipse cx="44" cy="40" rx="18" ry="14.5" fill="url(#fgS)" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><path d="M37 36q2-2 4 0M45 34q2-2 4 0M41 40q2-2 4 0" stroke="#a8673f" stroke-width="1" fill="none" opacity=".7"/><path d="M42 47q2 2 4 0" stroke="#b5724b" stroke-width="1.4" fill="none"/>'
+  +'<path d="M60 40l9-6" stroke="#e9a074" stroke-width="5.5" stroke-linecap="round"/><path d="M68 25l4 10h-7z" fill="#bae6fd" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><path d="M66 28l6 0" stroke="#f97316" stroke-width="2.4"/><path d="M70 25l4-8" stroke="#a16207" stroke-width="1.2"/><path d="M71 19l7 2-6 3z" fill="#facc15"/>'
+  +'<circle cx="43" cy="21" r="10" fill="url(#fgS)" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><path d="M34 16q9-10 18 0" stroke="#5b3a1e" stroke-width="3" fill="none" stroke-linecap="round"/><circle cx="38" cy="25" r="2.2" fill="#fb7185" opacity=".55"/><circle cx="49" cy="25" r="2.2" fill="#fb7185" opacity=".55"/>'
+  +'<rect x="35.5" y="18" width="7" height="4.6" rx="2" fill="#0f172a"/><rect x="44" y="18" width="7" height="4.6" rx="2" fill="#0f172a"/><path d="M42.5 20h1.5" stroke="#0f172a" stroke-width="1.4"/><path d="M37 19.2h2.5M45.5 19.2h2.5" stroke="#7dd3fc" stroke-width="1"/><circle cx="43.5" cy="24" r="1.6" fill="#f87171"/><path d="M39.5 27q4 3.4 8 0" stroke="#7c2d12" stroke-width="1.5" fill="none" stroke-linecap="round"/>'
+  +'<path d="M76 50C86 38 73 28 80 16" stroke="url(#fgN)" stroke-width="7" fill="none" stroke-linecap="round"/><ellipse cx="81" cy="14" rx="6.5" ry="5.6" fill="#ff9ccb" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><path d="M86 12.5l7 3.2-6.5 3.2z" fill="#fde68a"/><path d="M89.5 14l3.5 1.7-3.5 1.6z" fill="#111827"/><circle cx="82" cy="12.6" r="1.4" fill="#111827"/><circle cx="82.4" cy="12.1" r=".45" fill="#fff"/>'
+  +'<path d="M11 54a35 11 0 0 0 70 0" fill="url(#fgR)" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><path d="M24 62l3-7M46 65v-8M68 62l-3-7" stroke="#fff" stroke-width="3.2" opacity=".85" stroke-linecap="round"/><path d="M18 52q8-6 16-7" stroke="#fff" stroke-width="2" opacity=".55" fill="none" stroke-linecap="round"/></svg>',
+ bread:'<svg viewBox="0 0 80 60"><defs><linearGradient id="brC" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#d9913f"/><stop offset="1" stop-color="#9a5a1f"/></linearGradient><radialGradient id="brI" cx=".45" cy=".4" r=".75"><stop offset="0" stop-color="#fff4d6"/><stop offset="1" stop-color="#f1d49a"/></radialGradient></defs><g transform="rotate(-10 40 36)">'
+  +'<path d="M12 52V30C12 13 26 9 33 16C38 6 57 6 59 17C70 10 78 20 72 31V45a7 7 0 0 1-6-3a7 7 0 0 1-9 2V52Z" fill="url(#brC)" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/>'
+  +'<path d="M16.5 52V31C16.5 19 27 16 33 22C37 13 54 13 55 22C63 17 70 23 67.5 32V40a7 7 0 0 0-11 1.5V52Z" fill="url(#brI)"/>'
+  +'<g fill="#e4c387"><ellipse cx="27" cy="34" rx="1.8" ry="1.2"/><ellipse cx="44" cy="29" rx="1.5" ry="1"/><ellipse cx="51" cy="40" rx="1.9" ry="1.2"/><ellipse cx="35" cy="44" rx="1.3" ry=".9"/><ellipse cx="24" cy="46" rx="1.2" ry=".8"/><ellipse cx="38" cy="33" rx="1" ry=".7"/></g>'
+  +'<path d="M24 22q8-6 15-1" stroke="#fff" stroke-width="2.2" opacity=".6" fill="none" stroke-linecap="round"/><path d="M14 50h44" stroke="#8a5320" stroke-width="2" opacity=".35"/></g></svg>',
+ floater:'<svg viewBox="0 0 84 62"><defs><linearGradient id="flJ" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#3b82f6"/><stop offset=".55" stop-color="#1d4ed8"/><stop offset="1" stop-color="#1e3a8a"/></linearGradient><linearGradient id="flB" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ffffff"/><stop offset=".6" stop-color="#e5e7eb"/><stop offset="1" stop-color="#b8bec8"/></linearGradient></defs>'
+  +'<g transform="rotate(-22 26 30)"><rect x="8" y="14" width="30" height="32" rx="6" fill="url(#flJ)" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><rect x="14" y="7" width="12" height="9" rx="2.5" fill="#1e40af" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><path d="M16 9v5M19 9v5M22 9v5" stroke="#3b82f6" stroke-width="1"/><path d="M32 17h4a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-4" fill="none" stroke="#1e3a8a" stroke-width="3"/>'
+  +'<rect x="14" y="27" width="16" height="10" rx="1.5" fill="#fff" opacity=".92"/><path d="M16 30h12M16 33h8" stroke="#94a3b8" stroke-width="1.2"/><path d="M12 18v24" stroke="#93c5fd" stroke-width="2.4" opacity=".7" stroke-linecap="round"/></g>'
+  +'<rect x="42" y="25" width="32" height="28" rx="3.5" fill="url(#flB)" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><path d="M42 34h32" stroke="#cbd5e1" stroke-width="1.6"/><rect x="42" y="42" width="32" height="5" fill="#f97316"/><text x="58" y="46.2" font-size="4.2" font-weight="800" fill="#fff" text-anchor="middle" font-family="sans-serif">TABS</text>'
+  +'<ellipse cx="58" cy="25" rx="16" ry="5" fill="#f8fafc" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><ellipse cx="58" cy="25" rx="11" ry="3.2" fill="none" stroke="#cbd5e1" stroke-width="1.2"/><circle cx="58" cy="25" r="2.4" fill="#94a3b8"/><path d="M43 27q15 -18 30 0" fill="none" stroke="#64748b" stroke-width="1.2"/>'
+  +'<path d="M33 37l12-4M35 44l11-2" stroke="#111827" stroke-width="2.6" stroke-linecap="round"/><path d="M45 33l3-3M46 42l3 1" stroke="#111827" stroke-width="1.6" stroke-linecap="round"/><path d="M47 30v18" stroke="#fff" stroke-width="2" opacity=".7"/></svg>',
+ goose:'<svg viewBox="0 0 86 60"><defs><linearGradient id="gsB" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9b8a74"/><stop offset="1" stop-color="#6e604f"/></linearGradient><linearGradient id="gsN" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#2b2b2b"/><stop offset="1" stop-color="#0d0d0d"/></linearGradient></defs>'
+  +'<path d="M17 40l-11-6 2 6-4 3 6 1z" fill="#1f1f1f" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><ellipse cx="38" cy="42" rx="24" ry="12" fill="url(#gsB)" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><ellipse cx="41" cy="48" rx="19" ry="6" fill="#f3eee4"/>'
+  +'<path d="M22 39q14-13 31 0q-15 9-31 0z" fill="#5c4f41" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><path d="M28 39q4-3 8 0M34 38q4-3 8 0M40 38q4-3 8 0" stroke="#cbbfae" stroke-width="1" fill="none"/>'
+  +'<path d="M57 39C63 29 60 18 64 9" stroke="url(#gsN)" stroke-width="6.5" fill="none" stroke-linecap="round"/><path d="M58 37q4-2 5-6" stroke="#f3eee4" stroke-width="2" fill="none" opacity=".9"/>'
+  +'<ellipse cx="67" cy="8.5" rx="7.5" ry="5" fill="#111" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><path d="M61.5 10.5q4 4.5 9.5 1.5" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M73.5 6.2l7.5 2.4-7.5 2.6z" fill="#1a1a1a"/><circle cx="68.5" cy="6.6" r="1.4" fill="#fff"/><circle cx="68.8" cy="6.7" r=".7" fill="#111"/></svg>',
+ truck:'<svg viewBox="0 0 96 60"><defs><linearGradient id="tkB" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#dbe4ec"/></linearGradient><linearGradient id="tkW" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#bae6fd"/><stop offset="1" stop-color="#38bdf8"/></linearGradient></defs>'
+  +'<path d="M12 22l34 6" stroke="#facc15" stroke-width="2.6" stroke-linecap="round"/><path d="M8 16l6 9" stroke="#64748b" stroke-width="1.6"/><path d="M4 12q4-4 8 0l-2 6h-4z" fill="none" stroke="#475569" stroke-width="1.2"/>'
+  +'<path d="M6 28h44v-8h13l12 12v12H6z" fill="url(#tkB)" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><path d="M53 22h9l10 10H53z" fill="url(#tkW)" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><path d="M56 24l4 0-3 6" stroke="#fff" stroke-width="1.6" opacity=".8" fill="none"/>'
+  +'<path d="M50 28v16" stroke="#94a3b8" stroke-width="1"/><rect x="6" y="35" width="69" height="4" fill="#0891b2"/><rect x="6" y="28" width="42" height="2.4" fill="#cbd5e1"/><rect x="73" y="33" width="4.5" height="4" rx="1.2" fill="#fde047"/><circle cx="79" cy="35" r="4" fill="#fde047" opacity=".25"/><rect x="74" y="41" width="5" height="3" rx="1" fill="#94a3b8"/>'
+  +'<text x="26" y="34" font-size="5.4" font-weight="900" fill="#0e7490" font-family="sans-serif" text-anchor="middle">MILLENNIAL</text>'
+  +'<circle cx="20" cy="46" r="7.5" fill="#111827" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><circle cx="20" cy="46" r="3.4" fill="#cbd5e1"/><circle cx="62" cy="46" r="7.5" fill="#111827" stroke="#0b2533" stroke-opacity=".55" stroke-width="1.3"/><circle cx="62" cy="46" r="3.4" fill="#cbd5e1"/></svg>'};
+let lastFloat='';
+function launchFloat(){const box=$('floaty');if(!box||box.querySelector('.fl')||matchMedia('(prefers-reduced-motion: reduce)').matches)return;   // one at a time
+  if(document.hidden){setTimeout(launchFloat,5000);return}
+  const keys=Object.keys(FLOATS).filter(k=>k!==lastFloat),k=keys[Math.floor(Math.random()*keys.length)];lastFloat=k;
+  const el=document.createElement('div');el.className='fl';el.innerHTML='<div class="bob" style="animation-delay:-'+(Math.random()*2.8).toFixed(1)+'s">'+FLOATS[k]+'</div>';
+  el.style.setProperty('--x',(box.offsetWidth+20)+'px');el.style.animationDuration=(22+Math.random()*12).toFixed(1)+'s';
+  el.addEventListener('animationend',e=>{if(e.target!==el)return;el.remove();setTimeout(launchFloat,5000+Math.random()*15000)});
+  box.appendChild(el)}
+setTimeout(launchFloat,2500);
 // ---- Self-cleaning page: notices fade, messages clear, data refreshes, idle page reloads ----
 function toast(msg,kind){let t=$('toast');if(!t){t=document.createElement('div');t.id='toast';t.setAttribute('role','status');document.body.appendChild(t)}
   t.className='toast '+(kind||'');t.textContent=msg;t.hidden=false;clearTimeout(t._h);t._h=setTimeout(()=>t.hidden=true,7000)}
