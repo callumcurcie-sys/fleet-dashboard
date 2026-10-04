@@ -568,19 +568,27 @@ async function syncOne(id) {
 // ---------------- Ramp: each driver's card spend over the last 30 days ----------------
 // Needs RAMP_CLIENT_ID / RAMP_CLIENT_SECRET (a Ramp developer app with transactions:read, reimbursements:read, users:read) in Render.
 const { RAMP_CLIENT_ID, RAMP_CLIENT_SECRET } = process.env;
-let rampTok, rampExp = 0;
-async function ramp(url) {
-  if (!rampTok || Date.now() > rampExp) {
+let rampTok, rampExp = 0, rampScopes = '';
+// Asks for all three permissions; if the Ramp app wasn't given one, falls back to fewer so the box still works.
+const RAMP_SCOPES = ['transactions:read reimbursements:read users:read', 'transactions:read reimbursements:read', 'transactions:read'];
+async function rampLogin() {
+  let last = '';
+  for (const scope of RAMP_SCOPES) {
     const r = await fetch('https://api.ramp.com/developer/v1/token', { method: 'POST',
-      headers: { Authorization: 'Basic ' + Buffer.from(RAMP_CLIENT_ID + ':' + RAMP_CLIENT_SECRET).toString('base64'), 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'grant_type=client_credentials&scope=' + encodeURIComponent('transactions:read reimbursements:read users:read') });
-    const j = await r.json().catch(() => ({}));
-    if (!j.access_token) throw new Error('Ramp login failed (' + r.status + '). Check RAMP_CLIENT_ID / RAMP_CLIENT_SECRET.');
-    rampTok = j.access_token; rampExp = Date.now() + ((j.expires_in || 3600) - 300) * 1000;
+      headers: { Authorization: 'Basic ' + Buffer.from(clean(RAMP_CLIENT_ID) + ':' + clean(RAMP_CLIENT_SECRET)).toString('base64'), 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      body: new URLSearchParams({ grant_type: 'client_credentials', scope }).toString() });
+    const t = await r.text(); let j = {}; try { j = JSON.parse(t); } catch {}
+    if (j.access_token) { rampTok = j.access_token; rampExp = Date.now() + ((j.expires_in || 3600) - 300) * 1000; rampScopes = scope; return; }
+    last = r.status + ' ' + (j.error_description || j.error || t).toString().slice(0, 160);
+    if (r.status === 401) break;   // wrong ID/secret: fewer permissions won't help
   }
-  const r = await fetch(url, { headers: { Authorization: 'Bearer ' + rampTok } });
+  throw new Error('Ramp login failed (' + last + '). ' + (/^401/.test(last) ? 'Check RAMP_CLIENT_ID and RAMP_CLIENT_SECRET in Render.' : 'Check the Ramp app has the transactions:read permission.'));
+}
+async function ramp(url) {
+  if (!rampTok || Date.now() > rampExp) await rampLogin();
+  const r = await fetch(url, { headers: { Authorization: 'Bearer ' + rampTok, Accept: 'application/json' } });
   if (r.status === 401) rampTok = null;
-  if (!r.ok) throw new Error('Ramp ' + r.status);
+  if (!r.ok) throw new Error('Ramp ' + r.status + ' on ' + new URL(url).pathname.split('/').pop() + ': ' + (await r.text()).slice(0, 160));
   return r.json();
 }
 const isGas = t => t.sk_category_id === 18 || /fuel|gas/i.test(t.sk_category_name || '');   // Ramp's "Fuel and Gas" category
@@ -603,14 +611,14 @@ const rampSpend = () => cached('ramp', 900, async () => {
     add([h.first_name, h.last_name].filter(Boolean).join(' '), money(t.amount), isGas(t));
   }
   // Out-of-pocket gas is a big share, so reimbursements count too (skipped if the Ramp app can't read them)
-  try {
-    const users = Object.fromEntries((await rampAll('users', {}).catch(() => [])).map(u => [u.id, [u.first_name, u.last_name].filter(Boolean).join(' ')]));
+  if (/reimbursements/.test(rampScopes)) try {
+    const users = Object.fromEntries((/users/.test(rampScopes) ? await rampAll('users', {}).catch(() => []) : []).map(u => [u.id, [u.first_name, u.last_name].filter(Boolean).join(' ')]));
     for (const r of await rampAll('reimbursements', { from_date: since.toISOString() })) {
       if (/REJECT|CANCEL|DRAFT/i.test(r.state || r.status || '') || Date.parse(r.transaction_date || r.created_at) < +since) continue;
       add(users[r.user_id] || r.user_full_name || '', money(r.amount), GAS_WORDS.test((r.merchant || r.merchant_name || '') + ' ' + (r.memo || '')));
     }
   } catch (e) { console.error('Ramp reimbursements:', e.message); }
-  return { since: since.toISOString(), people: Object.values(by) };
+  return { since: since.toISOString(), people: Object.values(by), scopes: rampScopes };
 });
 // Ramp names don't always match Airtable ("Josh" vs "Joshua", "Aidan" vs "Aiden", "Jostin Acosta" vs "Jostin Acosta Palacios"):
 // exact name first, else the one cardholder with the same (or one-letter-off) last name and a matching first name.
@@ -1795,7 +1803,7 @@ else requestAnimationFrame(waveTick);
 async function rampBox(id,name){const el=$('rampBox');if(!el)return;if(!name){el.hidden=true;return}
   const head='<h4><span class="rtag">Ramp</span>'+esc(name)+' · last 30 days</h4>',usd=n=>n.toLocaleString('en-US',{style:'currency',currency:'USD'});
   el.innerHTML=head+'<div class="sk" style="width:60%"></div>';let r;
-  try{r=await get('/api/ramp?name='+encodeURIComponent(name))}catch(e){if(sel==id)el.innerHTML=head+'<div class="rmuted">Ramp is not answering right now.</div>';return}
+  try{r=await get('/api/ramp?name='+encodeURIComponent(name))}catch(e){if(sel==id)el.innerHTML=head+'<div class="rmuted">Ramp is not answering right now: '+esc(e.message)+'</div>';return}
   if(sel!=id)return;
   if(!r.connected){el.innerHTML=head+'<div class="rmuted">Ramp is not connected yet.</div>';return}
   const p=r.person;if(!p){el.innerHTML=head+'<div class="rmuted">No Ramp spend found under this name.</div>';return}
