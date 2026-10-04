@@ -1027,6 +1027,40 @@ th{text-align:left;font-size:12px;font-weight:600;color:var(--muted);padding:10p
 td{padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
 tbody tr:hover td{background:#fcfbf8}
 /* Driver roster: one calm list */
+.vopt{position:relative;margin-left:auto}
+#voBtn{font:inherit;font-size:13px;font-weight:600;display:inline-flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--line2);color:var(--ink);padding:7px 12px;border-radius:999px;cursor:pointer;transition:transform .15s,box-shadow .15s}
+#voBtn:hover{box-shadow:0 4px 14px -6px rgba(10,44,64,.35);transform:translateY(-1px)}
+.vohid{font-size:11px;font-weight:700;background:var(--warnBg);color:var(--warn);border-radius:999px;padding:1px 7px}
+.vopop{position:absolute;right:0;top:calc(100% + 8px);z-index:1200;width:290px;background:var(--card);border-radius:14px;padding:14px 16px;box-shadow:0 18px 40px -12px rgba(10,44,64,.4),0 0 0 1px rgba(10,44,64,.06);display:flex;flex-direction:column;gap:8px;font-size:13px;transform-origin:top right;animation:pop .18s cubic-bezier(.2,.9,.3,1.2)}
+.vopop b{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-top:4px}.vopop label{display:flex;gap:8px;align-items:center;cursor:pointer}
+.vopop select{font:inherit;padding:7px 9px;border:1px solid var(--line2);border-radius:8px;background:#fff}.vopop .link{align-self:flex-start;font-size:12px}
+@keyframes pop{from{opacity:0;transform:scale(.92) translateY(-4px)}}
+/* ---- Personality: things arrive, respond and breathe ---- */
+header{position:relative;overflow:hidden}
+.hwave{position:absolute;left:0;bottom:-2px;width:200%;height:16px;fill:rgba(20,163,199,.18);animation:wave 14s linear infinite;pointer-events:none}
+@keyframes wave{to{transform:translateX(-50%)}}
+.logo{animation:bob 4s ease-in-out infinite}@keyframes bob{50%{transform:translateY(-2px) rotate(-3deg)}}
+.tabs button{transition:background .2s,color .2s,transform .15s}.tabs button:active{transform:scale(.95)}
+.card.rise{animation:rise .45s cubic-bezier(.2,.8,.2,1) both;animation-delay:calc(var(--i) * 35ms)}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}}
+.card{transition:background .15s,transform .15s,box-shadow .15s}.card:hover{transform:translateX(3px)}
+.card .av{transition:transform .25s cubic-bezier(.2,.9,.3,1.4)}.card:hover .av{transform:scale(1.12) rotate(-6deg)}
+.card.sel::before{animation:grow .3s ease-out}@keyframes grow{from{transform:scaleY(0)}}
+.pill.go{position:relative;padding-left:20px}.pill.go::before{content:'';position:absolute;left:8px;top:50%;width:7px;height:7px;margin-top:-3.5px;border-radius:50%;background:var(--goDot);animation:pulse 1.8s ease-out infinite}
+#right.open .pane,#right.open #detail{animation:rise .4s cubic-bezier(.2,.8,.2,1) both}
+#right.open #donut{animation-delay:.03s}#right.open #cams{animation-delay:.09s}#right.open #detail{animation-delay:.14s}
+#donut .arc{animation:arcin .6s cubic-bezier(.2,.8,.2,1) both;animation-delay:var(--d)}@keyframes arcin{from{opacity:0;stroke-width:6}}
+#donut svg{animation:spinin .7s cubic-bezier(.2,.8,.2,1)}@keyframes spinin{from{transform:rotate(-40deg) scale(.85);opacity:0}}
+.evb{animation:rise .35s ease-out both}.evb:nth-child(2){animation-delay:.04s}.evb:nth-child(3){animation-delay:.08s}.evb:nth-child(4){animation-delay:.12s}.evb:nth-child(n+5){animation-delay:.16s}
+.evth img{transition:transform .35s}.evb:hover .evth img{transform:scale(1.08)}
+.kv b{display:inline-block;animation:rise .4s ease-out both;animation-delay:.2s}
+.tm.drop .pin{animation:drop .5s cubic-bezier(.2,.9,.3,1.3) both}@keyframes drop{from{opacity:0;transform:translate(-50%,-160%)}}
+.btn2,.btn,.legend button,.sbar button{transition:transform .12s,box-shadow .15s,background .15s}.btn2:active,.btn:active,.legend button:active,.sbar button:active{transform:scale(.96)}
+.btn2.pri:hover{box-shadow:0 6px 18px -8px rgba(10,44,64,.6);transform:translateY(-1px)}
+.rrow{transition:background .15s}.rrow:hover .mav{transform:scale(1.1) rotate(-6deg)}.mav{transition:transform .25s cubic-bezier(.2,.9,.3,1.4)}
+#vMap,#vEdit,#vDrv{animation:fadein .3s ease-out}@keyframes fadein{from{opacity:0}}
+dialog[open]{animation:pop .22s cubic-bezier(.2,.9,.3,1.2)}
+@media (prefers-reduced-motion:reduce){.hwave,.logo,.card.rise,.pill.go::before,#right.open .pane,#right.open #detail,#donut .arc,#donut svg,.evb,.kv b,.tm.drop .pin,#vMap,#vEdit,#vDrv,dialog[open],.vopop{animation:none!important}.card:hover,.card:hover .av,.rrow:hover .mav{transform:none}}
 .toast{position:fixed;right:20px;bottom:20px;z-index:9999;max-width:380px;background:var(--deep);color:#fff;padding:12px 16px;border-radius:12px;box-shadow:0 10px 30px rgba(10,44,64,.35);font-size:13px;animation:tin .2s ease-out}
 .toast.bad{background:var(--bad)}@keyframes tin{from{opacity:0;transform:translateY(8px)}}@media (prefers-reduced-motion:reduce){.toast{animation:none}}
 .syncp{margin:0 0 12px}.syncp:empty{display:none}.syncp.sm{margin:10px 0 0;font-size:12px}
@@ -1109,11 +1143,22 @@ header{background:linear-gradient(180deg,#0c3550 0%,var(--deep) 100%);box-shadow
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head><body>
 <header>
+ <svg class="hwave" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 4 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M3 9c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0"/><path d="M3 15c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0" opacity=".6"/></svg></div><div>Millennial Pools<small>Fleet</small></div></div>
  <div class="live" id="live"><span class="dot"></span><span id="upd">Connecting to Azuga...</span></div>
  <nav class="tabs"><button data-v="vMap" class="on">Live map</button><button data-v="vEdit">Edit vehicles</button><button data-v="vDrv">Drivers</button></nav>
 </header>
-<div class="bar"><div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search trucks or drivers" aria-label="Search trucks or drivers"></div><nav class="sum" id="sum" aria-label="Filter vehicles"></nav></div>
+<div class="bar"><div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search trucks or drivers" aria-label="Search trucks or drivers"></div><nav class="sum" id="sum" aria-label="Filter vehicles"></nav>
+ <div class="vopt"><button id="voBtn" aria-expanded="false" aria-controls="voPop"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>View<span id="voHid"></span></button>
+  <div id="voPop" class="vopop" hidden>
+   <b>Show on the map</b>
+   <label><input type="checkbox" data-o="hideNoDriver"> Hide trucks with no driver in Airtable</label>
+   <label><input type="checkbox" data-o="hideUnlinked"> Hide trackers not in Airtable</label>
+   <label><input type="checkbox" data-o="hideNoLoc"> Hide trucks with no location</label>
+   <b>Sort the list</b>
+   <select id="voSort"><option value="moving">Moving first</option><option value="number">Truck number</option><option value="driver">Driver name</option><option value="recent">Most recently active</option></select>
+   <button class="link" id="voReset">Show everything</button>
+  </div></div></div>
 <div id="err"></div>
 <dialog id="media" aria-label="Camera event"><div id="mbody"></div></dialog>
 <dialog id="drvEd" aria-label="Edit driver"><form id="drvForm" autocomplete="off">
@@ -1243,21 +1288,45 @@ function all(){
   return locs.length?locs.map(l=>({...byId[vid(l)],...l})):vehicles;
 }
 let filt='all';
+// View options (kept per browser). Trucks with no driver are hidden unless you ask for them.
+const OPT_DEF={hideNoDriver:true,hideUnlinked:false,hideNoLoc:false,sort:'moving'};
+let OPTS={...OPT_DEF};try{Object.assign(OPTS,JSON.parse(localStorage.getItem('fleetView')||'{}'))}catch(e){}
+const saveOpts=()=>{try{localStorage.setItem('fleetView',JSON.stringify(OPTS))}catch(e){}};
+const hasDriver=r=>/[a-z]/i.test(who(r)),hasLoc=r=>+pick(r,'latitude','lat')&&+pick(r,'longitude','lng','lon');
+const hiddenBy=r=>(OPTS.hideNoDriver&&!hasDriver(r))||(OPTS.hideUnlinked&&!(link(vid(r))||{}).linked)||(OPTS.hideNoLoc&&!hasLoc(r));
+const visible=()=>all().filter(r=>!hiddenBy(r));
+const tnum=r=>{const L=link(vid(r)),n=L&&L.linked&&parseInt(L.truck.truckNo);return isNaN(n)||!n?1e9:n};
+const SORTS={moving:(a,b)=>moving(b)-moving(a)||title(a).localeCompare(title(b)),number:(a,b)=>tnum(a)-tnum(b)||title(a).localeCompare(title(b)),
+  driver:(a,b)=>(who(a)||'~').localeCompare(who(b)||'~'),recent:(a,b)=>(+b.lastContactDate||0)-(+a.lastContactDate||0)};
+function drawOpts(){document.querySelectorAll('#voPop [data-o]').forEach(c=>c.checked=!!OPTS[c.dataset.o]);$('voSort').value=OPTS.sort;
+  const n=all().filter(hiddenBy).length;$('voHid').textContent=n?n+' hidden':'';$('voHid').className=n?'vohid':''}
+$('voBtn').onclick=e=>{e.stopPropagation();const p=$('voPop');p.hidden=!p.hidden;$('voBtn').setAttribute('aria-expanded',!p.hidden);drawOpts()};
+document.addEventListener('click',e=>{if(!e.target.closest('.vopt'))$('voPop').hidden=true});
+$('voPop').onchange=e=>{const c=e.target;if(c.dataset.o)OPTS[c.dataset.o]=c.checked;if(c.id==='voSort')OPTS.sort=c.value;saveOpts();render()};
+$('voReset').onclick=()=>{OPTS={...OPT_DEF,hideNoDriver:false};saveOpts();render()};
 const FILTERS={all:['All trucks',()=>true,''],moving:['Moving',moving,'var(--goDot)'],parked:['Parked',r=>!moving(r),'var(--idleDot)'],nodriver:['No driver',r=>!/[a-z]/i.test(who(r)),'var(--warnDot)']};
 function rows(){
   const q=$('q').value.toLowerCase();
-  return all().filter(r=>FILTERS[filt][1](r)&&(!q||(title(r)+' '+vname(r)+' '+who(r)).toLowerCase().includes(q)))
-    .sort((a,b)=>moving(b)-moving(a)||title(a).localeCompare(title(b)));
+  // Picking "No driver" (or searching) always shows those trucks, even when the view hides them
+  return (filt==='nodriver'||q?all():visible()).filter(r=>FILTERS[filt][1](r)&&(!q||(title(r)+' '+vname(r)+' '+who(r)).toLowerCase().includes(q)))
+    .sort(SORTS[OPTS.sort]||SORTS.moving);
 }
+let listSig='',countWas={};
+// Numbers roll up to their new value instead of snapping
+function countUp(el,from,to){if(from===to||matchMedia('(prefers-reduced-motion: reduce)').matches){el.textContent=to;return}
+  const t0=performance.now(),d=600;const step=t=>{const k=Math.min(1,(t-t0)/d),e=1-Math.pow(1-k,3);el.textContent=Math.round(from+(to-from)*e);if(k<1)requestAnimationFrame(step)};requestAnimationFrame(step)}
 function render(){
-  const a=all(),rs=rows();
-  $('sum').innerHTML=Object.entries(FILTERS).map(([k,[label,fn,c]])=>'<button data-f="'+k+'" aria-pressed="'+(filt===k)+'">'+(c?'<span class="dot" style="background:'+c+'"></span>':'')+label+' <b>'+a.filter(fn).length+'</b></button>').join('');
+  const a=visible(),rs=rows();
+  $('sum').innerHTML=Object.entries(FILTERS).map(([k,[label,fn,c]])=>'<button data-f="'+k+'" aria-pressed="'+(filt===k)+'">'+(c?'<span class="dot" style="background:'+c+'"></span>':'')+label+' <b data-n="'+(k==='nodriver'?all():a).filter(fn).length+'">'+(countWas[k]??0)+'</b></button>').join('');
+  $('sum').querySelectorAll('b[data-n]').forEach((b,i)=>{const k=Object.keys(FILTERS)[i];countUp(b,countWas[k]??0,+b.dataset.n);countWas[k]=+b.dataset.n});
+  drawOpts();
   $('sum').querySelectorAll('button').forEach(b=>b.onclick=()=>{filt=b.dataset.f;render()});
   const emptyMsg=!a.length?'<b>No trucks yet</b>Once Azuga reports your trucks, they show up here.'
     :filt==='moving'&&!$('q').value?'<b>Every truck is parked</b>Nothing on the road right now.'
     :filt==='nodriver'&&!$('q').value?'<b>Every truck has a driver</b>Nice and tidy.'
     :'<b>No matches</b>Try a different search, or pick All trucks above.';
-  $('list').innerHTML=rs.length?rs.map(r=>{const d=who(r),named=/[a-z]/i.test(d);return '<div class="card'+(sel==vid(r)?' sel':'')+'" data-id="'+esc(vid(r))+'" tabindex="0" role="button">'+avatar(d)+'<div class="ci"><div class="top"><b>'+tno(vid(r))+esc(title(r))+'</b>'+status(r)+'</div>'+azSub(r)+'<div class="d">'+(named?esc(d):'<span class="muted">No driver assigned</span>')+'</div><div class="a">'+esc(pick(r,'address','landmark')||'Location unavailable')+'</div></div></div>'}).join(''):'<div class="empty">'+emptyMsg+'</div>';
+  const sig=rs.map(vid).join(),fresh=sig!==listSig;listSig=sig;
+  $('list').innerHTML=rs.length?rs.map((r,i)=>{const d=who(r),named=/[a-z]/i.test(d);return '<div class="card'+(sel==vid(r)?' sel':'')+(fresh?' rise':'')+'" style="--i:'+Math.min(i,14)+'" data-id="'+esc(vid(r))+'" tabindex="0" role="button">'+avatar(d)+'<div class="ci"><div class="top"><b>'+tno(vid(r))+esc(title(r))+'</b>'+status(r)+'</div>'+azSub(r)+'<div class="d">'+(named?esc(d):'<span class="muted">No driver assigned</span>')+'</div><div class="a">'+esc(pick(r,'address','landmark')||'Location unavailable')+'</div></div></div>'}).join(''):'<div class="empty">'+emptyMsg+'</div>';
   document.querySelectorAll('.card').forEach(c=>c.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();select(c.dataset.id)}});
   document.querySelectorAll('.card').forEach(c=>c.onclick=()=>select(c.dataset.id));
   const pts=[],shown=new Set(rs.map(vid));
@@ -1266,7 +1335,7 @@ function render(){
     const id=vid(r),isSel=sel==id,mv=moving(r),L2=link(id),num=L2&&L2.linked&&L2.truck.truckNo?L2.truck.truckNo.split(/[ ~(]/)[0]:'';
     const label=num||(/[a-z]/i.test(who(r))?initials(who(r)):'')||ICON.truck;
     const html='<span class="pin'+(mv?' mv':'')+(isSel?' sel':'')+'">'+(num||!/</.test(label)?esc(label):label)+'</span>';
-    const m=markers[id]||(markers[id]=L.marker([lat,lng],{icon:L.divIcon({className:'tm',html,iconSize:[0,0]}),keyboard:false}).on('click',()=>select(id)));m._mv=mv;if(!cluster.hasLayer(m))cluster.addLayer(m);
+    const isNew=!markers[id],m=markers[id]||(markers[id]=L.marker([lat,lng],{icon:L.divIcon({className:'tm drop',html,iconSize:[0,0]}),keyboard:false}).on('click',()=>select(id)));m._mv=mv;if(!cluster.hasLayer(m))cluster.addLayer(m);
     if(m._html!==html){m.setIcon(L.divIcon({className:'tm',html,iconSize:[0,0]}));m._html=html}
     m.setLatLng([lat,lng]).setZIndexOffset(isSel?1000:mv?500:0).bindTooltip(esc(title(r))+(/[a-z]/i.test(who(r))?' · '+esc(who(r)):'')+(mv?' · '+Math.round(speed(r))+' mph':''),{direction:'top',offset:[0,-14]});
   });
@@ -1316,10 +1385,11 @@ function camGroups(v){const c={};v.forEach(x=>{const t=evName(pick(x,'eventType'
   const g=Object.entries(c).sort((a,b)=>b[1]-a[1]),top=g.slice(0,6).map(([t,n],k)=>({t,n,col:CAMCOL[k]})),rest=g.slice(6);
   if(rest.length)top.push({t:'Other',n:rest.reduce((a,b)=>a+b[1],0),col:CAMOTHER,others:rest.map(r=>r[0])});return top}
 function drawCams(){const v=TRUCKV,ev=v.filter(x=>!x.requested),g=camGroups(ev),tot=ev.length,R=70,C=2*Math.PI*R;let off=0;
-  const arcs=g.map(x=>{const len=x.n/tot*C,a='<circle class="arc'+(camType&&camType!==x.t?' dim':'')+'" data-t="'+esc(x.t)+'" r="'+R+'" cx="90" cy="90" fill="none" stroke="'+x.col+'" stroke-width="26" stroke-dasharray="'+Math.max(len-(g.length>1?2:0),.5)+' '+C+'" stroke-dashoffset="'+(-off)+'"><title>'+esc(x.t)+': '+x.n+' ('+Math.round(x.n/tot*100)+'%)</title></circle>';off+=len;return a}).join('');
-  const tr=all().find(x=>vid(x)==sel)||{},hasCam=!!(tr.safetyCam||tr.safetyCamSerialNumber);$('donut').innerHTML='<div class="ph"><h3>Events by type</h3><span>'+(camType?'Showing '+esc(camType.toLowerCase())+' · <button class="link" data-t="'+esc(camType)+'">show all</button>':'last 7 days · tap to filter')+'</span></div>'+(tot?'<div class="dbody"><svg viewBox="0 0 180 180" role="img" aria-label="Camera events by type"><g transform="rotate(-90 90 90)">'+arcs+'</g><text x="90" y="88" class="dn">'+tot+'</text><text x="90" y="108" class="dl">events, 7 days</text></svg>'
+  const arcs=g.map((x,ai)=>{const len=x.n/tot*C,a='<circle style="--d:'+ai*70+'ms" class="arc'+(camType&&camType!==x.t?' dim':'')+'" data-t="'+esc(x.t)+'" r="'+R+'" cx="90" cy="90" fill="none" stroke="'+x.col+'" stroke-width="26" stroke-dasharray="'+Math.max(len-(g.length>1?2:0),.5)+' '+C+'" stroke-dashoffset="'+(-off)+'"><title>'+esc(x.t)+': '+x.n+' ('+Math.round(x.n/tot*100)+'%)</title></circle>';off+=len;return a}).join('');
+  const tr=all().find(x=>vid(x)==sel)||{},hasCam=!!(tr.safetyCam||tr.safetyCamSerialNumber);$('donut').innerHTML='<div class="ph"><h3>Events by type</h3><span>'+(camType?'Showing '+esc(camType.toLowerCase())+' · <button class="link" data-t="'+esc(camType)+'">show all</button>':'last 7 days · tap to filter')+'</span></div>'+(tot?'<div class="dbody"><svg viewBox="0 0 180 180" role="img" aria-label="Camera events by type"><g transform="rotate(-90 90 90)">'+arcs+'</g><text x="90" y="88" class="dn" id="dnN">'+tot+'</text><text x="90" y="108" class="dl">events, 7 days</text></svg>'
     +'<ul class="leg">'+g.map(x=>'<li><button data-t="'+esc(x.t)+'" class="'+(camType===x.t?'on':camType?'dim':'')+'"><i style="background:'+x.col+'"></i><span>'+esc(x.t)+'</span><b>'+x.n+'</b><em>'+Math.round(x.n/tot*100)+'%</em></button></li>').join('')+'</ul></div>'
     :'<div class="empty">'+(hasCam?'<b>No camera events this week</b>Camera '+esc(tr.safetyCam||tr.safetyCamSerialNumber)+' is installed. Safe driving.':'<b>No camera on this truck</b>Azuga has no SafetyCam linked to it.')+'</div>');
+  if($('dnN')&&!camType)countUp($('dnN'),0,tot);
   const oth=(g.find(x=>x.t==='Other')||{}).others||[];
   VIDS=v.filter(x=>{const t=evName(pick(x,'eventType','eventName'));return !camType||t===camType||(camType==='Other'&&oth.includes(t))});
   $('camN').textContent=VIDS.length+' event'+(VIDS.length==1?'':'s')+(camType?' · '+camType.toLowerCase():' · last 7 days');$('vids').innerHTML=VIDS.length?VIDS.map((x,i)=>evRow(x,i)).join(''):'<span class="muted">'+(hasCam?'Nothing recorded in the last 7 days.':'No camera installed.')+'</span>'}
