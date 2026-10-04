@@ -635,7 +635,7 @@ function rampMatch(people, name) {
 async function rampFor(name) {
   if (!RAMP_CLIENT_ID || !RAMP_CLIENT_SECRET) return { connected: false };
   const d = await rampSpend(), p = name ? rampMatch(d.people, name) : null;
-  return { connected: true, since: d.since, person: p };
+  return { connected: true, since: d.since, person: p, cardOnly: !/reimbursements/.test(d.scopes || '') };
 }
 
 // ================= Two-way sync: Azuga <-> Airtable =================
@@ -1808,7 +1808,7 @@ async function rampBox(id,name){const el=$('rampBox');if(!el)return;if(!name){el
   if(!r.connected){el.innerHTML=head+'<div class="rmuted">Ramp is not connected yet.</div>';return}
   const p=r.person;if(!p){el.innerHTML=head+'<div class="rmuted">No Ramp spend found under this name.</div>';return}
   el.innerHTML=head+'<div class="rgrid"><div class="rgas"><span>Gas</span><b>'+usd(p.gas)+'</b><i>'+p.gasN+(p.gasN===1?' fill-up':' fill-ups')+'</i></div><div><span>Everything else</span><b>'+usd(p.other)+'</b><i>'+p.otherN+(p.otherN===1?' purchase':' purchases')+'</i></div></div>'
-   +(p.name.toLowerCase()!==name.toLowerCase()?'<div class="rmuted">Shown as '+esc(p.name)+' in Ramp</div>':'')}
+   +(p.name.toLowerCase()!==name.toLowerCase()?'<div class="rmuted">Shown as '+esc(p.name)+' in Ramp</div>':'')+(r.cardOnly?'<div class="rmuted">Card spend only. Give the Ramp app the reimbursements:read permission to include reimbursed gas.</div>':'')}
 function toast(msg,kind){let t=$('toast');if(!t){t=document.createElement('div');t.id='toast';t.setAttribute('role','status');document.body.appendChild(t)}
   t.className='toast '+(kind||'');t.textContent=msg;t.hidden=false;clearTimeout(t._h);t._h=setTimeout(()=>t.hidden=true,7000)}
 const MSG_IDS=['edMsg','ndMsg','deMsg','scanMsg'],msgAt={};
