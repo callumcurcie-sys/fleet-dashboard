@@ -87,6 +87,7 @@ const routes = {
       if (!az && !r.milesError) r.milesError = 'Azuga has no miles for this driver in the last 30 days.';
       if (az && az.miles > 50) r.gasPerMile = { miles: az.miles, perMile: r.person.gas / az.miles, max: GAS_PER_MILE_MAX, points: GAS_POINTS }; }
     return r; },
+  '/api/score/status': () => ({ jobs: WARM, events: !!(cache.get('fleetLost') || {}).data, miles: !!(cache.get('scores') || {}).data }),
   '/api/score': q => scoreFor(q.get('vehicleId') || '', q.get('name') || ''),
   '/api/videos': q => {
     const id = q.get('vehicleId') || '';
@@ -609,6 +610,7 @@ const SCORE_PARTS = [   // [label, sub-score field, count field, what the count 
   ['Seatbelt', 'seatBeltScore', null, '']];
 // Azuga's own score for this driver (or null), shown alongside ours for reference
 async function azugaScore(vehicleId, name) {
+  if (!(cache.get('scores') || {}).data) throw new Error('Miles not collected from Azuga yet' + (WARM.miles && WARM.miles.error ? ' (last try: ' + WARM.miles.error + ')' : ''));
   const rows = await scoreRows(), ids = new Set();
   if (name) (await driverGroups()).filter(g => dupeName(g.name) === dupeName(name)).forEach(g => g.ids.forEach(i => ids.add(String(i))));
   const nm = r => dupeName([r.firstName, r.lastName].filter(Boolean).join(' '));
@@ -654,6 +656,7 @@ const events30 = () => cached('events30', 1800, async () => {
   const seen = new Set();   // ranges share an edge; drop repeats
   return ev.filter(x => { const k = [x.vehicleId, x.eventTime || x.startTime, x.eventType].join('|'); if (seen.has(k)) return false; seen.add(k); return true; });
 });
+const WARM = {};   // background job results, shown at /api/score/status
 const CAP_EVENTS = 3;   // each kind of event counts at most 3 times (phone use: max -18), so one bad habit can't zero the score
 // Points lost by every driver in the fleet (camera events, last 30 days), for capping and ranking
 const fleetLost = () => cached('fleetLost', 1800, async () => {
@@ -677,6 +680,7 @@ const fleetLost = () => cached('fleetLost', 1800, async () => {
   return ppl;
 });
 async function scoreFor(vehicleId, name) {
+  if (!(cache.get('fleetLost') || {}).data) throw new Error('Still collecting 30 days of camera events from Azuga' + (WARM.events && WARM.events.error ? '. Last try: ' + WARM.events.error : '. Check back in a few minutes.'));
   const ppl = await fleetLost();
   if (!name) { const v = list(await routes['/api/vehicles']()).find(x => x.trackeeId === vehicleId) || {}; name = v.userName || ''; }
   const me = ppl[dupeName(name)] || { items: [], lost: 0 };
@@ -941,8 +945,12 @@ async function reconcile(mode) {
 // Every 5 minutes while the server is awake
 const autoSync = () => reconcile().catch(e => { if (!/already running/.test(e.message)) { SYNC.last = { at: Date.now(), error: e.message }; console.error('Sync failed:', e.message); } });
 // Driver scores: build them in the background (after the first sync settles) so clicking a truck never waits on Azuga
-if (process.argv[2] !== 'test') { const warm = () => fleetLost().then(() => sleep(5000)).then(scoreRows).catch(e => console.error('Score warm-up:', e.message));
-  setTimeout(warm, 90e3); setInterval(warm, 31 * 60e3); }   // just past the 30-min cache, so each run refreshes it
+// Each job runs on its own: after a success again in 31 min (just past the 30-min cache), after a failure in 3 min.
+if (process.argv[2] !== 'test') {
+  const job = (name, fn) => { const run = () => fn().then(() => { WARM[name] = { ok: new Date().toISOString() }; setTimeout(run, 31 * 60e3); },
+    e => { WARM[name] = { error: e.message, at: new Date().toISOString() }; console.error('Score warm-up', name + ':', e.message); setTimeout(run, 3 * 60e3); }); return run; };
+  setTimeout(job('miles', scoreRows), 90e3); setTimeout(job('events', fleetLost), 150e3);
+}
 if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) { setTimeout(autoSync, 30e3); setInterval(autoSync, 5 * 60e3); }   // first pass soon after a restart/wake-up
 
 async function readJson(req, max = 10000) {
