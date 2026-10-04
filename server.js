@@ -30,7 +30,7 @@ async function azuga(path, body = {}, method = 'POST', attempt = 1) {
     body: JSON.stringify(body),
   });
   const text = await r.text();
-  if (r.status === 401) token = null; // force re-login next time
+  if (r.status === 401) { token = null; if (attempt < 2) return azuga(path, body, method, 3); }  // expired login: log in again and retry once
   if (r.status === 429) {
     // Per-minute limit: wait it out and retry (15s, then 30s) before giving up.
     if (attempt < 3) { await sleep(15000 * attempt); return azuga(path, body, method, attempt + 1); }
@@ -41,7 +41,7 @@ async function azuga(path, body = {}, method = 'POST', attempt = 1) {
     let msg; try { const j = JSON.parse(text); msg = [].concat(j.error || j.message || []).map(e => e && (e.message || e)).filter(Boolean).join('; '); } catch {}
     throw new Error(msg || `${path} -> ${r.status}: ${text.slice(0, 300)}`);
   }
-  return JSON.parse(text);
+  return text ? JSON.parse(text) : {};
 }
 
 // Azuga wants 'YYYY-MM-DD hh:mm:ss AM'
@@ -77,6 +77,7 @@ const routes = {
   '/api/maintenance': () => cached('maintenance', 600, () => azuga('/maintanance/reports/scheduledreport.json?' + new URLSearchParams({
     startTime: fmt(daysAgo(365)), endTime: fmt(daysAgo(-365)), isCount: 'false',
   }))),
+  '/api/ramp': q => rampFor(q.get('name') || ''),
   '/api/videos': q => {
     const id = q.get('vehicleId') || '';
     const body = { startTime: fmt(daysAgo(7)), endTime: fmt(new Date()), page: 1, limit: 100, ...(id ? { vehiclesIds: id } : {}) };
@@ -564,6 +565,71 @@ async function syncOne(id) {
   return { ok: true, changed, notes: d.notes };
 }
 
+// ---------------- Ramp: each driver's card spend over the last 30 days ----------------
+// Needs RAMP_CLIENT_ID / RAMP_CLIENT_SECRET (a Ramp developer app with transactions:read, reimbursements:read, users:read) in Render.
+const { RAMP_CLIENT_ID, RAMP_CLIENT_SECRET } = process.env;
+let rampTok, rampExp = 0;
+async function ramp(url) {
+  if (!rampTok || Date.now() > rampExp) {
+    const r = await fetch('https://api.ramp.com/developer/v1/token', { method: 'POST',
+      headers: { Authorization: 'Basic ' + Buffer.from(RAMP_CLIENT_ID + ':' + RAMP_CLIENT_SECRET).toString('base64'), 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'grant_type=client_credentials&scope=' + encodeURIComponent('transactions:read reimbursements:read users:read') });
+    const j = await r.json().catch(() => ({}));
+    if (!j.access_token) throw new Error('Ramp login failed (' + r.status + '). Check RAMP_CLIENT_ID / RAMP_CLIENT_SECRET.');
+    rampTok = j.access_token; rampExp = Date.now() + ((j.expires_in || 3600) - 300) * 1000;
+  }
+  const r = await fetch(url, { headers: { Authorization: 'Bearer ' + rampTok } });
+  if (r.status === 401) rampTok = null;
+  if (!r.ok) throw new Error('Ramp ' + r.status);
+  return r.json();
+}
+const isGas = t => t.sk_category_id === 18 || /fuel|gas/i.test(t.sk_category_name || '');   // Ramp's "Fuel and Gas" category
+// Reimbursements carry no category, so gas is spotted by the merchant or memo ("Wawa", memo "Gas")
+const GAS_WORDS = /\bgas\b|fuel|wawa|sunoco|shell|exxon|mobil|\bbp\b|speedway|valero|citgo|lukoil|gulf|getty|royal farms|sheetz|quick ?chek|costco gas/i;
+async function rampAll(path, q) {   // every page of a Ramp list
+  let url = 'https://api.ramp.com/developer/v1/' + path + '?' + new URLSearchParams({ page_size: '100', ...q }), out = [], pages = 0;
+  while (url && pages++ < 50) { const j = await ramp(url); out = out.concat(j.data || []); url = j.page && j.page.next; }
+  return out;
+}
+const rampSpend = () => cached('ramp', 900, async () => {
+  const since = new Date(Date.now() - 30 * 864e5), by = {};
+  const add = (name, amt, gas) => { name = clean(name); if (!name || !amt) return;
+    const p = by[normName(name)] = by[normName(name)] || { name, gas: 0, other: 0, gasN: 0, otherN: 0 };
+    if (gas) { p.gas += amt; p.gasN++; } else { p.other += amt; p.otherN++; } };
+  const money = a => typeof a === 'number' ? a : Number(a && a.amount) / 100 || 0;
+  for (const t of await rampAll('transactions', { from_date: since.toISOString() })) {
+    if (/DECLINED|ERROR/i.test(t.state || '')) continue;
+    const h = t.card_holder || {};
+    add([h.first_name, h.last_name].filter(Boolean).join(' '), money(t.amount), isGas(t));
+  }
+  // Out-of-pocket gas is a big share, so reimbursements count too (skipped if the Ramp app can't read them)
+  try {
+    const users = Object.fromEntries((await rampAll('users', {}).catch(() => [])).map(u => [u.id, [u.first_name, u.last_name].filter(Boolean).join(' ')]));
+    for (const r of await rampAll('reimbursements', { from_date: since.toISOString() })) {
+      if (/REJECT|CANCEL|DRAFT/i.test(r.state || r.status || '') || Date.parse(r.transaction_date || r.created_at) < +since) continue;
+      add(users[r.user_id] || r.user_full_name || '', money(r.amount), GAS_WORDS.test((r.merchant || r.merchant_name || '') + ' ' + (r.memo || '')));
+    }
+  } catch (e) { console.error('Ramp reimbursements:', e.message); }
+  return { since: since.toISOString(), people: Object.values(by) };
+});
+// Ramp names don't always match Airtable ("Josh" vs "Joshua", "Aidan" vs "Aiden", "Jostin Acosta" vs "Jostin Acosta Palacios"):
+// exact name first, else the one cardholder with the same (or one-letter-off) last name and a matching first name.
+const NICK = [['jack', 'john'], ['jim', 'james'], ['bill', 'william'], ['bob', 'robert'], ['mike', 'michael'], ['tony', 'anthony'], ['nate', 'nathaniel'], ['chris', 'christian']];
+const sameFirst = (a, b) => a.slice(0, 3) === b.slice(0, 3) || NICK.some(([x, y]) => (a === x && b === y) || (a === y && b === x));
+function rampMatch(people, name) {
+  const want = normName(name).replace(/[.,]/g, '').replace(/\s+(jr|sr|ii|iii|iv)$/, ''), w = want.split(' ');
+  const exact = people.find(p => normName(p.name) === want);
+  if (exact || w.length < 2) return exact || null;
+  const hits = people.filter(p => { const t = normName(p.name).split(' '), last = t[t.length - 1];
+    return t.length > 1 && sameFirst(w[0], t[0]) && w.slice(1).some(x => x === last || (x.length >= 4 && near(x, last))); });
+  return hits.length === 1 ? hits[0] : null;
+}
+async function rampFor(name) {
+  if (!RAMP_CLIENT_ID || !RAMP_CLIENT_SECRET) return { connected: false };
+  const d = await rampSpend(), p = name ? rampMatch(d.people, name) : null;
+  return { connected: true, since: d.since, person: p };
+}
+
 // ================= Two-way sync: Azuga <-> Airtable =================
 // Azuga doesn't record when something was edited, so each Airtable record keeps a "Sync snapshot"
 // of the values both sides last agreed on. Whichever side no longer matches its snapshot is the one
@@ -699,7 +765,7 @@ async function reconcile(mode) {
         } else if (norm(a) === norm(tv)) snap[k] = tv;
       }
       // Assigned driver, compared as the person's main Azuga login
-      const aD = primary[v.userId] || '', tD = t.driver ? (t.driver.azId ? (primary[t.driver.azId] || t.driver.azId) : '') : '';
+      const aD = primary[v.userId] || '', tD = t.driver && t.driver.azId ? primary[t.driver.azId] || '' : '';
       const dHow = imp ? (aD && aD !== tD ? 'toAt' : 'same') : decide(aD, tD, t.snap ? t.snap.driver : undefined, x => x);
       if (dHow === 'toAt') {
         const d = drvByAz[aD];
@@ -740,9 +806,9 @@ const autoSync = () => reconcile().catch(e => { if (!/already running/.test(e.me
 if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) { setTimeout(autoSync, 30e3); setInterval(autoSync, 5 * 60e3); }   // first pass soon after a restart/wake-up
 
 async function readJson(req, max = 10000) {
-  let s = '';
-  for await (const c of req) { s += c; if (s.length > max) throw new Error('Request too large.'); }
-  return JSON.parse(s || '{}');
+  const parts = []; let n = 0;
+  for await (const c of req) { n += c.length; if (n > max) throw new Error('Request too large.'); parts.push(c); }
+  return JSON.parse(Buffer.concat(parts).toString('utf8') || '{}');
 }
 
 if (process.argv[2] === 'test') {
@@ -1144,6 +1210,11 @@ header>.brand,header>.live,header>.tabs{position:relative;z-index:3}
 .hwave.front{z-index:2;fill:rgba(103,232,249,.38)}
 #floaty{position:absolute;left:0;right:0;bottom:-1px;height:58px;z-index:1;pointer-events:none}
 .fl{position:absolute;left:0;top:0;height:52px;will-change:transform;transform-origin:50% 85%;filter:drop-shadow(0 3px 2px rgba(3,30,45,.35))}
+.ramp{margin:12px 0;padding:12px 14px;border-radius:14px;background:#121212;color:#f4f4ef;box-shadow:0 6px 18px rgba(0,0,0,.18)}.ramp:empty{display:none}
+.ramp h4{margin:0 0 10px;font-size:13px;font-weight:600;color:#d6d6cf;display:flex;align-items:center;gap:8px}.ramp .rtag{background:#e4f222;color:#111;font-weight:800;border-radius:6px;padding:2px 8px;font-size:12px}
+.rgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.rgrid>div{background:#1d1d1d;border-radius:10px;padding:10px 12px}.rgrid span{display:block;font-size:12px;color:#a3a39b}
+.rgrid b{display:block;font-size:22px;line-height:1.25;color:#fff;font-variant-numeric:tabular-nums}.rgrid .rgas{background:#e4f222;color:#111}.rgrid .rgas span,.rgrid .rgas i{color:#3a3d00}.rgrid .rgas b{color:#111}
+.rgrid i{font-style:normal;font-size:12px;color:#a3a39b}.ramp .rmuted{font-size:12.5px;color:#a3a39b;margin-top:6px}.ramp .sk{background:#2a2a2a}
 .fl.flip .bob{transform:scaleX(-1)}.fl.flip .nf{transform:scaleX(-1);transform-box:fill-box;transform-origin:center}
 .fl::after{content:'';position:absolute;left:6%;right:6%;bottom:16%;height:8px;border-radius:50%;border:2px solid rgba(207,250,254,.7);animation:ripple2 2.8s ease-out infinite;z-index:-1}
 @keyframes ripple2{0%{transform:scale(.7);opacity:.9}100%{transform:scale(1.25);opacity:0}}
@@ -1302,7 +1373,7 @@ const vid=v=>pick(v,'trackeeId','vehicleId','id');
 const vname=v=>pick(v,'trackeeName','vehicleName','name')||'Vehicle';
 // Clean name from Airtable when linked ("2009 Chevrolet Colorado"); Azuga's own name otherwise
 const atTitle=id=>{const L=link(id);if(!L||!L.linked)return '';const t=L.truck;return [t.year,t.make,t.model].map(x=>String(x||'').trim()).filter(Boolean).join(' ')};
-const title=r=>atTitle(vid(r))||(/^\d+$/.test(vname(r))?'Unnamed tracker '+vname(r):vname(r));
+const title=r=>atTitle(vid(r))||(/^\\d+$/.test(vname(r))?'Unnamed tracker '+vname(r):vname(r));
 const azSub=r=>{const t=atTitle(vid(r));return t&&t.toLowerCase()!==vname(r).toLowerCase()?'<small class="azn">Azuga: '+esc(vname(r))+'</small>':''};
 // Unnamed drivers come through as a phone number like "9052487042 ."
 // Driver shown on the map: Azuga's, or Airtable's when Azuga has none
@@ -1322,7 +1393,7 @@ const moving=r=>speed(r)>0&&r.storedLocation!==true&&!/stop|end|park|idle|off/i.
 const status=r=>moving(r)?'<span class="pill go">'+Math.round(speed(r))+' mph</span>':'<span class="pill idle">Parked</span>';
 // Make tag: a coloured name chip per brand (plain text, not the manufacturers' logos)
 const MAKES={ford:['Ford','mk-ford'],chevrolet:['Chevy','mk-chevy'],chevy:['Chevy','mk-chevy'],gmc:['GMC','mk-gmc'],nissan:['Nissan','mk-nissan'],toyota:['Toyota','mk-toyota'],ram:['Ram','mk-ram'],dodge:['Dodge','mk-ram'],honda:['Honda','mk-honda'],jeep:['Jeep','mk-jeep']};
-const makeTag=id=>{const L=link(id),v=all().find(x=>vid(x)==id)||vehicles.find(x=>vid(x)==id)||{};const m=clean0((L&&L.linked&&L.truck.make)||v.make).toLowerCase();if(!m)return '';const k=MAKES[m.split(/\s/)[0]];return '<span class="mk '+(k?k[1]:'mk-other')+'">'+esc(k?k[0]:m.replace(/^./,c=>c.toUpperCase()))+'</span>'};
+const makeTag=id=>{const L=link(id),v=all().find(x=>vid(x)==id)||vehicles.find(x=>vid(x)==id)||{};const m=clean0((L&&L.linked&&L.truck.make)||v.make).toLowerCase();if(!m)return '';const k=MAKES[m.split(' ')[0]];return '<span class="mk '+(k?k[1]:'mk-other')+'">'+esc(k?k[0]:m.replace(/^./,c=>c.toUpperCase()))+'</span>'};
 const clean0=v=>String(v??'').trim();
 // In the list the make tag already names the brand, so drop it from the title ("2022 Chevrolet Colorado" -> "2022 Colorado")
 const shortTitle=r=>{const t=title(r),L=link(vid(r)),m=clean0((L&&L.linked&&L.truck.make)||r.make).toLowerCase();if(!m||!makeTag(vid(r)))return t;const s2=t.split(' ').filter(w=>w.toLowerCase()!==m).join(' ');return s2||t};
@@ -1438,13 +1509,15 @@ async function select(id){
   $('detail').innerHTML='<div class="dh">'+avatar(d,1)+'<div><h2>'+tno(id)+esc(title(r))+'</h2>'+azSub(r)+'<p>'+(named?esc(d):'No driver assigned')+(mmy&&!title(r).includes(mmy)?' · '+esc(mmy):'')+'</p></div><div style="margin-left:auto;display:flex;align-items:center">'+status(r)+'<button class="dclose" id="dclose" aria-label="Close details">×</button></div></div>'
    +'<div class="grid"><div class="kv"><span>Odometer</span><b>'+esc(odo(r))+'</b></div><div class="kv"><span>Speed</span><b>'+(moving(r)?Math.round(speed(r)):0)+' mph</b></div><div class="kv"><span>Group</span><b>'+esc(pick(r,'groupName')||'–')+'</b></div><div class="kv"><span>Plate</span><b>'+esc(pick(r,'licensePlate','licensePlateNo','plateNumber')||'–')+'</b></div></div>'
    +'<div class="addr">'+ICON.pin+esc(pick(r,'address','landmark')||'Location unavailable')+'</div>'
+   +'<div id="rampBox" class="ramp"></div>'
    +atBox(id)
    +'<h3>Maintenance</h3><div id="m"><div class="sk" style="width:55%"></div></div>'
    +'<details><summary>All Azuga data for this vehicle</summary><pre>'+esc(JSON.stringify(r,null,2))+'</pre></details>';
-  try{if(!maint)maint=list(await get('/api/maintenance'));
+  rampBox(id,named?d:'');
+  try{if(!maint)maint=list(await get('/api/maintenance'));if(sel!=id)return;
     const m=maint.filter(x=>vid(x)==id||vname(x)==vname(r));
     $('m').innerHTML=m.length?m.map(x=>{const s=String(pick(x,'status','reminderStatus')||'');return '<div class="ev"><span class="pill '+(/over/i.test(s)?'bad':/up/i.test(s)?'warn':'idle')+'">'+esc(s||'Scheduled')+'</span><b>'+esc(pick(x,'serviceType','serviceName')||'Service')+'</b><span class="t">'+esc(when(pick(x,'nextServiceDate','dueDate')))+(pick(x,'nextServiceOdometer')?' · at '+esc(pick(x,'nextServiceOdometer'))+' mi':'')+'</span></div>'}).join(''):'<span class="muted">'+(r.maintenanceEnabled===false?'Maintenance tracking is off for this truck in Azuga.':'Nothing due.')+'</span>';
-  }catch(e){$('m').innerHTML='<span class="muted">'+esc(e.message)+'</span>';retry(id)}
+  }catch(e){if(sel!=id)return;$('m').innerHTML='<span class="muted">'+esc(e.message)+'</span>';retry(id)}
   $('vids').innerHTML='<div class="sk" style="width:70%"></div><div class="sk" style="width:50%"></div>';$('donut').innerHTML='<div class="sk" style="width:60%"></div>';
   try{const v=(await fleetVids()).filter(x=>x.vehicleId==id);if(sel!=id)return;
     TRUCKV=v;camType='';drawCams();
@@ -1500,7 +1573,8 @@ function openMedia(i){
   $('media').showModal();const v=$('mbody').querySelector('video');if(v)v.play().catch(()=>{});
 }
 document.addEventListener('click',e=>{const b=e.target.closest('.evb');if(b&&!b.disabled)openMedia(+b.dataset.i);if(e.target.id==='mclose'||e.target.id==='media')closeMedia()});
-function closeMedia(){$('mbody').querySelectorAll('video').forEach(v=>v.pause());$('media').close()}
+function closeMedia(){$('media').close()}
+$('media').addEventListener('close',()=>$('mbody').querySelectorAll('video').forEach(v=>v.pause()));
 const retried=new Set();function retry(id){if(retried.has(id))return;retried.add(id);setTimeout(()=>{if(sel==id)select(id)},30000)}
 // ---- Airtable (source of truth) ----
 let AT=null;
@@ -1537,7 +1611,6 @@ function atBox(id){
    +'<div><span>Reg. renewal #</span>'+esc(t.regRenew||'–')+'</div><div><span>EZ Pass</span>'+esc(t.ezpass||'–')+'</div><div><span>VIN</span>'+esc(t.vin||'–')+'</div></div>'+docBtns(t)
    +(Object.keys(L.changes||{}).length?'<div class="note">Azuga is out of date for this truck. Open it in Edit vehicles to sync.</div>':'')+'</div>';
 }
-setInterval(loadAT,120000);
 
 // ---- Edit tab: one truck at a time ----
 const FIELDS=[
@@ -1552,7 +1625,7 @@ let edSel=null,driverList=null;
 const vval=(v,k)=>k==='licensePlateNo'?pick(v,'licensePlateNo','licensePlate'):k==='odometer'?'':k==='name'?vname(v):v[k];
 const missing=v=>[!v.vin&&'VIN',!pick(v,'licensePlateNo','licensePlate')&&'plate',!/[a-z]/i.test(dname(v))&&'driver'].filter(Boolean);
 const outOfSync=v=>{const L=link(vid(v));return !!(L&&L.linked&&Object.keys(L.changes||{}).length)};
-const bareTracker=v=>/^\d+$/.test(vname(v))&&!v.vin;
+const bareTracker=v=>/^\\d+$/.test(vname(v))&&!v.vin;
 const edRows=()=>{const q=$('q').value.toLowerCase();return vehicles.filter(v=>(!q||(title(v)+' '+vname(v)+' '+dname(v)).toLowerCase().includes(q))&&(!$('needs').checked||missing(v).length||outOfSync(v))).sort((a,b)=>bareTracker(a)-bareTracker(b)||title(a).localeCompare(title(b)))};
 const dirtyCount=()=>document.querySelectorAll('#edCard .dirty').length;
 function renderEdit(){
@@ -1620,7 +1693,7 @@ function markNeed(el){
 }
 async function saveEd(v,thenNext,go){
   const msg=$('edMsg'),body={trackeeId:vid(v)},lines=[];
-  document.querySelectorAll('#edCard .dirty').forEach(el=>{const lbl=el.closest('label').firstChild.textContent.trim();
+  document.querySelectorAll('#edCard .dirty').forEach(el=>{const lbl=([...el.closest('label').childNodes].find(n=>n.nodeType===3&&n.textContent.trim())||{textContent:''}).textContent.trim();
     body[el.name]=el.type==='checkbox'?el.checked:el.type==='number'&&el.value!==''?Number(el.value):el.value;
     lines.push(lbl+': '+(el.type==='checkbox'?(el.checked?'Yes':'No'):el.tagName==='SELECT'?el.options[el.selectedIndex].text:el.value))});
   if(!lines.length){if(thenNext)return go(1);msg.className='';msg.textContent='Nothing changed.';return}
@@ -1718,6 +1791,16 @@ sizeWaves();addEventListener('resize',sizeWaves);
 if(matchMedia('(prefers-reduced-motion: reduce)').matches){const ps=document.querySelectorAll('.hwave path');if(ps[0])ps[0].setAttribute('d',wavePath(backY,0));if(ps[1])ps[1].setAttribute('d',wavePath(frontY,0))}
 else requestAnimationFrame(waveTick);
 // ---- Self-cleaning page: notices fade, messages clear, data refreshes, idle page reloads ----
+// Driver's Ramp spend (cards + reimbursements), last 30 days: gas vs everything else
+async function rampBox(id,name){const el=$('rampBox');if(!el)return;if(!name){el.hidden=true;return}
+  const head='<h4><span class="rtag">Ramp</span>'+esc(name)+' · last 30 days</h4>',usd=n=>n.toLocaleString('en-US',{style:'currency',currency:'USD'});
+  el.innerHTML=head+'<div class="sk" style="width:60%"></div>';let r;
+  try{r=await get('/api/ramp?name='+encodeURIComponent(name))}catch(e){if(sel==id)el.innerHTML=head+'<div class="rmuted">Ramp is not answering right now.</div>';return}
+  if(sel!=id)return;
+  if(!r.connected){el.innerHTML=head+'<div class="rmuted">Ramp is not connected yet.</div>';return}
+  const p=r.person;if(!p){el.innerHTML=head+'<div class="rmuted">No Ramp spend found under this name.</div>';return}
+  el.innerHTML=head+'<div class="rgrid"><div class="rgas"><span>Gas</span><b>'+usd(p.gas)+'</b><i>'+p.gasN+(p.gasN===1?' fill-up':' fill-ups')+'</i></div><div><span>Everything else</span><b>'+usd(p.other)+'</b><i>'+p.otherN+(p.otherN===1?' purchase':' purchases')+'</i></div></div>'
+   +(p.name.toLowerCase()!==name.toLowerCase()?'<div class="rmuted">Shown as '+esc(p.name)+' in Ramp</div>':'')}
 function toast(msg,kind){let t=$('toast');if(!t){t=document.createElement('div');t.id='toast';t.setAttribute('role','status');document.body.appendChild(t)}
   t.className='toast '+(kind||'');t.textContent=msg;t.hidden=false;clearTimeout(t._h);t._h=setTimeout(()=>t.hidden=true,7000)}
 const MSG_IDS=['edMsg','ndMsg','deMsg','scanMsg'],msgAt={};
@@ -1729,7 +1812,7 @@ const freshen=()=>{if(busy())return;if(!$('vDrv').hidden){driverList=null;loadPe
 setInterval(freshen,120e3);
 setInterval(()=>{if(Date.now()-lastAct>10*60e3&&!busy())location.reload()},60e3);
 document.addEventListener('visibilitychange',()=>{if(document.hidden)hiddenAt=Date.now();else if(hiddenAt&&Date.now()-hiddenAt>10*60e3&&!busy())location.reload();else freshen()});
-async function loadPeople(){try{PEOPLE=await get('/api/people')}catch(e){PEOPLE={connected:true,error:e.message,drivers:[]}}renderDrivers()}
+let peopleAt=0;async function loadPeople(){try{PEOPLE=await get('/api/people');peopleAt=Date.now()}catch(e){PEOPLE={connected:true,error:e.message,drivers:[]}}renderDrivers()}
 const post=async(u,b)=>{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(j.error)throw new Error(j.error);return j};
 let dfilt='all';
 // The Airtable Status field decides (blank counts as Active).
@@ -1803,7 +1886,7 @@ function renderDrivers(){
   $('addRow').onclick=()=>$('newDrvBtn').click();
   document.querySelectorAll('.pick').forEach(c=>c.onchange=()=>{const id=c.closest('.rrow').dataset.id;c.checked?picked.add(id):picked.delete(id);c.closest('.rrow').classList.toggle('picked',c.checked);renderSelbar()});
   renderSelbar();
-  document.querySelectorAll('.edbtn,.rn b.nm').forEach(b=>b.onclick=()=>openDrv(b.closest('.rrow').dataset.id));
+  document.querySelectorAll('.edbtn,.rn b.nm').forEach(b=>b.onclick=async()=>{const id=b.closest('.rrow').dataset.id;if(Date.now()-peopleAt>60e3)await loadPeople();openDrv(id)});
   document.querySelectorAll('.azbtn').forEach(b=>b.onclick=async()=>{const t=b.closest('.rrow');b.disabled=true;b.textContent='Adding...';
     try{await post('/api/driver/azuga',{airtableId:t.dataset.id});driverList=null;await loadPeople()}
     catch(e){b.disabled=false;b.textContent='Try again';b.title=e.message;t.querySelector('.rn>span').textContent='Azuga said: '+e.message}});
@@ -1857,7 +1940,8 @@ function openDrv(id){const d=PEOPLE.drivers.find(x=>x.id===id);if(!d)return;deId
 $('deTq').oninput=deTrucks;
 $('deDel').onclick=()=>{const d=PEOPLE.drivers.find(x=>x.id===deId);$('deDzName').textContent=d.name;$('deDzIn').value='';$('deDzYes').disabled=true;$('deDz').hidden=false;$('deDzIn').focus()};
 $('deDzNo').onclick=()=>{$('deDz').hidden=true};
-$('deDzIn').oninput=()=>{const d=PEOPLE.drivers.find(x=>x.id===deId);$('deDzYes').disabled=$('deDzIn').value.trim().toLowerCase().replace(/\s+/g,' ')!==d.name.trim().toLowerCase().replace(/\s+/g,' ')};
+$('deDzIn').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();if(!$('deDzYes').disabled)$('deDzYes').click()}};
+$('deDzIn').oninput=()=>{const d=PEOPLE.drivers.find(x=>x.id===deId);$('deDzYes').disabled=$('deDzIn').value.trim().toLowerCase().split(' ').filter(Boolean).join(' ')!==d.name.trim().toLowerCase().split(' ').filter(Boolean).join(' ')};
 $('deDzYes').onclick=async()=>{const b=$('deDzYes'),m=$('deMsg');b.disabled=true;b.textContent='Deleting...';
   try{const r=await post('/api/driver/remove',{id:deId,confirmName:$('deDzIn').value});m.style.color='var(--go)';m.textContent='Deleted'+(r.azuga?' from Airtable and Azuga.':' from Airtable (they were not in Azuga).');driverList=null;await loadPeople();loadSync();setTimeout(()=>$('drvEd').close(),900)}
   catch(err){b.disabled=false;b.textContent='Delete for good';m.style.color='var(--bad)';m.textContent=err.message}};
