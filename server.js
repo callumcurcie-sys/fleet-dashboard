@@ -24,7 +24,7 @@ const azErr = r => { const e = r && r.error; return e && !(Array.isArray(e) && !
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function azuga(path, body = {}, method = 'POST', attempt = 1) {
-  const r = await fetch(API + path, {
+  const r = await fetch(path.startsWith('https://') ? path : API + path, {
     method,
     headers: { Authorization: 'Bearer ' + (await getToken()), 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -77,7 +77,11 @@ const routes = {
   '/api/maintenance': () => cached('maintenance', 600, () => azuga('/maintanance/reports/scheduledreport.json?' + new URLSearchParams({
     startTime: fmt(daysAgo(365)), endTime: fmt(daysAgo(-365)), isCount: 'false',
   }))),
-  '/api/ramp': q => rampFor(q.get('name') || ''),
+  '/api/ramp': async q => { const r = await rampFor(q.get('name') || '');   // plus miles driven, for gas per mile
+    if (r.person && r.person.gas > 0) { const az = await azugaScore(q.get('vehicleId') || '', q.get('name') || '').catch(() => null);
+      if (az && az.miles > 50) r.gasPerMile = { miles: az.miles, perMile: r.person.gas / az.miles, max: GAS_PER_MILE_MAX, points: GAS_POINTS }; }
+    return r; },
+  '/api/score': q => scoreFor(q.get('vehicleId') || '', q.get('name') || ''),
   '/api/videos': q => {
     const id = q.get('vehicleId') || '';
     const body = { startTime: fmt(daysAgo(7)), endTime: fmt(new Date()), page: 1, limit: 100, ...(id ? { vehiclesIds: id } : {}) };
@@ -565,6 +569,82 @@ async function syncOne(id) {
   return { ok: true, changed, notes: d.notes };
 }
 
+// ---------------- Azuga Driver Score (0-100, last 30 days) ----------------
+// Azuga's own Scores report: an overall score plus a sub-score per behaviour and the event counts behind it.
+const azIso = d => d.toISOString().replace(/\.(\d{3})Z$/, ':$1Z');   // Azuga wants 2026-09-03T00:00:00:000Z
+const scoreRows = () => cached('scores', 1800, async () => list(await azuga('https://services.azuga.com/reports/v3/reports/score?appId=FLEET',
+  { startDate: azIso(daysAgo(30)), endDate: azIso(new Date()), browserTimezone: 'US/Eastern', reportFilter: 'default', index: 0, size: 500 })));
+const SCORE_PARTS = [   // [label, sub-score field, count field, what the count means]
+  ['Phone use', 'distractedDrivingScore', 'distractedDrivingCount', 'distraction'],
+  ['Speeding', 'speedingScore', 'overSpeedingCount', 'speeding'],
+  ['Braking', 'brakingScore', 'hardBrakingCount', 'hard brake'],
+  ['Acceleration', 'accelerationScore', 'hardAccelarationCount', 'hard start'],
+  ['Cornering', 'corneringScore', 'corneringEventCount', 'sharp turn'],
+  ['Idling', 'idlingScore', 'idlingEventCount', 'long idle'],
+  ['Seatbelt', 'seatBeltScore', null, '']];
+// Azuga's own score for this driver (or null), shown alongside ours for reference
+async function azugaScore(vehicleId, name) {
+  const rows = await scoreRows(), ids = new Set();
+  if (name) (await driverGroups()).filter(g => dupeName(g.name) === dupeName(name)).forEach(g => g.ids.forEach(i => ids.add(String(i))));
+  const nm = r => dupeName([r.firstName, r.lastName].filter(Boolean).join(' '));
+  let mine = rows.filter(r => ids.has(String(r.userId)));
+  if (!mine.length && name) mine = rows.filter(r => nm(r) === dupeName(name));
+  if (!mine.length) mine = rows.filter(r => String(r.vehicleId) === String(vehicleId));
+  const num = v => (v === null || v === undefined || v === '' || isNaN(+v)) ? null : +v;
+  const r = mine.filter(x => num(x.score) !== null).sort((a, b) => (+b.distanceTravelled || 0) - (+a.distanceTravelled || 0))[0];
+  return r ? { score: Math.round(+r.score), miles: mine.reduce((t, x) => t + (num(x.distanceTravelled) || 0), 0) } : null;
+}
+
+// ---------------- Millennial driver score: 100 minus points for camera events (last 30 days) ----------------
+// Points per event, worst first. Anything else the camera flags costs 2; camera/system notices cost nothing.
+const EVENT_POINTS = [
+  ['Hard-core braking', /hard\s*-?\s*core\s*br[ae]a?k/, 10],
+  ['Hard braking', /(hard|harsh)\s*br[ae]a?k/, 8],
+  ['Critical distance', /critical\s*distance/, 8],
+  ['Tailgating', /tailgat|following\s*distance/, 7],
+  ['Violent turn', /violent\s*turn|harsh\s*turn|sharp\s*turn|corner/, 7],
+  ['Rolling stop', /rolling\s*stop|stop\s*sign/, 6],
+  ['Phone use', /phone|cell|distract/, 6],
+  [null, /disconnect|tamper|power|obstruct|camera\s*(off|blocked)|sd\s*card|heartbeat/, 0]];
+const REPEAT_DAYS = 3, REPEAT_POINTS = 5;          // same kind of event on 3+ different days: extra 5 off
+const GAS_PER_MILE_MAX = 0.5, GAS_POINTS = 10;      // pickups run ~$0.20/mi; over $0.50/mi gets flagged
+const eventKind = code => { const t = String(code || '').replace(/^CAM_/, '').replace(/_MESSAGE$/, '').replace(/_/g, ' ').toLowerCase();
+  const hit = EVENT_POINTS.find(([, re]) => re.test(t));
+  return hit ? { label: hit[0], pts: hit[2] } : { label: t.replace(/^./, c => c.toUpperCase()) || 'Other event', pts: 2 }; };
+// 30 days of camera events, fetched a week at a time
+const events30 = () => cached('events30', 1800, async () => {
+  let ev = [];
+  for (let w = 0; w < 5; w++) {
+    const body = { startTime: fmt(daysAgo(Math.min(30, 7 * (w + 1)))), endTime: fmt(daysAgo(7 * w)), limit: 100 };
+    for (let page = 1; page <= 10; page++) { const p = list(await azuga('/eventVideos.json?videoType=eventVideo', { ...body, page })); ev = ev.concat(p); if (p.length < 100) break; }
+  }
+  const seen = new Set();   // weeks share an edge; drop repeats
+  return ev.filter(x => { const k = [x.vehicleId, x.eventTime || x.startTime, x.eventType].join('|'); if (seen.has(k)) return false; seen.add(k); return true; });
+});
+async function scoreFor(vehicleId, name) {
+  const evs = await events30();
+  // Events count against whoever Azuga recorded as driving; events with no driver recorded go to this truck's current driver
+  const rec = x => dupeName([x.firstName, x.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, '') || x.driverName || '');
+  const mine = evs.filter(x => name ? rec(x) === dupeName(name) || (!rec(x) && String(x.vehicleId) === String(vehicleId)) : String(x.vehicleId) === String(vehicleId));
+  const by = {};
+  for (const x of mine) {
+    const k = eventKind(x.eventType); if (!k.pts) continue;
+    const t = +(x.eventTime || x.startTime) || Date.parse(x.eventTime || x.startTime) || 0;
+    const b = by[k.label] = by[k.label] || { label: k.label, count: 0, points: 0, each: k.pts, days: new Set() };
+    b.count++; b.points += k.pts; if (t) b.days.add(new Date(t).toLocaleDateString('en-US', { timeZone: 'America/New_York' }));
+  }
+  const items = Object.values(by).map(b => ({ label: b.label, count: b.count, points: b.points, days: b.days.size }));
+  for (const b of items) if (b.days >= REPEAT_DAYS) b.points += REPEAT_POINTS, b.repeat = true;
+  const az = await azugaScore(vehicleId, name).catch(() => null);
+  let gas = null;   // Ramp gas vs miles driven
+  if (name && az && az.miles > 50) try {
+    const r = await rampFor(name);
+    if (r.person && r.person.gas > 0) { const per = r.person.gas / az.miles; gas = { spend: r.person.gas, miles: az.miles, perMile: per, points: per > GAS_PER_MILE_MAX ? GAS_POINTS : 0 }; }
+  } catch {}
+  const lost = items.reduce((t, b) => t + b.points, 0) + (gas ? gas.points : 0);
+  items.sort((a, b) => b.points - a.points);
+  return { found: true, score: Math.max(0, 100 - lost), items, gas, azuga: az && az.score, events: mine.length };
+}
 // ---------------- Ramp: each driver's card spend over the last 30 days ----------------
 // Needs RAMP_CLIENT_ID / RAMP_CLIENT_SECRET (a Ramp developer app with transactions:read, reimbursements:read, users:read) in Render.
 const { RAMP_CLIENT_ID, RAMP_CLIENT_SECRET } = process.env;
@@ -587,13 +667,13 @@ async function rampLogin() {
 async function ramp(url) {
   if (!rampTok || Date.now() > rampExp) await rampLogin();
   const r = await fetch(url, { headers: { Authorization: 'Bearer ' + rampTok, Accept: 'application/json' } });
-  if (r.status === 401) rampTok = null;
+  if (r.status === 401 || r.status === 403) rampTok = null;   // log in again next time (picks up permissions added in Ramp)
   if (!r.ok) throw new Error('Ramp ' + r.status + ' on ' + new URL(url).pathname.split('/').pop() + ': ' + (await r.text()).slice(0, 160));
   return r.json();
 }
 const isGas = t => t.sk_category_id === 18 || /fuel|gas/i.test(t.sk_category_name || '');   // Ramp's "Fuel and Gas" category
 // Reimbursements carry no category, so gas is spotted by the merchant or memo ("Wawa", memo "Gas")
-const GAS_WORDS = /\bgas\b|fuel|wawa|sunoco|shell|exxon|mobil|\bbp\b|speedway|valero|citgo|lukoil|gulf|getty|royal farms|sheetz|quick ?chek|costco gas/i;
+const GAS_WORDS = /\bgas\b|fuel|fill[\s-]?ups?\b|wawa|sunoco|shell|exxon|mobil|\bbp\b|speedway|valero|citgo|lukoil|gulf|getty|royal farms|sheetz|quick ?chek|costco gas/i;
 async function rampAll(path, q) {   // every page of a Ramp list
   let url = 'https://api.ramp.com/developer/v1/' + path + '?' + new URLSearchParams({ page_size: '100', ...q }), out = [], pages = 0;
   while (url && pages++ < 50) { const j = await ramp(url); out = out.concat(j.data || []); url = j.page && j.page.next; }
@@ -1218,11 +1298,16 @@ header>.brand,header>.live,header>.tabs{position:relative;z-index:3}
 .hwave.front{z-index:2;fill:rgba(103,232,249,.38)}
 #floaty{position:absolute;left:0;right:0;bottom:-1px;height:58px;z-index:1;pointer-events:none}
 .fl{position:absolute;left:0;top:0;height:52px;will-change:transform;transform-origin:50% 85%;filter:drop-shadow(0 3px 2px rgba(3,30,45,.35))}
+.grid:has(.kscore){grid-template-columns:repeat(5,1fr)}.kv.kscore{background:#f1f5f9}.kscore span{color:#475569}.kscore b i{font-style:normal;font-size:12px;font-weight:600;opacity:.6;margin-left:2px}
+.kscore small{display:block;font-size:11.5px;color:#64748b;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.kv.kscore{min-width:0;cursor:help}.kscore.good{background:#dcfce7}.kscore.good span,.kscore.good b{color:#15803d}
+.kscore.ok{background:#ffedd5}.kscore.ok span,.kscore.ok b{color:#c2410c}.kscore.bad{background:#fee2e2}.kscore.bad span,.kscore.bad b{color:#b91c1c}
+@media (max-width:900px){.grid:has(.kscore){grid-template-columns:repeat(2,1fr)}.kv.kscore{grid-column:span 2}}
 .ramp{margin:12px 0;padding:12px 14px;border-radius:14px;background:#121212;color:#f4f4ef;box-shadow:0 6px 18px rgba(0,0,0,.18)}.ramp:empty{display:none}
 .ramp h4{margin:0 0 10px;font-size:13px;font-weight:600;color:#d6d6cf;display:flex;align-items:center;gap:8px}.ramp .rtag{background:#e4f222;color:#111;font-weight:800;border-radius:6px;padding:2px 8px;font-size:12px}
 .rgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.rgrid>div{background:#1d1d1d;border-radius:10px;padding:10px 12px}.rgrid span{display:block;font-size:12px;color:#a3a39b}
 .rgrid b{display:block;font-size:22px;line-height:1.25;color:#fff;font-variant-numeric:tabular-nums}.rgrid .rgas{background:#e4f222;color:#111}.rgrid .rgas span,.rgrid .rgas i{color:#3a3d00}.rgrid .rgas b{color:#111}
-.rgrid i{font-style:normal;font-size:12px;color:#a3a39b}.ramp .rmuted{font-size:12.5px;color:#a3a39b;margin-top:6px}.ramp .sk{background:#2a2a2a}
+.rgrid i{font-style:normal;font-size:12px;color:#a3a39b}.ramp .rmile{margin-top:10px;padding:9px 12px;border-radius:10px;background:#1d1d1d;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}.ramp .rmile b{color:#e4f222;font-size:16px}.ramp .rmile span{color:#d6d6cf;font-size:12.5px}.ramp .rmile em{font-style:normal;font-size:12px;color:#86efac;margin-left:auto}.ramp .rmile.bad em{color:#fca5a5}.ramp .rmile.bad b{color:#fca5a5}
+.ramp .rmuted{font-size:12.5px;color:#a3a39b;margin-top:6px}.ramp .sk{background:#2a2a2a}
 .fl.flip .bob{transform:scaleX(-1)}.fl.flip .nf{transform:scaleX(-1);transform-box:fill-box;transform-origin:center}
 .fl::after{content:'';position:absolute;left:6%;right:6%;bottom:16%;height:8px;border-radius:50%;border:2px solid rgba(207,250,254,.7);animation:ripple2 2.8s ease-out infinite;z-index:-1}
 @keyframes ripple2{0%{transform:scale(.7);opacity:.9}100%{transform:scale(1.25);opacity:0}}
@@ -1515,13 +1600,13 @@ async function select(id){
   const mk=markers[id];if(mk)map.setView(mk.getLatLng(),Math.max(map.getZoom(),15),{animate:false});  // one jump; the step-by-step cluster zoom felt slow
   const d=who(r),named=/[a-z]/i.test(d),mmy=[r.year,r.make,r.model].filter(Boolean).join(' ');
   $('detail').innerHTML='<div class="dh">'+avatar(d,1)+'<div><h2>'+tno(id)+esc(title(r))+'</h2>'+azSub(r)+'<p>'+(named?esc(d):'No driver assigned')+(mmy&&!title(r).includes(mmy)?' · '+esc(mmy):'')+'</p></div><div style="margin-left:auto;display:flex;align-items:center">'+status(r)+'<button class="dclose" id="dclose" aria-label="Close details">×</button></div></div>'
-   +'<div class="grid"><div class="kv"><span>Odometer</span><b>'+esc(odo(r))+'</b></div><div class="kv"><span>Speed</span><b>'+(moving(r)?Math.round(speed(r)):0)+' mph</b></div><div class="kv"><span>Group</span><b>'+esc(pick(r,'groupName')||'–')+'</b></div><div class="kv"><span>Plate</span><b>'+esc(pick(r,'licensePlate','licensePlateNo','plateNumber')||'–')+'</b></div></div>'
+   +'<div class="grid"><div class="kv"><span>Odometer</span><b>'+esc(odo(r))+'</b></div><div class="kv"><span>Speed</span><b>'+(moving(r)?Math.round(speed(r)):0)+' mph</b></div><div class="kv"><span>Group</span><b>'+esc(pick(r,'groupName')||'–')+'</b></div><div class="kv"><span>Plate</span><b>'+esc(pick(r,'licensePlate','licensePlateNo','plateNumber')||'–')+'</b></div><div class="kv kscore" id="kscore"><span>Driver score</span><b>…</b><small></small></div></div>'
    +'<div class="addr">'+ICON.pin+esc(pick(r,'address','landmark')||'Location unavailable')+'</div>'
    +'<div id="rampBox" class="ramp"></div>'
    +atBox(id)
    +'<h3>Maintenance</h3><div id="m"><div class="sk" style="width:55%"></div></div>'
    +'<details><summary>All Azuga data for this vehicle</summary><pre>'+esc(JSON.stringify(r,null,2))+'</pre></details>';
-  rampBox(id,named?d:'');
+  rampBox(id,named?d:'');scoreTile(id,named?d:'');
   try{if(!maint)maint=list(await get('/api/maintenance'));if(sel!=id)return;
     const m=maint.filter(x=>vid(x)==id||vname(x)==vname(r));
     $('m').innerHTML=m.length?m.map(x=>{const s=String(pick(x,'status','reminderStatus')||'');return '<div class="ev"><span class="pill '+(/over/i.test(s)?'bad':/up/i.test(s)?'warn':'idle')+'">'+esc(s||'Scheduled')+'</span><b>'+esc(pick(x,'serviceType','serviceName')||'Service')+'</b><span class="t">'+esc(when(pick(x,'nextServiceDate','dueDate')))+(pick(x,'nextServiceOdometer')?' · at '+esc(pick(x,'nextServiceOdometer'))+' mi':'')+'</span></div>'}).join(''):'<span class="muted">'+(r.maintenanceEnabled===false?'Maintenance tracking is off for this truck in Azuga.':'Nothing due.')+'</span>';
@@ -1799,15 +1884,28 @@ sizeWaves();addEventListener('resize',sizeWaves);
 if(matchMedia('(prefers-reduced-motion: reduce)').matches){const ps=document.querySelectorAll('.hwave path');if(ps[0])ps[0].setAttribute('d',wavePath(backY,0));if(ps[1])ps[1].setAttribute('d',wavePath(frontY,0))}
 else requestAnimationFrame(waveTick);
 // ---- Self-cleaning page: notices fade, messages clear, data refreshes, idle page reloads ----
+// Azuga Driver Score tile: score out of 100, colored, plus the behaviour costing the most points
+async function scoreTile(id,name){const el=$('kscore');if(!el)return;const b=el.querySelector('b'),sm=el.querySelector('small');let r;
+  try{r=await get('/api/score?vehicleId='+encodeURIComponent(id)+'&name='+encodeURIComponent(name||''))}catch(e){if(sel==id){b.textContent='–';sm.textContent='Score unavailable';el.title=e.message}return}
+  if(sel!=id)return;
+  el.classList.add(r.score>=85?'good':r.score>=70?'ok':'bad');b.innerHTML=r.score+'<i>/100</i>';
+  const top=r.items[0],gasBad=r.gas&&r.gas.points;
+  sm.textContent=top?'↓ '+top.label+' ×'+top.count:gasBad?'↓ High gas per mile':'No safety events';
+  const money=n=>'$'+n.toFixed(2);
+  el.title=['Driver score, last 30 days (starts at 100)'].concat(
+    r.items.map(x=>x.label+' ×'+x.count+(x.repeat?' on '+x.days+' days (repeat +5)':'')+': -'+x.points),
+    r.gas?['Gas '+money(r.gas.spend)+' for '+Math.round(r.gas.miles)+' mi = '+money(r.gas.perMile)+'/mi'+(r.gas.points?': -'+r.gas.points:' (ok)')]:[],
+    r.azuga!=null?['Azuga score: '+r.azuga]:[]).join('\\n')}
 // Driver's Ramp spend (cards + reimbursements), last 30 days: gas vs everything else
 async function rampBox(id,name){const el=$('rampBox');if(!el)return;if(!name){el.hidden=true;return}
   const head='<h4><span class="rtag">Ramp</span>'+esc(name)+' · last 30 days</h4>',usd=n=>n.toLocaleString('en-US',{style:'currency',currency:'USD'});
   el.innerHTML=head+'<div class="sk" style="width:60%"></div>';let r;
-  try{r=await get('/api/ramp?name='+encodeURIComponent(name))}catch(e){if(sel==id)el.innerHTML=head+'<div class="rmuted">Ramp is not answering right now: '+esc(e.message)+'</div>';return}
+  try{r=await get('/api/ramp?name='+encodeURIComponent(name)+'&vehicleId='+encodeURIComponent(id))}catch(e){if(sel==id)el.innerHTML=head+'<div class="rmuted">Ramp is not answering right now: '+esc(e.message)+'</div>';return}
   if(sel!=id)return;
   if(!r.connected){el.innerHTML=head+'<div class="rmuted">Ramp is not connected yet.</div>';return}
   const p=r.person;if(!p){el.innerHTML=head+'<div class="rmuted">No Ramp spend found under this name.</div>';return}
   el.innerHTML=head+'<div class="rgrid"><div class="rgas"><span>Gas</span><b>'+usd(p.gas)+'</b><i>'+p.gasN+(p.gasN===1?' fill-up':' fill-ups')+'</i></div><div><span>Everything else</span><b>'+usd(p.other)+'</b><i>'+p.otherN+(p.otherN===1?' purchase':' purchases')+'</i></div></div>'
+   +(r.gasPerMile?(g=>'<div class="rmile'+(g.perMile>g.max?' bad':'')+'"><b>'+usd(g.perMile)+' per mile</b><span>'+usd(p.gas)+' of gas ÷ '+Math.round(g.miles).toLocaleString()+' miles driven</span><em>'+(g.perMile>g.max?'Over the '+usd(g.max)+'/mile limit · −'+g.points+' on driver score':'Normal (limit '+usd(g.max)+'/mile)')+'</em></div>')(r.gasPerMile):'')
    +(p.name.toLowerCase()!==name.toLowerCase()?'<div class="rmuted">Shown as '+esc(p.name)+' in Ramp</div>':'')+(r.cardOnly?'<div class="rmuted">Card spend only. Give the Ramp app the reimbursements:read permission to include reimbursed gas.</div>':'')}
 function toast(msg,kind){let t=$('toast');if(!t){t=document.createElement('div');t.id='toast';t.setAttribute('role','status');document.body.appendChild(t)}
   t.className='toast '+(kind||'');t.textContent=msg;t.hidden=false;clearTimeout(t._h);t._h=setTimeout(()=>t.hidden=true,7000)}
