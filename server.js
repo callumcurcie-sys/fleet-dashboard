@@ -873,17 +873,21 @@ header{background:var(--deep);color:#fff;padding:12px 24px;display:flex;align-it
 .sum .dot{width:8px;height:8px;border-radius:50%}
 
 /* Live map layout */
-main{display:grid;grid-template-columns:350px 1fr;gap:14px;padding:12px 24px 24px;height:calc(100vh - 126px);min-height:560px}
+main{display:grid;grid-template-columns:390px 1fr;gap:14px;padding:12px 24px 24px;height:calc(100vh - 126px);min-height:560px}
 #list{overflow:auto;background:var(--card);border-radius:var(--r);box-shadow:var(--sh)}
 .card{display:flex;gap:11px;align-items:flex-start;padding:12px 14px;border-bottom:1px solid var(--line);cursor:pointer;transition:background .12s}
 .card:last-child{border-bottom:0}.card:hover{background:#faf8f4}
 .card.sel{background:var(--shallow)}
 .av{flex:none;width:34px;height:34px;border-radius:50%;background:var(--shallow);color:var(--poolInk);display:grid;place-items:center;font-weight:700;font-size:12px}
 .av.none{background:var(--deck2);color:var(--muted)}.av.none svg{width:17px;height:17px}
-.card.sel .av{background:#fff}
+
 .ci{min-width:0;flex:1}
 .ci .top{display:flex;justify-content:space-between;gap:8px;align-items:center}
 .ci b{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mk{flex:none;display:inline-block;font-size:10.5px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;border-radius:5px;padding:2px 6px;margin-right:6px;vertical-align:1px;line-height:1.3;box-shadow:inset 0 -1px 0 rgba(0,0,0,.15);transition:transform .2s}
+.card:hover .mk{transform:translateY(-1px) rotate(-2deg)}
+.mk-ford{background:#1d4ed8;color:#fff}.mk-chevy{background:#eab308;color:#3b2f04}.mk-gmc{background:#b91c1c;color:#fff}.mk-nissan{background:#334155;color:#fff}
+.mk-toyota{background:#e11d48;color:#fff}.mk-ram{background:#111827;color:#fff}.mk-honda{background:#64748b;color:#fff}.mk-jeep{background:#3f6212;color:#fff}.mk-other{background:var(--deck2);color:var(--ink2)}
 .tno{flex:none;font-size:11px;font-weight:700;color:var(--poolInk);background:var(--shallow);border-radius:5px;padding:1px 6px;margin-right:6px}
 .card.sel .tno{background:#fff}
 .ci .d{font-size:13px;margin-top:1px;color:var(--ink2)}
@@ -1037,7 +1041,7 @@ tbody tr:hover td{background:#fcfbf8}
 @keyframes pop{from{opacity:0;transform:scale(.92) translateY(-4px)}}
 /* ---- Personality: things arrive, respond and breathe ---- */
 header{position:relative;overflow:hidden}
-.hwave{position:absolute;left:0;bottom:-2px;width:200%;height:16px;fill:rgba(20,163,199,.18);animation:wave 14s linear infinite;pointer-events:none}
+.hwave{position:absolute;left:0;bottom:-2px;width:200%;height:30px;fill:rgba(20,163,199,.26);animation:wave 14s linear infinite;pointer-events:none}
 @keyframes wave{to{transform:translateX(-50%)}}
 .logo{animation:bob 4s ease-in-out infinite}@keyframes bob{50%{transform:translateY(-2px) rotate(-3deg)}}
 .tabs button{transition:background .2s,color .2s,transform .15s}.tabs button:active{transform:scale(.95)}
@@ -1061,13 +1065,10 @@ header{position:relative;overflow:hidden}
 #vMap,#vEdit,#vDrv{animation:fadein .3s ease-out}@keyframes fadein{from{opacity:0}}
 dialog[open]{animation:pop .22s cubic-bezier(.2,.9,.3,1.2)}
 @media (prefers-reduced-motion:reduce){.hwave,.logo,.card.rise,.pill.go::before,#right.open .pane,#right.open #detail,#donut .arc,#donut svg,.evb,.kv b,.tm.drop .pin,#vMap,#vEdit,#vDrv,dialog[open],.vopop{animation:none!important}.card:hover,.card:hover .av,.rrow:hover .mav{transform:none}}
-.office{position:absolute;left:0;top:0;transform:translate(-50%,-50%);display:flex;align-items:center;gap:5px;height:38px;padding:0 11px 0 9px;border-radius:19px;background:#d62828;border:3px solid #fff;box-shadow:0 4px 14px rgba(150,20,20,.45);color:#fff;font:800 14px/1 Figtree,system-ui,sans-serif;white-space:nowrap;cursor:pointer;transition:transform .15s}
-.office svg{width:20px;height:20px}.office b{font-weight:800}.office.mv{box-shadow:0 0 0 3px #16a34a,0 4px 14px rgba(150,20,20,.45)}
-.office.empty{height:30px;padding:0 6px;background:#d62828;opacity:.9}.office.empty svg{width:16px;height:16px}
-.tm:hover .office{transform:translate(-50%,-50%) scale(1.08)}
-.office::after{content:'';position:absolute;inset:-3px;border-radius:inherit;border:2px solid #d62828;animation:ripple 3s ease-out infinite;opacity:.6}
-.office.empty::after{display:none}
-@media (prefers-reduced-motion:reduce){.office::after{animation:none;display:none}}
+.office{position:absolute;left:0;top:0;transform:translate(-50%,-50%);display:flex;align-items:center;gap:4px;height:28px;padding:0 9px 0 7px;border-radius:14px;background:#fff;border:2px solid #c2410c;box-shadow:0 2px 6px rgba(16,34,46,.2);color:#9a3412;font:700 12px/1 Figtree,system-ui,sans-serif;white-space:nowrap;cursor:pointer;transition:transform .15s}
+.office svg{width:15px;height:15px;stroke:#c2410c}.office.mv{border-color:#16a34a}
+.office.empty{height:24px;width:24px;padding:0;justify-content:center;opacity:.85}.office.empty svg{width:13px;height:13px}
+.tm:hover .office{transform:translate(-50%,-50%) scale(1.06)}
 .toast{position:fixed;right:20px;bottom:20px;z-index:9999;max-width:380px;background:var(--deep);color:#fff;padding:12px 16px;border-radius:12px;box-shadow:0 10px 30px rgba(10,44,64,.35);font-size:13px;animation:tin .2s ease-out}
 .toast.bad{background:var(--bad)}@keyframes tin{from{opacity:0;transform:translateY(8px)}}@media (prefers-reduced-motion:reduce){.toast{animation:none}}
 .syncp{margin:0 0 12px}.syncp:empty{display:none}.syncp.sm{margin:10px 0 0;font-size:12px}
@@ -1132,6 +1133,50 @@ header{background:linear-gradient(180deg,#0c3550 0%,var(--deep) 100%);box-shadow
 .dh h2{font-size:21px}
 .sum button[aria-pressed=true]{box-shadow:0 0 0 1px var(--line2),0 1px 2px rgba(16,34,46,.06)}
 @media (prefers-reduced-motion:reduce){.evb,.card{transition:none}}
+/* ---- Colour: a brighter poolside palette ---- */
+:root{--deck:#eef6f7;--deck2:#e1eef0;--line:#dbe7ea;--line2:#c8dbe0;--pool:#0891b2;--poolInk:#0e7490;--shallow:#cff4fb;--shallow2:#a5e8f5;
+ --coral:#f97362;--coralBg:#ffe8e4;--sun:#f59e0b;--sunBg:#fff3d6;--grape:#8b5cf6;--grapeBg:#efe8ff;--leaf:#16a34a;--leafBg:#dcfce7}
+body{background:radial-gradient(1200px 600px at 100% -10%,#d3f3f8 0%,transparent 60%),radial-gradient(900px 500px at -10% 110%,#fdeee0 0%,transparent 55%),var(--deck);background-attachment:fixed}
+header{background:linear-gradient(110deg,#082a3d 0%,#0b4a63 55%,#0e7490 100%)}
+.hwave{fill:rgba(103,232,249,.28)}
+.logo{background:linear-gradient(135deg,#22d3ee,#0891b2 60%,#0e7490)}
+.tabs{background:rgba(255,255,255,.1)}.tabs button:hover:not(.on){background:rgba(255,255,255,.12)}
+.tabs button.on{background:#fff;color:#0b4a63;box-shadow:0 4px 14px -6px rgba(0,0,0,.4)}
+.live .dot{background:#4ade80}
+/* filter chips light up in their own colour */
+.sum button[data-f=all][aria-pressed=true]{background:#0b4a63;border-color:#0b4a63;color:#fff}.sum button[data-f=all][aria-pressed=true] b{color:#fff}
+.sum button[data-f=moving][aria-pressed=true]{background:var(--leafBg);border-color:#86efac}
+.sum button[data-f=parked][aria-pressed=true]{background:#e2e8f0;border-color:#cbd5e1}
+.sum button[data-f=nodriver][aria-pressed=true]{background:var(--sunBg);border-color:#fcd34d}
+.sum button:hover{background:rgba(255,255,255,.7)}
+/* list: status stripe on each truck */
+.card{border-left:4px solid transparent}.card:has(.pill.go){border-left-color:var(--leaf)}.card.sel{background:linear-gradient(90deg,var(--shallow) 0%,#effbfd 100%)}
+.card:hover{background:#f3fbfc}.card.sel::before{display:none}.card.sel{border-left-color:var(--pool)}
+/* section headers get their own accent */
+.ph{border-bottom:2px solid var(--line)}.ph h3{display:flex;align-items:center;gap:8px}.ph h3::before{content:'';width:9px;height:9px;border-radius:3px;background:var(--pool)}
+#donut .ph h3::before{background:var(--coral)}#cams .ph h3::before{background:var(--grape)}
+#detail h3{display:flex;align-items:center;gap:8px}#detail h3::before{content:'';width:9px;height:9px;border-radius:3px;background:var(--sun)}
+/* stat tiles: one colour each */
+.grid{background:transparent;border:0;gap:8px}
+.kv{border-radius:12px;padding:12px 14px}
+.kv:nth-child(1){background:#e0f2fe}.kv:nth-child(1) span{color:#0369a1}
+.kv:nth-child(2){background:var(--leafBg)}.kv:nth-child(2) span{color:#15803d}
+.kv:nth-child(3){background:var(--grapeBg)}.kv:nth-child(3) span{color:#6d28d9}
+.kv:nth-child(4){background:var(--sunBg)}.kv:nth-child(4) span{color:#b45309}
+.at{background:linear-gradient(135deg,#e0f7fb,#ecfeff);border:1px solid #bdeef7}
+/* buttons */
+.btn2.pri{background:linear-gradient(135deg,#0891b2,#0e7490);border-color:#0e7490}.btn2.pri:hover:not(:disabled){background:linear-gradient(135deg,#06b6d4,#0891b2)}
+.legend button,.sbar button,.btn{background:var(--shallow);color:var(--poolInk)}.legend button:hover,.sbar button:hover{background:var(--shallow2)}
+#voBtn{border-color:var(--shallow2)}#voBtn:hover{background:#f0fdff}
+/* pills a touch stronger */
+.pill.go{background:#bbf7d0;color:#14532d}.pill.idle{background:#e2e8f0;color:#334155}.pill.warn{background:#fde68a;color:#78350f}.pill.bad{background:#fecdd3;color:#9f1239}
+/* map pins: parked trucks in deep teal, the selected one in coral */
+.pin{background:#0b4a63}.pin.sel{background:var(--coral)}.clu{background:linear-gradient(135deg,#0e7490,#0b4a63)}
+/* drivers tab */
+.crewhead h2{background:linear-gradient(90deg,#0b4a63,#0891b2);-webkit-background-clip:text;background-clip:text;color:transparent}
+#dsum button[aria-pressed=true]{background:#0b4a63;color:#fff;border-color:#0b4a63}#dsum button[aria-pressed=true] b{color:#fff}
+.rrow:hover{background:#f3fbfc}.rrow.picked{background:var(--shallow)}
+.panel,.pane,#detail,#list,.camcard{box-shadow:0 0 0 1px rgba(14,116,144,.08),0 1px 2px rgba(16,34,46,.05),0 8px 24px -12px rgba(14,116,144,.25)}
 @media(max-width:900px){
  .legend>span{display:none}
  header{padding:12px 16px}.bar{padding:12px 16px 0}.search{flex:1 1 100%}
@@ -1150,7 +1195,7 @@ header{background:linear-gradient(180deg,#0c3550 0%,var(--deep) 100%);box-shadow
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head><body>
 <header>
- <svg class="hwave" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 4 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
+ <svg class="hwave" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M3 9c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0"/><path d="M3 15c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0" opacity=".6"/></svg></div><div>Millennial Pools<small>Fleet</small></div></div>
  <div class="live" id="live"><span class="dot"></span><span id="upd">Connecting to Azuga...</span></div>
  <nav class="tabs"><button data-v="vMap" class="on">Live map</button><button data-v="vEdit">Edit vehicles</button><button data-v="vDrv">Drivers</button></nav>
@@ -1261,8 +1306,17 @@ const speed=r=>{const s=+pick(r,'speed')||0;return /mi|mph/i.test(String(pick(r,
 // Old (stored) locations and finished trips keep their last speed, so don't count them as moving
 const moving=r=>speed(r)>0&&r.storedLocation!==true&&!/stop|end|park|idle|off/i.test(String(pick(r,'tripState','tripStatus')||''));
 const status=r=>moving(r)?'<span class="pill go">'+Math.round(speed(r))+' mph</span>':'<span class="pill idle">Parked</span>';
-const tno=id=>{const L=link(id);return L&&L.linked&&L.truck.truckNo?'<span class="tno">#'+esc(L.truck.truckNo.split(/[ ~(]/)[0])+'</span>':''};
-const avatar=(d,big)=>{const named=/[a-z]/i.test(d);return '<div class="av'+(named?'':' none')+'"'+(big?' style="width:44px;height:44px;font-size:14px"':'')+'>'+(named?esc(initials(d)):ICON.truck)+'</div>'};
+// Make tag: a coloured name chip per brand (plain text, not the manufacturers' logos)
+const MAKES={ford:['Ford','mk-ford'],chevrolet:['Chevy','mk-chevy'],chevy:['Chevy','mk-chevy'],gmc:['GMC','mk-gmc'],nissan:['Nissan','mk-nissan'],toyota:['Toyota','mk-toyota'],ram:['Ram','mk-ram'],dodge:['Dodge','mk-ram'],honda:['Honda','mk-honda'],jeep:['Jeep','mk-jeep']};
+const makeTag=id=>{const L=link(id),v=all().find(x=>vid(x)==id)||vehicles.find(x=>vid(x)==id)||{};const m=clean0((L&&L.linked&&L.truck.make)||v.make).toLowerCase();if(!m)return '';const k=MAKES[m.split(/\s/)[0]];return '<span class="mk '+(k?k[1]:'mk-other')+'">'+esc(k?k[0]:m.replace(/^./,c=>c.toUpperCase()))+'</span>'};
+const clean0=v=>String(v??'').trim();
+// In the list the make tag already names the brand, so drop it from the title ("2022 Chevrolet Colorado" -> "2022 Colorado")
+const shortTitle=r=>{const t=title(r),L=link(vid(r)),m=clean0((L&&L.linked&&L.truck.make)||r.make).toLowerCase();if(!m||!makeTag(vid(r)))return t;const s2=t.split(' ').filter(w=>w.toLowerCase()!==m).join(' ');return s2||t};
+const tno=id=>{const L=link(id);return (L&&L.linked&&L.truck.truckNo?'<span class="tno">#'+esc(L.truck.truckNo.split(/[ ~(]/)[0])+'</span>':'')+makeTag(id)};
+// Every person gets their own colour, the same everywhere (picked from their name)
+const PCOL=[['#dbeafe','#1e40af'],['#dcfce7','#166534'],['#fef3c7','#92400e'],['#fce7f3','#9d174d'],['#ede9fe','#5b21b6'],['#ffedd5','#9a3412'],['#cffafe','#155e75'],['#fee2e2','#991b1b'],['#e0e7ff','#3730a3'],['#ecfccb','#3f6212'],['#f5d0fe','#86198f'],['#ccfbf1','#115e59']];
+const pcol=n=>{let h=0;for(const c of String(n).toLowerCase().replace(/[^a-z]/g,''))h=(h*31+c.charCodeAt(0))>>>0;const [bg,fg]=PCOL[h%PCOL.length];return 'background:'+bg+';color:'+fg};
+const avatar=(d,big)=>{const named=/[a-z]/i.test(d);return '<div class="av'+(named?'':' none')+'" style="'+(named?pcol(d)+';':'')+(big?'width:44px;height:44px;font-size:14px':'')+'">'+(named?esc(initials(d)):ICON.truck)+'</div>'};
 const evName=e=>String(e||'Event').replace(/^CAM_/,'').replace(/_MESSAGE$/,'').replace(/_/g,' ').toLowerCase().replace(/^./,c=>c.toUpperCase()).replace('Hard breaking','Hard braking').replace('Real time disconnect event','Camera disconnected');
 const evClass=e=>/FATIGUE|DISTRACT|VIOLENT|COLLISION|PHONE|SMOK|SPEED/i.test(e)?'bad':'warn';
 const links=o=>JSON.stringify(o).match(/https?:[^"\\\\]+/g)||[];
@@ -1272,7 +1326,7 @@ const map=L.map('map',{zoomControl:true}).setView([40.2,-74.8],8);
 let tileErrs=0;const osm=()=>L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap',maxZoom:19});
 const hot=L.tileLayer('https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png',{subdomains:'abc',attribution:'&copy; OpenStreetMap, tiles by HOT',maxZoom:19}).addTo(map);
 hot.on('tileerror',()=>{if(++tileErrs===6){map.removeLayer(hot);osm().addTo(map)}});
-const Legend=L.Control.extend({onAdd(){const d=L.DomUtil.create('div','legend');d.innerHTML='<span><i style="background:#16a34a"></i>Moving</span><span><i style="background:#0a2c40"></i>Parked</span><span><i style="background:#d62828;border-radius:3px"></i>Office</span><button type="button">Show all trucks</button><button type="button" class="bigbtn" aria-pressed="false">Bigger map</button>';L.DomEvent.disableClickPropagation(d);d.querySelector('button').onclick=fitAll;d.querySelector('.bigbtn').onclick=()=>bigMap(!$('right').classList.contains('big'));return d}});
+const Legend=L.Control.extend({onAdd(){const d=L.DomUtil.create('div','legend');d.innerHTML='<span><i style="background:#16a34a"></i>Moving</span><span><i style="background:#0a2c40"></i>Parked</span><span><i style="background:#fff;border:2px solid #c2410c;border-radius:3px;box-shadow:none"></i>Office</span><button type="button">Show all trucks</button><button type="button" class="bigbtn" aria-pressed="false">Bigger map</button>';L.DomEvent.disableClickPropagation(d);d.querySelector('button').onclick=fitAll;d.querySelector('.bigbtn').onclick=()=>bigMap(!$('right').classList.contains('big'));return d}});
 function bigMap(on){$('right').classList.toggle('big',on);const b=document.querySelector('.bigbtn');if(b){b.textContent=on?'Smaller map':'Bigger map';b.setAttribute('aria-pressed',on)}setTimeout(()=>{map.invalidateSize();const m=sel&&markers[sel];if(m)map.panTo(m.getLatLng(),{animate:false})},0)}
 new Legend({position:'topright'}).addTo(map);
 // Nearby trucks merge into one numbered bubble; trucks parked on the same spot fan out when clicked
@@ -1282,7 +1336,7 @@ map.addLayer(cluster);
 // The yard: 1041 Glassboro Rd (Rt 322), Williamstown. Trucks parked there group under a red office marker.
 const OFFICE=[39.6900,-75.0243],OFFICE_M=250;
 const atOffice=(lat,lng)=>map.distance([lat,lng],OFFICE)<OFFICE_M;
-const OFFICE_SVG='<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21V8l8-5 8 5v13"/><path d="M9 21v-6h6v6"/><path d="M9 10h.01M15 10h.01"/></svg>';
+const OFFICE_SVG='<svg viewBox="0 0 24 24" fill="none" stroke="#c2410c" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21V8l8-5 8 5v13"/><path d="M9 21v-6h6v6"/><path d="M9 10h.01M15 10h.01"/></svg>';
 const officeGroup=L.markerClusterGroup({showCoverageOnHover:false,maxClusterRadius:200,spiderfyOnMaxZoom:true,zoomToBoundsOnClick:false,
   iconCreateFunction:c=>{const ms=c.getAllChildMarkers();return L.divIcon({className:'tm',html:'<span class="office'+(ms.some(m=>m._mv)?' mv':'')+'">'+OFFICE_SVG+'<b>'+ms.length+'</b></span>',iconSize:[0,0]})}});
 officeGroup.on('clusterclick',e=>e.layer.spiderfy());
@@ -1346,7 +1400,7 @@ function render(){
     :filt==='nodriver'&&!$('q').value?'<b>Every truck has a driver</b>Nice and tidy.'
     :'<b>No matches</b>Try a different search, or pick All trucks above.';
   const sig=rs.map(vid).join(),fresh=sig!==listSig;listSig=sig;
-  $('list').innerHTML=rs.length?rs.map((r,i)=>{const d=who(r),named=/[a-z]/i.test(d);return '<div class="card'+(sel==vid(r)?' sel':'')+(fresh?' rise':'')+'" style="--i:'+Math.min(i,14)+'" data-id="'+esc(vid(r))+'" tabindex="0" role="button">'+avatar(d)+'<div class="ci"><div class="top"><b>'+tno(vid(r))+esc(title(r))+'</b>'+status(r)+'</div>'+azSub(r)+'<div class="d">'+(named?esc(d):'<span class="muted">No driver assigned</span>')+'</div><div class="a">'+esc(pick(r,'address','landmark')||'Location unavailable')+'</div></div></div>'}).join(''):'<div class="empty">'+emptyMsg+'</div>';
+  $('list').innerHTML=rs.length?rs.map((r,i)=>{const d=who(r),named=/[a-z]/i.test(d);return '<div class="card'+(sel==vid(r)?' sel':'')+(fresh?' rise':'')+'" style="--i:'+Math.min(i,14)+'" data-id="'+esc(vid(r))+'" tabindex="0" role="button">'+avatar(d)+'<div class="ci"><div class="top"><b>'+tno(vid(r))+esc(shortTitle(r))+'</b>'+status(r)+'</div>'+azSub(r)+'<div class="d">'+(named?esc(d):'<span class="muted">No driver assigned</span>')+'</div><div class="a">'+esc(pick(r,'address','landmark')||'Location unavailable')+'</div></div></div>'}).join(''):'<div class="empty">'+emptyMsg+'</div>';
   document.querySelectorAll('.card').forEach(c=>c.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();select(c.dataset.id)}});
   document.querySelectorAll('.card').forEach(c=>c.onclick=()=>select(c.dataset.id));
   const pts=[],shown=new Set(rs.map(vid));
@@ -1666,7 +1720,7 @@ function renderDrivers(){
   const q=$('q').value.toLowerCase(),ds=all.filter(d=>DF[dfilt][1](d)&&(!q||(d.name+' '+d.trucks.join(' ')+' '+d.license).toLowerCase().includes(q)))
     .sort((a,b)=>inactive(a)-inactive(b)||a.name.localeCompare(b.name));
   [...picked].forEach(id=>{if(!all.some(d=>d.id===id))picked.delete(id)});
-  $('drvRows').innerHTML=(ds.length?ds.map(d=>'<div class="rrow'+(inactive(d)?' off':'')+(picked.has(d.id)?' picked':'')+'" data-id="'+esc(d.id)+'"><input type="checkbox" class="pick" aria-label="Select '+esc(d.name)+'"'+(picked.has(d.id)?' checked':'')+'><div class="mav">'+esc(initials(d.name))+'</div>'
+  $('drvRows').innerHTML=(ds.length?ds.map(d=>'<div class="rrow'+(inactive(d)?' off':'')+(picked.has(d.id)?' picked':'')+'" data-id="'+esc(d.id)+'"><input type="checkbox" class="pick" aria-label="Select '+esc(d.name)+'"'+(picked.has(d.id)?' checked':'')+'><div class="mav" style="'+pcol(d.name)+'">'+esc(initials(d.name))+'</div>'
     +'<div class="rn"><b class="nm">'+esc(d.name)+(inactive(d)?'<span class="tag">Inactive</span>':'')+'</b><span>'+(!d.license&&!inactive(d)?'<em class="nolic">No license #</em>'+(d.policy?' · ':''):'')+esc([d.license&&((d.state?d.state+' ':'')+d.license),!inactive(d)&&d.policy].filter(Boolean).join(' · '))+(d.notes?' · '+esc(d.notes):'')+'</span></div>'
     +'<div class="rt'+(d.trucks.length?'':' none')+'">'+(d.trucks.length?d.trucks.map(esc).join(', '):'No truck')+'</div>'
     +'<div class="rs"><button class="link edbtn">Edit</button>'+(!PEOPLE.azugaOk||inactive(d)?'':d.inAzuga?'<span class="inaz">In Azuga</span>':'<button class="link azbtn">Add to Azuga</button>')+'</div>'
