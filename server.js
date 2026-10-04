@@ -56,14 +56,19 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 // Azuga rate-limits per minute, so every viewer shares one copy of each answer.
 // Concurrent asks share one request; if Azuga errors, the last good answer is served.
 const cache = new Map();
+// Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
+// and served straight away when old while a fresh copy is fetched behind the scenes.
+const KEEP = new Set(['fleetLost', 'scores', 'ramp']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
+  const stale = KEEP.has(key) && c.data !== undefined;
   if (!c.p) c.p = fn()
-    .then(d => { c.data = d; c.t = Date.now(); return d; })
+    .then(d => { c.data = d; c.t = Date.now(); if (KEEP.has(key)) saveSnap(key, d); return d; })
     .catch(e => { if (c.data !== undefined) return c.data; throw e; })
     .finally(() => { c.p = null; });
   cache.set(key, c);
+  if (stale) { c.p.catch(() => {}); return Promise.resolve(c.data); }
   return c.p;
 }
 
@@ -570,11 +575,30 @@ async function syncOne(id) {
   return { ok: true, changed, notes: d.notes };
 }
 
+// ---- Last good copies, saved in Airtable's "Dashboard cache" table ----
+const SNAP_TABLE = 'tblP2fdHIgRfQ5ALr', SNAP = { key: 'fldeMXs698nXAekLG', data: 'fldTJNze6zLAMfX9C', saved: 'fldSbBLNW7Wx0PZeK' };
+function saveSnap(key, d) {
+  const json = JSON.stringify(d);
+  if (!AIRTABLE_TOKEN || json.length > 95000) return;   // Airtable long text holds 100k characters
+  airtable(SNAP_TABLE, { method: 'PATCH', body: JSON.stringify({ performUpsert: { fieldsToMergeOn: [SNAP.key] }, typecast: true,
+    records: [{ fields: { [SNAP.key]: key, [SNAP.data]: json, [SNAP.saved]: new Date().toISOString() } }] }) })
+    .catch(e => console.error('Saving', key, 'failed:', e.message));
+}
+async function loadSnaps() {
+  for (const r of await atAll(SNAP_TABLE, Object.values(SNAP))) {
+    const key = r.fields[SNAP.key], c = cache.get(key) || {};
+    if (!KEEP.has(key) || c.data !== undefined) continue;
+    try { c.data = JSON.parse(r.fields[SNAP.data]); c.t = Date.parse(r.fields[SNAP.saved]) || 0; cache.set(key, c); } catch {}
+  }
+}
+if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) loadSnaps().then(() => console.log('Loaded last saved scores / Ramp spend')).catch(e => console.error('Loading saved copies failed:', e.message));
+
 // ---------------- Azuga Driver Score (0-100, last 30 days) ----------------
 // Azuga's own Scores report: an overall score plus a sub-score per behaviour and the event counts behind it.
 const azIso = d => d.toISOString().replace(/\.(\d{3})Z$/, ':$1Z');   // Azuga wants 2026-09-03T00:00:00:000Z
 const scoreRows = () => cached('scores', 1800, async () => list(await azuga('https://services.azuga.com/reports/v3/reports/score?appId=FLEET',
-  { startDate: azIso(daysAgo(30)), endDate: azIso(new Date()), browserTimezone: 'US/Eastern', reportFilter: 'default', index: 0, size: 500 })));
+  { startDate: azIso(daysAgo(30)), endDate: azIso(new Date()), browserTimezone: 'US/Eastern', reportFilter: 'default', index: 0, size: 500 }))
+  .map(r => ({ userId: r.userId, firstName: r.firstName, lastName: r.lastName, vehicleId: r.vehicleId, score: r.score, distanceTravelled: r.distanceTravelled })));
 const SCORE_PARTS = [   // [label, sub-score field, count field, what the count means]
   ['Phone use', 'distractedDrivingScore', 'distractedDrivingCount', 'distraction'],
   ['Speeding', 'speedingScore', 'overSpeedingCount', 'speeding'],
@@ -918,7 +942,7 @@ async function reconcile(mode) {
 const autoSync = () => reconcile().catch(e => { if (!/already running/.test(e.message)) { SYNC.last = { at: Date.now(), error: e.message }; console.error('Sync failed:', e.message); } });
 // Driver scores: build them in the background (after the first sync settles) so clicking a truck never waits on Azuga
 if (process.argv[2] !== 'test') { const warm = () => fleetLost().then(() => sleep(5000)).then(scoreRows).catch(e => console.error('Score warm-up:', e.message));
-  setTimeout(warm, 90e3); setInterval(warm, 25 * 60e3); }
+  setTimeout(warm, 90e3); setInterval(warm, 31 * 60e3); }   // just past the 30-min cache, so each run refreshes it
 if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) { setTimeout(autoSync, 30e3); setInterval(autoSync, 5 * 60e3); }   // first pass soon after a restart/wake-up
 
 async function readJson(req, max = 10000) {
