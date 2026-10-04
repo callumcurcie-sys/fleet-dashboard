@@ -909,7 +909,7 @@ main{display:grid;grid-template-columns:350px 1fr;gap:14px;padding:12px 24px 24p
 .leg span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dclose{margin-left:8px;font:inherit;font-size:20px;line-height:1;color:var(--muted);background:none;border:0;cursor:pointer;padding:4px 8px;border-radius:8px}.dclose:hover{background:var(--deck)}
 #map{border-radius:var(--r);box-shadow:var(--sh);background:#dfe7e6}
-.leaflet-tile-pane{filter:saturate(.55) sepia(.08) brightness(1.03) contrast(.96)}
+.leaflet-tile-pane{filter:saturate(1.05) contrast(1.02)}
 #map{position:relative}
 /* Truck pins: number labels, colored by status */
 .tm{background:none;border:0}
@@ -1061,6 +1061,13 @@ header{position:relative;overflow:hidden}
 #vMap,#vEdit,#vDrv{animation:fadein .3s ease-out}@keyframes fadein{from{opacity:0}}
 dialog[open]{animation:pop .22s cubic-bezier(.2,.9,.3,1.2)}
 @media (prefers-reduced-motion:reduce){.hwave,.logo,.card.rise,.pill.go::before,#right.open .pane,#right.open #detail,#donut .arc,#donut svg,.evb,.kv b,.tm.drop .pin,#vMap,#vEdit,#vDrv,dialog[open],.vopop{animation:none!important}.card:hover,.card:hover .av,.rrow:hover .mav{transform:none}}
+.office{position:absolute;left:0;top:0;transform:translate(-50%,-50%);display:flex;align-items:center;gap:5px;height:38px;padding:0 11px 0 9px;border-radius:19px;background:#d62828;border:3px solid #fff;box-shadow:0 4px 14px rgba(150,20,20,.45);color:#fff;font:800 14px/1 Figtree,system-ui,sans-serif;white-space:nowrap;cursor:pointer;transition:transform .15s}
+.office svg{width:20px;height:20px}.office b{font-weight:800}.office.mv{box-shadow:0 0 0 3px #16a34a,0 4px 14px rgba(150,20,20,.45)}
+.office.empty{height:30px;padding:0 6px;background:#d62828;opacity:.9}.office.empty svg{width:16px;height:16px}
+.tm:hover .office{transform:translate(-50%,-50%) scale(1.08)}
+.office::after{content:'';position:absolute;inset:-3px;border-radius:inherit;border:2px solid #d62828;animation:ripple 3s ease-out infinite;opacity:.6}
+.office.empty::after{display:none}
+@media (prefers-reduced-motion:reduce){.office::after{animation:none;display:none}}
 .toast{position:fixed;right:20px;bottom:20px;z-index:9999;max-width:380px;background:var(--deep);color:#fff;padding:12px 16px;border-radius:12px;box-shadow:0 10px 30px rgba(10,44,64,.35);font-size:13px;animation:tin .2s ease-out}
 .toast.bad{background:var(--bad)}@keyframes tin{from{opacity:0;transform:translateY(8px)}}@media (prefers-reduced-motion:reduce){.toast{animation:none}}
 .syncp{margin:0 0 12px}.syncp:empty{display:none}.syncp.sm{margin:10px 0 0;font-size:12px}
@@ -1261,14 +1268,27 @@ const evClass=e=>/FATIGUE|DISTRACT|VIOLENT|COLLISION|PHONE|SMOK|SPEED/i.test(e)?
 const links=o=>JSON.stringify(o).match(/https?:[^"\\\\]+/g)||[];
 let vehicles=[],locs=[],maint=null,sel=null,markers={};
 const map=L.map('map',{zoomControl:true}).setView([40.2,-74.8],8);
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap',maxZoom:19}).addTo(map);
-const Legend=L.Control.extend({onAdd(){const d=L.DomUtil.create('div','legend');d.innerHTML='<span><i style="background:#16a34a"></i>Moving</span><span><i style="background:#0a2c40"></i>Parked</span><button type="button">Show all trucks</button><button type="button" class="bigbtn" aria-pressed="false">Bigger map</button>';L.DomEvent.disableClickPropagation(d);d.querySelector('button').onclick=fitAll;d.querySelector('.bigbtn').onclick=()=>bigMap(!$('right').classList.contains('big'));return d}});
+// Humanitarian OSM style: brighter parks, water and roads. Falls back to standard OSM if its server struggles.
+let tileErrs=0;const osm=()=>L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap',maxZoom:19});
+const hot=L.tileLayer('https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png',{subdomains:'abc',attribution:'&copy; OpenStreetMap, tiles by HOT',maxZoom:19}).addTo(map);
+hot.on('tileerror',()=>{if(++tileErrs===6){map.removeLayer(hot);osm().addTo(map)}});
+const Legend=L.Control.extend({onAdd(){const d=L.DomUtil.create('div','legend');d.innerHTML='<span><i style="background:#16a34a"></i>Moving</span><span><i style="background:#0a2c40"></i>Parked</span><span><i style="background:#d62828;border-radius:3px"></i>Office</span><button type="button">Show all trucks</button><button type="button" class="bigbtn" aria-pressed="false">Bigger map</button>';L.DomEvent.disableClickPropagation(d);d.querySelector('button').onclick=fitAll;d.querySelector('.bigbtn').onclick=()=>bigMap(!$('right').classList.contains('big'));return d}});
 function bigMap(on){$('right').classList.toggle('big',on);const b=document.querySelector('.bigbtn');if(b){b.textContent=on?'Smaller map':'Bigger map';b.setAttribute('aria-pressed',on)}setTimeout(()=>{map.invalidateSize();const m=sel&&markers[sel];if(m)map.panTo(m.getLatLng(),{animate:false})},0)}
 new Legend({position:'topright'}).addTo(map);
 // Nearby trucks merge into one numbered bubble; trucks parked on the same spot fan out when clicked
 const cluster=L.markerClusterGroup({showCoverageOnHover:false,maxClusterRadius:42,spiderfyOnMaxZoom:true,
   iconCreateFunction:c=>{const ms=c.getAllChildMarkers();return L.divIcon({className:'tm',html:'<span class="clu'+(ms.some(m=>m._mv)?' mv':'')+'">'+ms.length+'</span>',iconSize:[0,0]})}});
 map.addLayer(cluster);
+// The yard: 1041 Glassboro Rd (Rt 322), Williamstown. Trucks parked there group under a red office marker.
+const OFFICE=[39.6900,-75.0243],OFFICE_M=250;
+const atOffice=(lat,lng)=>map.distance([lat,lng],OFFICE)<OFFICE_M;
+const OFFICE_SVG='<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21V8l8-5 8 5v13"/><path d="M9 21v-6h6v6"/><path d="M9 10h.01M15 10h.01"/></svg>';
+const officeGroup=L.markerClusterGroup({showCoverageOnHover:false,maxClusterRadius:200,spiderfyOnMaxZoom:true,zoomToBoundsOnClick:false,
+  iconCreateFunction:c=>{const ms=c.getAllChildMarkers();return L.divIcon({className:'tm',html:'<span class="office'+(ms.some(m=>m._mv)?' mv':'')+'">'+OFFICE_SVG+'<b>'+ms.length+'</b></span>',iconSize:[0,0]})}});
+officeGroup.on('clusterclick',e=>e.layer.spiderfy());
+officeGroup.on('clustermouseover',e=>e.layer.bindTooltip('Office · '+e.layer.getChildCount()+' trucks in the yard · click to see them',{direction:'top',offset:[0,-20]}).openTooltip());
+map.addLayer(officeGroup);
+const officePin=L.marker(OFFICE,{icon:L.divIcon({className:'tm',html:'<span class="office empty">'+OFFICE_SVG+'</span>',iconSize:[0,0]}),keyboard:false,zIndexOffset:-100}).bindTooltip('Office · 1041 Glassboro Rd',{direction:'top',offset:[0,-16]});
 let lastPts=[];function fitAll(){if(lastPts.length)map.fitBounds(lastPts,{paddingTopLeft:[40,80],paddingBottomRight:[40,40],maxZoom:13})}
 let fitted=false;
 
@@ -1330,16 +1350,17 @@ function render(){
   document.querySelectorAll('.card').forEach(c=>c.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();select(c.dataset.id)}});
   document.querySelectorAll('.card').forEach(c=>c.onclick=()=>select(c.dataset.id));
   const pts=[],shown=new Set(rs.map(vid));
-  Object.entries(markers).forEach(([id,m])=>{if(!shown.has(id)&&cluster.hasLayer(m))cluster.removeLayer(m)});
+  Object.entries(markers).forEach(([id,m])=>{if(!shown.has(id)){cluster.removeLayer(m);officeGroup.removeLayer(m)}});let nOffice=0;
   rs.forEach(r=>{const lat=+pick(r,'latitude','lat'),lng=+pick(r,'longitude','lng','lon');if(!lat||!lng)return;pts.push([lat,lng]);
     const id=vid(r),isSel=sel==id,mv=moving(r),L2=link(id),num=L2&&L2.linked&&L2.truck.truckNo?L2.truck.truckNo.split(/[ ~(]/)[0]:'';
     const label=num||(/[a-z]/i.test(who(r))?initials(who(r)):'')||ICON.truck;
     const html='<span class="pin'+(mv?' mv':'')+(isSel?' sel':'')+'">'+(num||!/</.test(label)?esc(label):label)+'</span>';
-    const isNew=!markers[id],m=markers[id]||(markers[id]=L.marker([lat,lng],{icon:L.divIcon({className:'tm drop',html,iconSize:[0,0]}),keyboard:false}).on('click',()=>select(id)));m._mv=mv;if(!cluster.hasLayer(m))cluster.addLayer(m);
+    const isNew=!markers[id],m=markers[id]||(markers[id]=L.marker([lat,lng],{icon:L.divIcon({className:'tm drop',html,iconSize:[0,0]}),keyboard:false}).on('click',()=>select(id)));m._mv=mv;const home=atOffice(lat,lng)?officeGroup:cluster,away=home===cluster?officeGroup:cluster;if(home===officeGroup)nOffice++;if(away.hasLayer(m))away.removeLayer(m);if(!home.hasLayer(m))home.addLayer(m);
     if(m._html!==html){m.setIcon(L.divIcon({className:'tm',html,iconSize:[0,0]}));m._html=html}
     m.setLatLng([lat,lng]).setZIndexOffset(isSel?1000:mv?500:0).bindTooltip(esc(title(r))+(/[a-z]/i.test(who(r))?' · '+esc(who(r)):'')+(mv?' · '+Math.round(speed(r))+' mph':''),{direction:'top',offset:[0,-14]});
   });
-  cluster.refreshClusters();
+  cluster.refreshClusters();officeGroup.refreshClusters();
+  if(nOffice<2&&!map.hasLayer(officePin))officePin.addTo(map);else if(nOffice>=2&&map.hasLayer(officePin))map.removeLayer(officePin);   // landmark when the yard is (nearly) empty
   lastPts=pts;if(!fitted&&pts.length){fitAll();fitted=true}
 }
 async function select(id){
