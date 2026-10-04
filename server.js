@@ -78,7 +78,8 @@ const routes = {
     startTime: fmt(daysAgo(365)), endTime: fmt(daysAgo(-365)), isCount: 'false',
   }))),
   '/api/ramp': async q => { const r = await rampFor(q.get('name') || '');   // plus miles driven, for gas per mile
-    if (r.person && r.person.gas > 0) { const az = await azugaScore(q.get('vehicleId') || '', q.get('name') || '').catch(() => null);
+    if (r.person && r.person.gas > 0) { const az = await azugaScore(q.get('vehicleId') || '', q.get('name') || '').catch(e => { r.milesError = e.message; return null; });
+      if (!az && !r.milesError) r.milesError = 'Azuga has no miles for this driver in the last 30 days.';
       if (az && az.miles > 50) r.gasPerMile = { miles: az.miles, perMile: r.person.gas / az.miles, max: GAS_PER_MILE_MAX, points: GAS_POINTS }; }
     return r; },
   '/api/score': q => scoreFor(q.get('vehicleId') || '', q.get('name') || ''),
@@ -611,39 +612,63 @@ const GAS_PER_MILE_MAX = 0.5, GAS_POINTS = 10;      // pickups run ~$0.20/mi; ov
 const eventKind = code => { const t = String(code || '').replace(/^CAM_/, '').replace(/_MESSAGE$/, '').replace(/_/g, ' ').toLowerCase();
   const hit = EVENT_POINTS.find(([, re]) => re.test(t));
   return hit ? { label: hit[0], pts: hit[2] } : { label: t.replace(/^./, c => c.toUpperCase()) || 'Other event', pts: 2 }; };
-// 30 days of camera events, fetched a week at a time
-const events30 = () => cached('events30', 1800, async () => {
+// 30 days of camera events. Azuga limits requests per minute, so: one 30-day ask with a pause between pages,
+// and only if it comes back without anything older than a week (Azuga may cap the range) fetch the older weeks separately.
+const evTime = x => +(x.eventTime || x.startTime) || Date.parse(x.eventTime || x.startTime) || 0;
+async function evRange(from, to) {
   let ev = [];
-  for (let w = 0; w < 5; w++) {
-    const body = { startTime: fmt(daysAgo(Math.min(30, 7 * (w + 1)))), endTime: fmt(daysAgo(7 * w)), limit: 100 };
-    for (let page = 1; page <= 10; page++) { const p = list(await azuga('/eventVideos.json?videoType=eventVideo', { ...body, page })); ev = ev.concat(p); if (p.length < 100) break; }
+  for (let page = 1; page <= 30; page++) {
+    const p = list(await azuga('/eventVideos.json?videoType=eventVideo', { startTime: fmt(from), endTime: fmt(to), limit: 100, page }));
+    ev = ev.concat(p); if (p.length < 100) break; await sleep(1200);
   }
-  const seen = new Set();   // weeks share an edge; drop repeats
+  return ev;
+}
+const events30 = () => cached('events30', 1800, async () => {
+  let ev = await evRange(daysAgo(30), new Date());
+  if (!ev.some(x => evTime(x) && evTime(x) < +daysAgo(8)))
+    for (let w = 1; w < 5; w++) { await sleep(1500); ev = ev.concat(await evRange(daysAgo(Math.min(30, 7 * (w + 1))), daysAgo(7 * w))); }
+  const seen = new Set();   // ranges share an edge; drop repeats
   return ev.filter(x => { const k = [x.vehicleId, x.eventTime || x.startTime, x.eventType].join('|'); if (seen.has(k)) return false; seen.add(k); return true; });
 });
-async function scoreFor(vehicleId, name) {
-  const evs = await events30();
-  // Events count against whoever Azuga recorded as driving; events with no driver recorded go to this truck's current driver
-  const rec = x => dupeName([x.firstName, x.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, '') || x.driverName || '');
-  const mine = evs.filter(x => name ? rec(x) === dupeName(name) || (!rec(x) && String(x.vehicleId) === String(vehicleId)) : String(x.vehicleId) === String(vehicleId));
-  const by = {};
-  for (const x of mine) {
-    const k = eventKind(x.eventType); if (!k.pts) continue;
+const CAP_EVENTS = 3;   // each kind of event counts at most 3 times (phone use: max -18), so one bad habit can't zero the score
+// Points lost by every driver in the fleet (camera events, last 30 days), for capping and ranking
+const fleetLost = () => cached('fleetLost', 1800, async () => {
+  const [evs, vs] = await Promise.all([events30(), routes['/api/vehicles']().then(list).catch(() => [])]);
+  const cur = {}; vs.forEach(v => { cur[v.trackeeId] = v.userName || [v.userFirstName, v.userLastName].filter(Boolean).join(' '); });
+  const rec = x => [x.firstName, x.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, '') || x.driverName || '';
+  const ppl = {};
+  for (const x of evs) {
+    const who = rec(x) || cur[x.vehicleId] || '', key = dupeName(who), k = eventKind(x.eventType);   // no driver recorded: the truck's current driver
+    if (!key || !k.pts) continue;
+    const pr = ppl[key] = ppl[key] || { name: who, by: {} };
+    const b = pr.by[k.label] = pr.by[k.label] || { label: k.label, count: 0, each: k.pts, days: new Set() };
     const t = +(x.eventTime || x.startTime) || Date.parse(x.eventTime || x.startTime) || 0;
-    const b = by[k.label] = by[k.label] || { label: k.label, count: 0, points: 0, each: k.pts, days: new Set() };
-    b.count++; b.points += k.pts; if (t) b.days.add(new Date(t).toLocaleDateString('en-US', { timeZone: 'America/New_York' }));
+    b.count++; if (t) b.days.add(new Date(t).toLocaleDateString('en-US', { timeZone: 'America/New_York' }));
   }
-  const items = Object.values(by).map(b => ({ label: b.label, count: b.count, points: b.points, days: b.days.size }));
-  for (const b of items) if (b.days >= REPEAT_DAYS) b.points += REPEAT_POINTS, b.repeat = true;
-  const az = await azugaScore(vehicleId, name).catch(() => null);
+  for (const pr of Object.values(ppl)) {
+    pr.items = Object.values(pr.by).map(b => { const it = { label: b.label, count: b.count, each: b.each, days: b.days.size, points: b.each * Math.min(b.count, CAP_EVENTS) };
+      if (it.days >= REPEAT_DAYS) { it.points += REPEAT_POINTS; it.repeat = true; } return it; }).sort((a, b) => b.points - a.points);
+    pr.lost = pr.items.reduce((t, b) => t + b.points, 0); delete pr.by;
+  }
+  return ppl;
+});
+async function scoreFor(vehicleId, name) {
+  const ppl = await fleetLost();
+  if (!name) { const v = list(await routes['/api/vehicles']()).find(x => x.trackeeId === vehicleId) || {}; name = v.userName || ''; }
+  const me = ppl[dupeName(name)] || { items: [], lost: 0 };
+  let azugaError = null;
+  const az = await azugaScore(vehicleId, name).catch(e => { azugaError = e.message; return null; });
   let gas = null;   // Ramp gas vs miles driven
   if (name && az && az.miles > 50) try {
     const r = await rampFor(name);
     if (r.person && r.person.gas > 0) { const per = r.person.gas / az.miles; gas = { spend: r.person.gas, miles: az.miles, perMile: per, points: per > GAS_PER_MILE_MAX ? GAS_POINTS : 0 }; }
   } catch {}
-  const lost = items.reduce((t, b) => t + b.points, 0) + (gas ? gas.points : 0);
-  items.sort((a, b) => b.points - a.points);
-  return { found: true, score: Math.max(0, 100 - lost), items, gas, azuga: az && az.score, events: mine.length };
+  const lost = me.lost + (gas ? gas.points : 0);
+  // Scored against the fleet: no points lost = 100, the worst driver this month = 40, everyone else in between
+  const all = Object.values(ppl).map(p => p.lost), worst = Math.max(lost, ...all, 1);
+  const score = Math.round(100 - 60 * lost / worst);
+  const rank = 1 + all.filter(x => x < me.lost).length;
+  return { found: true, score, rank, of: all.length + (ppl[dupeName(name)] ? 0 : 1), items: me.items, lost, gas, azuga: az && az.score, miles: az && az.miles, azugaError };
 }
 // ---------------- Ramp: each driver's card spend over the last 30 days ----------------
 // Needs RAMP_CLIENT_ID / RAMP_CLIENT_SECRET (a Ramp developer app with transactions:read, reimbursements:read, users:read) in Render.
@@ -891,6 +916,9 @@ async function reconcile(mode) {
 }
 // Every 5 minutes while the server is awake
 const autoSync = () => reconcile().catch(e => { if (!/already running/.test(e.message)) { SYNC.last = { at: Date.now(), error: e.message }; console.error('Sync failed:', e.message); } });
+// Driver scores: build them in the background (after the first sync settles) so clicking a truck never waits on Azuga
+if (process.argv[2] !== 'test') { const warm = () => fleetLost().then(() => sleep(5000)).then(scoreRows).catch(e => console.error('Score warm-up:', e.message));
+  setTimeout(warm, 90e3); setInterval(warm, 25 * 60e3); }
 if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) { setTimeout(autoSync, 30e3); setInterval(autoSync, 5 * 60e3); }   // first pass soon after a restart/wake-up
 
 async function readJson(req, max = 10000) {
@@ -1890,10 +1918,10 @@ async function scoreTile(id,name){const el=$('kscore');if(!el)return;const b=el.
   if(sel!=id)return;
   el.classList.add(r.score>=85?'good':r.score>=70?'ok':'bad');b.innerHTML=r.score+'<i>/100</i>';
   const top=r.items[0],gasBad=r.gas&&r.gas.points;
-  sm.textContent=top?'↓ '+top.label+' ×'+top.count:gasBad?'↓ High gas per mile':'No safety events';
+  sm.textContent='#'+r.rank+' of '+r.of+(top?' · '+top.label:gasBad?' · gas/mile':' · no events');
   const money=n=>'$'+n.toFixed(2);
-  el.title=['Driver score, last 30 days (starts at 100)'].concat(
-    r.items.map(x=>x.label+' ×'+x.count+(x.repeat?' on '+x.days+' days (repeat +5)':'')+': -'+x.points),
+  el.title=['Driver score, last 30 days: #'+r.rank+' of '+r.of+' drivers','100 = no points lost, 40 = worst in the fleet. Each event type counts at most 3 times.',''].concat(
+    r.items.map(x=>x.label+' ×'+x.count+(x.count>3?' (counted 3)':'')+(x.repeat?', '+x.days+' days (repeat +5)':'')+': -'+x.points),
     r.gas?['Gas '+money(r.gas.spend)+' for '+Math.round(r.gas.miles)+' mi = '+money(r.gas.perMile)+'/mi'+(r.gas.points?': -'+r.gas.points:' (ok)')]:[],
     r.azuga!=null?['Azuga score: '+r.azuga]:[]).join('\\n')}
 // Driver's Ramp spend (cards + reimbursements), last 30 days: gas vs everything else
