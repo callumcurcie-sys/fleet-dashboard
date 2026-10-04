@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['fleetLost', 'scores', 'ramp']);
+const KEEP = new Set(['scores', 'ramp']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -87,7 +87,7 @@ const routes = {
       if (!az && !r.milesError) r.milesError = 'Azuga has no miles for this driver in the last 30 days.';
       if (az && az.miles > 50) r.gasPerMile = { miles: az.miles, perMile: r.person.gas / az.miles, max: GAS_PER_MILE_MAX, points: GAS_POINTS }; }
     return r; },
-  '/api/score/status': () => ({ jobs: WARM, events: !!(cache.get('fleetLost') || {}).data, miles: !!(cache.get('scores') || {}).data }),
+  '/api/score/status': () => ({ jobs: WARM, events: Object.keys(EVA.ev).length, weeksBackfilled: EVA.weeks, miles: !!(cache.get('scores') || {}).data }),
   '/api/score': q => scoreFor(q.get('vehicleId') || '', q.get('name') || ''),
   '/api/videos': q => {
     const id = q.get('vehicleId') || '';
@@ -98,6 +98,7 @@ const routes = {
       // Clips someone asked the camera for (from this dashboard or Azuga's site)
       let rq = []; try { rq = list(await azuga('/eventVideos.json?videoType=requestedVideo', body)).map(x => ({ ...x, eventType: x.eventType || 'Requested clip', requested: true })); } catch (e) { console.error('Requested videos:', e.message); }
       const t = x => +(x.eventTime || x.startTime || 0) || Date.parse(x.eventTime || x.startTime) || 0;
+      if (!id) addEvents(ev);   // feeds the driver-score archive
       return [...rq, ...ev].sort((a, b) => t(b) - t(a));
     });
   },
@@ -580,7 +581,8 @@ async function syncOne(id) {
 const SNAP_TABLE = 'tblP2fdHIgRfQ5ALr', SNAP = { key: 'fldeMXs698nXAekLG', data: 'fldTJNze6zLAMfX9C', saved: 'fldSbBLNW7Wx0PZeK' };
 function saveSnap(key, d) {
   const json = JSON.stringify(d);
-  if (!AIRTABLE_TOKEN || json.length > 95000) return;   // Airtable long text holds 100k characters
+  if (!AIRTABLE_TOKEN) return;
+  if (json.length > 95000) return console.error('Not saving', key, '- too big for Airtable (' + json.length + ' chars)');   // long text holds 100k
   airtable(SNAP_TABLE, { method: 'PATCH', body: JSON.stringify({ performUpsert: { fieldsToMergeOn: [SNAP.key] }, typecast: true,
     records: [{ fields: { [SNAP.key]: key, [SNAP.data]: json, [SNAP.saved]: new Date().toISOString() } }] }) })
     .catch(e => console.error('Saving', key, 'failed:', e.message));
@@ -588,6 +590,7 @@ function saveSnap(key, d) {
 async function loadSnaps() {
   for (const r of await atAll(SNAP_TABLE, Object.values(SNAP))) {
     const key = r.fields[SNAP.key], c = cache.get(key) || {};
+    if (key === 'events') { try { const a = JSON.parse(r.fields[SNAP.data]); addEvents(Object.values(a.ev || {})); EVA.weeks = [...new Set(EVA.weeks.concat(a.weeks || []))]; } catch {} continue; }
     if (!KEEP.has(key) || c.data !== undefined) continue;
     try { c.data = JSON.parse(r.fields[SNAP.data]); c.t = Date.parse(r.fields[SNAP.saved]) || 0; cache.set(key, c); } catch {}
   }
@@ -596,9 +599,9 @@ if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) loadSnaps().then(() => console
 
 // ---------------- Azuga Driver Score (0-100, last 30 days) ----------------
 // Azuga's own Scores report: an overall score plus a sub-score per behaviour and the event counts behind it.
-const azIso = d => d.toISOString().replace(/\.(\d{3})Z$/, ':$1Z');   // Azuga wants 2026-09-03T00:00:00:000Z
+const azIso = d => d.toISOString();   // Azuga's example: 2022-10-16T04:00:00.000Z
 const scoreRows = () => cached('scores', 1800, async () => list(await azuga('https://services.azuga.com/reports/v3/reports/score?appId=FLEET',
-  { startDate: azIso(daysAgo(30)), endDate: azIso(new Date()), browserTimezone: 'US/Eastern', reportFilter: 'default', index: 0, size: 500 }))
+  { startDate: azIso(daysAgo(30)), endDate: azIso(new Date()), browserTimezone: 'US/Eastern', reportFilter: 'default', index: 0, size: 500, desc: false, filter: { orFilter: {}, matchFilter: {} } }))
   .map(r => ({ userId: r.userId, firstName: r.firstName, lastName: r.lastName, vehicleId: r.vehicleId, score: r.score, distanceTravelled: r.distanceTravelled })));
 const SCORE_PARTS = [   // [label, sub-score field, count field, what the count means]
   ['Phone use', 'distractedDrivingScore', 'distractedDrivingCount', 'distraction'],
@@ -638,28 +641,36 @@ const GAS_PER_MILE_MAX = 0.5, GAS_POINTS = 10;      // pickups run ~$0.20/mi; ov
 const eventKind = code => { const t = String(code || '').replace(/^CAM_/, '').replace(/_MESSAGE$/, '').replace(/_/g, ' ').toLowerCase();
   const hit = EVENT_POINTS.find(([, re]) => re.test(t));
   return hit ? { label: hit[0], pts: hit[2] } : { label: t.replace(/^./, c => c.toUpperCase()) || 'Other event', pts: 2 }; };
-// 30 days of camera events. Azuga limits requests per minute, so: one 30-day ask with a pause between pages,
-// and only if it comes back without anything older than a week (Azuga may cap the range) fetch the older weeks separately.
-const evTime = x => +(x.eventTime || x.startTime) || Date.parse(x.eventTime || x.startTime) || 0;
-async function evRange(from, to) {
-  let ev = [];
-  for (let page = 1; page <= 30; page++) {
-    const p = list(await azuga('/eventVideos.json?videoType=eventVideo', { startTime: fmt(from), endTime: fmt(to), limit: 100, page }));
-    ev = ev.concat(p); if (p.length < 100) break; await sleep(1200);
+// 30 days of camera events, kept as an archive instead of one big Azuga pull (Azuga rate-limits that):
+// every time the map fetches the fleet's last 7 days we add them in, and a slow backfill fetches the older weeks once.
+// The archive is saved in "Dashboard cache" so it survives restarts.
+const evTime = x => x.t || +(x.eventTime || x.startTime) || Date.parse(x.eventTime || x.startTime) || 0;
+const EVA = { ev: {}, weeks: [] };   // ev: key -> trimmed event; weeks: older weeks already backfilled (1 = 7-14 days ago ...)
+let evaDirty = false;
+function addEvents(list) {
+  const old = Date.now() - 31 * 864e5; let changed = false;
+  for (const x of list) {
+    const t = evTime(x); if (!t || t < old || x.requested) continue;
+    const k = [x.vehicleId, t, x.eventType].join('|');
+    if (!EVA.ev[k]) { EVA.ev[k] = { vehicleId: x.vehicleId, t, eventType: x.eventType, firstName: x.firstName, lastName: x.lastName, driverName: x.driverName }; changed = true; }
   }
-  return ev;
+  for (const k in EVA.ev) if (EVA.ev[k].t < old) { delete EVA.ev[k]; changed = true; }
+  if (changed) { evaDirty = true; cache.delete('fleetLost'); }
 }
-const events30 = () => cached('events30', 1800, async () => {
-  let ev = await evRange(daysAgo(30), new Date());
-  if (!ev.some(x => evTime(x) && evTime(x) < +daysAgo(8)))
-    for (let w = 1; w < 5; w++) { await sleep(1500); ev = ev.concat(await evRange(daysAgo(Math.min(30, 7 * (w + 1))), daysAgo(7 * w))); }
-  const seen = new Set();   // ranges share an edge; drop repeats
-  return ev.filter(x => { const k = [x.vehicleId, x.eventTime || x.startTime, x.eventType].join('|'); if (seen.has(k)) return false; seen.add(k); return true; });
-});
+const events30 = async () => Object.values(EVA.ev);
+setInterval(() => { if (evaDirty) { evaDirty = false; saveSnap('events', EVA); } }, 5 * 60e3);   // save at most every 5 min
+async function backfillWeek() {   // one older week per run, gently
+  const w = [1, 2, 3, 4].find(n => !EVA.weeks.includes(n)); if (!w) return;
+  for (let page = 1; page <= 10; page++) {
+    const p = list(await azuga('/eventVideos.json?videoType=eventVideo', { startTime: fmt(daysAgo(Math.min(31, 7 * (w + 1)))), endTime: fmt(daysAgo(7 * w)), limit: 100, page }));
+    addEvents(p); if (p.length < 100) break; await sleep(20000);
+  }
+  EVA.weeks.push(w); evaDirty = true;
+}
 const WARM = {};   // background job results, shown at /api/score/status
 const CAP_EVENTS = 3;   // each kind of event counts at most 3 times (phone use: max -18), so one bad habit can't zero the score
 // Points lost by every driver in the fleet (camera events, last 30 days), for capping and ranking
-const fleetLost = () => cached('fleetLost', 1800, async () => {
+const fleetLost = () => cached('fleetLost', 300, async () => {
   const [evs, vs] = await Promise.all([events30(), routes['/api/vehicles']().then(list).catch(() => [])]);
   const cur = {}; vs.forEach(v => { cur[v.trackeeId] = v.userName || [v.userFirstName, v.userLastName].filter(Boolean).join(' '); });
   const rec = x => [x.firstName, x.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, '') || x.driverName || '';
@@ -669,7 +680,7 @@ const fleetLost = () => cached('fleetLost', 1800, async () => {
     if (!key || !k.pts) continue;
     const pr = ppl[key] = ppl[key] || { name: who, by: {} };
     const b = pr.by[k.label] = pr.by[k.label] || { label: k.label, count: 0, each: k.pts, days: new Set() };
-    const t = +(x.eventTime || x.startTime) || Date.parse(x.eventTime || x.startTime) || 0;
+    const t = x.t || evTime(x);
     b.count++; if (t) b.days.add(new Date(t).toLocaleDateString('en-US', { timeZone: 'America/New_York' }));
   }
   for (const pr of Object.values(ppl)) {
@@ -680,7 +691,7 @@ const fleetLost = () => cached('fleetLost', 1800, async () => {
   return ppl;
 });
 async function scoreFor(vehicleId, name) {
-  if (!(cache.get('fleetLost') || {}).data) throw new Error('Still collecting 30 days of camera events from Azuga' + (WARM.events && WARM.events.error ? '. Last try: ' + WARM.events.error : '. Check back in a few minutes.'));
+  if (!Object.keys(EVA.ev).length && !EVA.weeks.length) throw new Error('Still collecting camera events from Azuga. Check back in a few minutes.');
   const ppl = await fleetLost();
   if (!name) { const v = list(await routes['/api/vehicles']()).find(x => x.trackeeId === vehicleId) || {}; name = v.userName || ''; }
   const me = ppl[dupeName(name)] || { items: [], lost: 0 };
@@ -949,7 +960,12 @@ const autoSync = () => reconcile().catch(e => { if (!/already running/.test(e.me
 if (process.argv[2] !== 'test') {
   const job = (name, fn) => { const run = () => fn().then(() => { WARM[name] = { ok: new Date().toISOString() }; setTimeout(run, 31 * 60e3); },
     e => { WARM[name] = { error: e.message, at: new Date().toISOString() }; console.error('Score warm-up', name + ':', e.message); setTimeout(run, 3 * 60e3); }); return run; };
-  setTimeout(job('miles', scoreRows), 90e3); setTimeout(job('events', fleetLost), 150e3);
+  setTimeout(job('miles', scoreRows), 90e3);
+  const week = () => routes['/api/videos'](new URLSearchParams()).then(() => setTimeout(week, 10 * 60e3), () => setTimeout(week, 3 * 60e3));
+  setTimeout(week, 45e3);
+  const back = () => backfillWeek().then(() => { WARM.backfill = { ok: new Date().toISOString(), weeks: EVA.weeks }; if (EVA.weeks.length < 4) setTimeout(back, 5 * 60e3); },
+    e => { WARM.backfill = { error: e.message, at: new Date().toISOString() }; setTimeout(back, 5 * 60e3); });
+  setTimeout(back, 4 * 60e3);
 }
 if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) { setTimeout(autoSync, 30e3); setInterval(autoSync, 5 * 60e3); }   // first pass soon after a restart/wake-up
 
@@ -1946,7 +1962,7 @@ else requestAnimationFrame(waveTick);
 // ---- Self-cleaning page: notices fade, messages clear, data refreshes, idle page reloads ----
 // Azuga Driver Score tile: score out of 100, colored, plus the behaviour costing the most points
 async function scoreTile(id,name){const el=$('kscore');if(!el)return;const b=el.querySelector('b'),sm=el.querySelector('small');let r;
-  try{r=await get('/api/score?vehicleId='+encodeURIComponent(id)+'&name='+encodeURIComponent(name||''))}catch(e){if(sel==id){b.textContent='–';sm.textContent='Score unavailable';el.title=e.message}return}
+  try{r=await get('/api/score?vehicleId='+encodeURIComponent(id)+'&name='+encodeURIComponent(name||''))}catch(e){if(sel==id){b.textContent='–';sm.textContent=/collecting/i.test(e.message)?'Collecting data…':'Score unavailable';el.title=e.message}return}
   if(sel!=id)return;
   el.classList.add(r.score>=85?'good':r.score>=70?'ok':'bad');b.innerHTML=r.score+'<i>/100</i>';
   const top=r.items[0],gasBad=r.gas&&r.gas.points;
