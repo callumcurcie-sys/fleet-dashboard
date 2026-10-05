@@ -2021,27 +2021,23 @@ body[data-v=vPom] .vopt,body[data-v=vCam] .vopt{display:none}body[data-v=vPom] .
 .brand>div:last-child{text-shadow:none;filter:drop-shadow(0 1px 6px rgba(0,0,0,.3))}@keyframes namesh{0%,100%{background-position:0 0}50%{background-position:100% 0}}
 @media (prefers-reduced-motion:reduce){#bubbles,.brand>div:last-child{animation:none!important}#bubbles{display:none}}
 
-/* Cameras tab: inbox + big preview */
-#vCam{max-width:1400px}body[data-v=vCam] .bar{max-width:1400px}#camSort{font:inherit;padding:7px 10px;border:1px solid var(--line2);border-radius:10px;background:#fff}
-.cinbox{display:grid;grid-template-columns:minmax(320px,400px) 1fr;gap:14px;align-items:start}
-.clist{background:var(--card);border-radius:16px;box-shadow:inset 0 3px 0 var(--c-cams),var(--sh);max-height:calc(100vh - 290px);min-height:420px;overflow:auto;padding:6px}
-.cgh{position:sticky;top:-6px;z-index:1;display:flex;justify-content:space-between;align-items:center;padding:10px 10px 6px;margin:0 -6px;background:linear-gradient(var(--card) 80%,transparent);font-size:12px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--ink2)}
-.cgh span{font-weight:600;color:var(--muted);background:var(--deck2);border-radius:99px;padding:1px 8px;letter-spacing:0}
-.crow{width:100%;display:flex;align-items:center;gap:10px;font:inherit;text-align:left;color:inherit;background:none;border:0;border-radius:11px;padding:7px 8px;cursor:pointer;transition:background .12s}
-.crow:hover{background:#f5f3ff}.crow.on{background:#ede9fe;box-shadow:inset 3px 0 0 #8b5cf6}
-.cth{position:relative;flex:none;width:64px;height:40px;border-radius:7px;overflow:hidden;background:#1e293b}.cth img{width:100%;height:100%;object-fit:cover}.cth i{position:absolute;inset:0;display:grid;place-items:center;color:#fff;background:rgba(0,0,0,.25)}.cth i svg{width:16px;height:16px}
-.cri{flex:1;min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:2px}.cri .pill{font-size:11px;padding:1px 8px}.cri b{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-.crow em{flex:none;font-style:normal;font-size:12px;font-weight:600;color:var(--ink2);text-align:right;font-variant-numeric:tabular-nums}
-.cpane{position:sticky;top:12px;background:var(--card);border-radius:16px;box-shadow:inset 0 3px 0 var(--c-cams),var(--sh);padding:16px 18px;animation:fadein .25s}
-.cph{display:flex;justify-content:space-between;align-items:center}.cpn{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
-.cpane h3{margin:8px 0 2px;font-size:20px;display:flex;align-items:center;gap:6px}.cpane>p{margin:0}
-.cshots{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0 10px}.cshots.n1,.cshots.n0{grid-template-columns:1fr}.cshots.n1 figure{aspect-ratio:16/9;max-height:52vh}
-.cshots figure{position:relative;margin:0;border-radius:12px;overflow:hidden;background:#0f172a;aspect-ratio:16/10}.cshots img,.cshots video{width:100%;height:100%;object-fit:cover;display:block}
-.cshots figcaption{position:absolute;left:8px;top:8px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#fff;background:rgba(15,23,42,.6);padding:2px 8px;border-radius:6px;pointer-events:none}
-.cshots .cnone{aspect-ratio:16/7;display:grid;place-items:center;border-radius:12px;color:#94a3b8;background:repeating-linear-gradient(135deg,#1e293b 0 12px,#243247 12px 24px)}
-.caddr{display:flex;align-items:center;gap:6px;color:var(--ink2);font-size:13.5px}.caddr svg{width:15px;height:15px;flex:none}
-.cact{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}.cact .muted{margin-left:auto;font-size:12px}
-@media(max-width:900px){.cinbox{grid-template-columns:1fr}.clist{max-height:45vh;min-height:0}.cpane{position:static}.cact .muted{display:none}}
+/* Cameras tab: one row per driver */
+#vCam{max-width:1400px}body[data-v=vCam] .bar{max-width:1400px}#camSer[aria-pressed=true]{background:#dc2626;color:#fff;border-color:#dc2626}
+.csum{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}.csum>div{flex:1;min-width:120px;background:var(--card);border-radius:14px;padding:12px 16px;box-shadow:inset 0 3px 0 var(--c-cams),var(--sh)}
+.csum b{display:block;font-size:26px;line-height:1.1;font-variant-numeric:tabular-nums}.csum span{font-size:12.5px;color:var(--muted)}.csum .red{box-shadow:inset 0 3px 0 #dc2626,var(--sh)}.csum .red b{color:#dc2626}
+.cdrv{display:grid;grid-template-columns:250px 1fr;gap:14px;background:var(--card);border-radius:16px;padding:14px;margin-bottom:12px;box-shadow:var(--sh);animation:rise .35s ease-out both}
+.cdh{display:flex;flex-direction:column;gap:8px;padding-right:14px;border-right:1px solid var(--line)}.cdh>div:nth-child(2) b{display:block;font-size:16px}.cdh small{color:var(--muted)}
+.cdn{display:flex;gap:12px;font-size:13px;color:var(--ink2)}.cdn b{font-size:18px;margin-right:2px}.cdn .red{color:#dc2626}.cdn .ok{color:#16a34a;font-weight:600}
+.cdt{display:flex;flex-wrap:wrap;gap:5px}.cdt .pill{font-size:11px}.cdt .muted{font-size:12px}
+.cstrip{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;scroll-snap-type:x proximity}
+.cshot{flex:0 0 220px;scroll-snap-align:start;font:inherit;text-align:left;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+.cim{position:relative;display:block;height:138px;border-radius:12px;overflow:hidden;background:#1e293b;box-shadow:0 0 0 1px rgba(15,23,42,.08);transition:transform .2s,box-shadow .2s}
+.cshot.ser .cim{box-shadow:0 0 0 2.5px #dc2626}.cshot:hover .cim,.cshot:focus-visible .cim{transform:translateY(-3px);box-shadow:0 12px 24px -12px rgba(15,23,42,.6),0 0 0 2.5px var(--c-cams)}
+.cim img,.cim video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.cim em{position:absolute;inset:0;display:grid;place-items:center;font-style:normal;font-size:12.5px;color:#94a3b8}
+.cim .pill{position:absolute;left:8px;top:8px;font-size:11px;z-index:1;box-shadow:0 2px 6px rgba(0,0,0,.3)}
+.cim i{position:absolute;right:8px;bottom:8px;z-index:1;width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:rgba(124,58,237,.92);color:#fff}.cim i svg{width:14px;height:14px}
+.cwhen{display:block;margin-top:5px;font-size:12.5px;font-weight:600;color:var(--ink2)}
+@media(max-width:900px){.cdrv{grid-template-columns:1fr}.cdh{border-right:0;padding-right:0}.cshot{flex-basis:180px}}
 
 /* ===== v12: icons on every tab ===== */
 .tabs button,.tabs .reptab{display:inline-flex;align-items:center;gap:6px}
@@ -2062,6 +2058,14 @@ header[data-sky=dawn] .sun,header[data-sky=dusk] .sun{background:radial-gradient
 .sun.moon::after{content:'';position:absolute;width:7px;height:7px;left:13px;top:8px;border-radius:50%;background:rgba(180,160,110,.35);box-shadow:-6px 7px 0 -1px rgba(180,160,110,.3)}
 @media (prefers-reduced-motion:reduce){.sun i{animation:none}}
 @media(max-width:900px){.sun{display:none}}
+
+.cstrip{-webkit-mask:linear-gradient(90deg,#000 calc(100% - 60px),transparent);mask:linear-gradient(90deg,#000 calc(100% - 60px),transparent);padding-right:40px}
+/* ===== v13: speed streaks behind moving trucks on the map ===== */
+.pin.mv::before{content:'';position:absolute;right:calc(100% + 3px);top:50%;width:26px;height:12px;margin-top:-6px;pointer-events:none;
+  background:linear-gradient(90deg,transparent,#22c55e) 0 1px/100% 2px no-repeat,linear-gradient(90deg,transparent,#4ade80) 6px 5px/80% 2px no-repeat,linear-gradient(90deg,transparent,#22c55e) 2px 9px/90% 2px no-repeat;
+  border-radius:2px;animation:streak .6s linear infinite}
+@keyframes streak{0%{transform:translateX(6px);opacity:.2}50%{opacity:1}100%{transform:translateX(-6px);opacity:.2}}
+@media (prefers-reduced-motion:reduce){.pin.mv::before{animation:none}}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -2149,8 +2153,8 @@ header[data-sky=dawn] .sun,header[data-sky=dusk] .sun{background:radial-gradient
 </div>
 <div id="vCam" hidden>
  <div class="crewhead"><div><h2>Camera events</h2><p id="camCount" class="muted">Loading the last 7 days from Azuga...</p></div><span style="flex:1"></span>
-  <select id="camSort" aria-label="Sort events"><option value="new">Newest first</option><option value="old">Oldest first</option><option value="drv">By driver</option><option value="truck">By truck</option><option value="type">By event type</option></select><select id="camDrv" aria-label="Filter by driver"><option value="">All drivers</option></select></div>
- <div id="camTypes" class="ctypes"></div><div class="cinbox"><div id="cgrid" class="clist" role="listbox" aria-label="Camera events"></div><aside id="cprev" class="cpane"></aside></div>
+  <button class="btn2" id="camSer" aria-pressed="false">Serious only</button><select id="camDrv" aria-label="Filter by driver"><option value="">All drivers</option></select></div>
+ <div id="camTypes" class="ctypes"></div><div id="cgrid" class="cboard"></div>
 </div>
 <div id="vEdit" hidden><div class="ed">
  <aside class="panel edl"><div class="edf"><label><input type="checkbox" id="needs"> Only show trucks that need attention</label><div id="syncBar" style="margin-top:10px"></div><div class="syncp sm" id="syncE"></div></div><div id="edList"></div></aside>
@@ -2391,10 +2395,16 @@ function openMedia(i){
    +'<div class="mgrid">'+(md.videos.length?md.videos.map(v=>'<figure><video src="'+esc(v.url)+'" controls playsinline preload="metadata"'+(v.poster?' poster="'+esc(v.poster)+'"':'')+'></video><figcaption>'+esc(v.name)+' · <a href="'+esc(v.url)+'" target="_blank" rel="noopener">Open in new tab</a></figcaption></figure>').join('')
      :md.snaps.map(s=>'<figure><img src="'+esc(s.url)+'" alt="'+esc(s.name)+'"><figcaption>'+esc(s.name)+'</figcaption></figure>').join(''))+'</div>'
    +(md.videos.length?'':x.requested?'<p class="muted" style="margin:10px 0 0;font-size:13px">Clip requested. The camera uploads it the next time the truck is on; it will play here once it arrives.</p>':'<p class="muted" style="margin:10px 0 0;font-size:13px">'+(md.snaps.length?'Azuga only has photos for this event, no video clip.':'Azuga has no photos or video for this event.')+'</p>');
-  $('media').showModal();const v=$('mbody').querySelector('video');if(v)v.play().catch(()=>{});
+  $('media').showModal();syncVids([...$('mbody').querySelectorAll('video')]);
 }
+// road and driver cameras play together: the first video's controls drive the other one
+function syncVids(vs){if(!vs.length)return;const [lead,...rest]=vs;
+  rest.forEach(v=>{v.muted=true;v.controls=false;v.onclick=()=>lead.paused?lead.play():lead.pause()});
+  const follow=()=>rest.forEach(v=>{if(Math.abs(v.currentTime-lead.currentTime)>.25)v.currentTime=lead.currentTime;v.playbackRate=lead.playbackRate;if(lead.paused!==v.paused)(lead.paused?v.pause():v.play().catch(()=>{}))});
+  ['play','pause','seeked','ratechange'].forEach(ev=>lead.addEventListener(ev,follow));lead.addEventListener('timeupdate',follow);
+  lead.play().catch(()=>{})}
 document.addEventListener('click',e=>{const b=e.target.closest('.evb');if(b&&!b.disabled)openMedia(+b.dataset.i);if(e.target.id==='mclose'||e.target.id==='media')closeMedia()});
-function closeMedia(){$('media').close()}
+function closeMedia(){$('mbody').querySelectorAll('video').forEach(v=>v.pause());$('media').close()}
 $('media').addEventListener('close',()=>$('mbody').querySelectorAll('video').forEach(v=>v.pause()));
 const retried=new Set();function retry(id){if(retried.has(id))return;retried.add(id);setTimeout(()=>{if(sel==id)select(id)},30000)}
 // ---- Airtable (source of truth) ----
@@ -2949,7 +2959,7 @@ document.addEventListener('click',e=>{const b=e.target.closest('.tchip');if(!b)r
 let CAMALL=[],camTabType='';
 async function loadCamTab(){if(!CAMALL.length)$('cgrid').innerHTML='<div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div>';
   try{CAMALL=await fleetVids();renderCamTab()}catch(e){$('cgrid').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
-$('camDrv').onchange=$('camSort').onchange=()=>renderCamTab();
+$('camDrv').onchange=()=>renderCamTab();$('camSer').onclick=()=>{const b=$('camSer'),on=b.getAttribute('aria-pressed')!=='true';b.setAttribute('aria-pressed',on);renderCamTab()};
 function renderCamTab(){const ev=CAMALL,q=$('q').value.trim().toLowerCase(),dv=$('camDrv').value;
   const truckOf=x=>{const r=all().find(v=>vid(v)==x.vehicleId);return r?title(r):''};
   const drivers=[...new Set(ev.map(x=>evDriver(x).name).filter(Boolean))].sort();
@@ -2957,37 +2967,30 @@ function renderCamTab(){const ev=CAMALL,q=$('q').value.trim().toLowerCase(),dv=$
   const byDrv=ev.filter(x=>!dv||evDriver(x).name===dv),c={};byDrv.forEach(x=>{const t=evName(pick(x,'eventType','eventName'));c[t]=(c[t]||0)+1});
   if(camTabType&&!c[camTabType])camTabType='';
   $('camTypes').innerHTML='<button class="cchip'+(camTabType?'':' on')+'" data-ct="">All <b>'+byDrv.length+'</b></button>'+Object.entries(c).sort((a,b)=>b[1]-a[1]).map(([t,n])=>'<button class="cchip pill '+evClass(t)+(camTabType===t?' on':'')+'" data-ct="'+esc(t)+'">'+esc(t)+' <b>'+n+'</b></button>').join('');
-  VIDS=byDrv.filter(x=>(!camTabType||evName(pick(x,'eventType','eventName'))===camTabType)&&(!q||(evDriver(x).name+' '+truckOf(x)+' '+evName(pick(x,'eventType','eventName'))+' '+(pick(x,'address')||'')).toLowerCase().includes(q)));
+  const serOnly=$('camSer').getAttribute('aria-pressed')==='true';
+  VIDS=byDrv.filter(x=>(!serOnly||isSerious(x))&&(!camTabType||evName(pick(x,'eventType','eventName'))===camTabType)&&(!q||(evDriver(x).name+' '+truckOf(x)+' '+evName(pick(x,'eventType','eventName'))+' '+(pick(x,'address')||'')).toLowerCase().includes(q)));
   $('camCount').textContent=ev.length+' events across the fleet · last 7 days';
-  // inbox: compact rows grouped (by day, driver, truck or type) on the left, the picked event shown big on the right
-  const tOf=x=>{const v=pick(x,'eventTime','startTime');return +v||Date.parse(v)||0},dayKey=t=>new Date(t).toLocaleDateString('en-CA');
-  const today=dayKey(Date.now()),yest=dayKey(Date.now()-864e5),srt=$('camSort').value;
-  const dayName=k=>k===today?'Today':k===yest?'Yesterday':new Date(k+'T12:00').toLocaleDateString([],{weekday:'long',month:'short',day:'numeric'});
-  const keyOf={new:x=>dayName(dayKey(tOf(x))),old:x=>dayName(dayKey(tOf(x))),drv:x=>evDriver(x).name||'Unknown driver',truck:x=>truckOf(x)||'Unknown truck',type:x=>evName(pick(x,'eventType','eventName'))}[srt];
-  VIDS.sort((a,b)=>srt==='old'?tOf(a)-tOf(b):srt==='new'?tOf(b)-tOf(a):keyOf(a).localeCompare(keyOf(b))||tOf(b)-tOf(a));
-  const groups=[];VIDS.forEach((x,i)=>{const k=keyOf(x),g=groups[groups.length-1];if(g&&g.k===k)g.items.push(i);else groups.push({k,items:[i]})});
-  let at=VIDS.indexOf(CAMSEL);if(at<0)at=0;CAMSEL=VIDS[at]||null;
-  const hm=t=>t?new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'',md2=t=>new Date(t).toLocaleDateString([],{month:'short',day:'numeric'});
-  $('cgrid').innerHTML=groups.length?groups.map(g=>'<div class="cgh">'+esc(g.k)+'<span>'+g.items.length+'</span></div>'+g.items.map(i=>{const x=VIDS[i],e=pick(x,'eventType','eventName'),D=evDriver(x),m=evMedia(x),th=m.snaps[0]&&m.snaps[0].url||m.videos[0]&&m.videos[0].poster;
-    return '<button class="crow'+(i===at?' on':'')+'" data-ci="'+i+'" role="option" aria-selected="'+(i===at)+'"><span class="cth">'+(th?'<img src="'+esc(th)+'" alt="" loading="lazy">':'')+(m.videos.length?'<i>'+ICON.play+'</i>':'')+'</span>'
-      +'<span class="cri"><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><b>'+esc(srt==='drv'?(truckOf(x)||'Unknown truck'):(D.name||'Unknown driver'))+'</b></span><em>'+(srt==='new'||srt==='old'?'':md2(tOf(x))+'<br>')+hm(tOf(x))+'</em></button>'}).join('')).join(''):'<div class="empty">No camera events match.</div>';
-  camPreview()}
-let CAMSEL=null;
-function camPreview(){const x=CAMSEL,el=$('cprev');if(!x){el.innerHTML='<div class="empty">Pick an event on the left to see it here.</div>';return}
-  const i=VIDS.indexOf(x),e=pick(x,'eventType','eventName'),md=evMedia(x),D=evDriver(x),r=all().find(v=>vid(v)==x.vehicleId),v=pick(x,'eventTime','startTime'),t=+v||Date.parse(v)||0;
-  const shots=md.videos.length?md.videos.map(m=>'<figure><video src="'+esc(m.url)+'"'+(m.poster?' poster="'+esc(m.poster)+'"':'')+' controls muted playsinline preload="none"></video><figcaption>'+(/driver/i.test(m.name)?'Driver':'Road')+'</figcaption></figure>').join('')
-    :md.snaps.length?md.snaps.map(m=>'<figure><img src="'+esc(m.url)+'" alt="'+esc(m.name)+' camera"><figcaption>'+(/driver/i.test(m.name)?'Driver':'Road')+'</figcaption></figure>').join('')
-    :'<div class="cnone">'+(x.requested?'Waiting on the camera to upload this clip':'No photos or video for this event')+'</div>';
-  el.innerHTML='<div class="cph"><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="cpn">'+(i+1)+' of '+VIDS.length+'</span></div>'
-    +'<h3>'+esc(D.name||'Unknown driver')+(D.azuga?flag('The camera stamped this alert with '+D.azuga+', but Airtable lists '+(D.name||'someone else')+' as this truck’s driver.'):'')+'</h3>'
-    +'<p class="muted">'+(r?esc(title(r))+' · ':'')+(t?new Date(t).toLocaleString([],{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'')+'</p>'
-    +'<div class="cshots n'+Math.min(2,md.videos.length||md.snaps.length)+'">'+shots+'</div>'
-    +'<p class="caddr">'+ICON.pin+esc(pick(x,'address')||'No address')+(x.speed?' · '+Math.round(x.speed*0.621371)+' mph':'')+'</p>'
-    +'<div class="cact"><button class="btn2" data-cfull="'+i+'">Open full size</button>'+(r?'<button class="btn2" data-cmap="'+esc(vid(r))+'">Show truck on map</button>':'')+'<span class="muted">Use ↑ ↓ to move through events</span></div>'}
-document.addEventListener('click',e=>{const c=e.target.closest('.crow');if(c){CAMSEL=VIDS[+c.dataset.ci];document.querySelectorAll('.crow.on').forEach(x=>{x.classList.remove('on');x.setAttribute('aria-selected','false')});c.classList.add('on');c.setAttribute('aria-selected','true');camPreview();return}
-  const f=e.target.closest('[data-cfull]');if(f)return openMedia(+f.dataset.cfull);const m=e.target.closest('[data-cmap]');if(m){document.querySelector('.tabs button[data-v=vMap]').click();select(m.dataset.cmap)}});
-document.addEventListener('keydown',e=>{if($('vCam').hidden||$('media').open||/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)||!/^Arrow(Up|Down)$/.test(e.key))return;
-  const i=VIDS.indexOf(CAMSEL)+(e.key==='ArrowDown'?1:-1),row=document.querySelector('.crow[data-ci="'+i+'"]');if(!row)return;e.preventDefault();row.click();row.scrollIntoView({block:'nearest'})});
+  // one row per driver: who they are and what they're doing on the left, their events as big photo cards on the right
+  const tOf=x=>{const v=pick(x,'eventTime','startTime');return +v||Date.parse(v)||0},by={};
+  VIDS.sort((a,b)=>tOf(b)-tOf(a)).forEach((x,i)=>{const n=evDriver(x).name||'Unknown driver';(by[n]=by[n]||[]).push(i)});
+  const rows=Object.entries(by).map(([n,ix])=>({n,ix,ser:ix.filter(i=>isSerious(VIDS[i])).length})).sort((a,b)=>b.ser-a.ser||b.ix.length-a.ix.length);
+  const ser=VIDS.filter(isSerious).length;
+  const hm=t=>t?new Date(t).toLocaleString([],{weekday:'short',hour:'numeric',minute:'2-digit'}):'';
+  $('cgrid').innerHTML=rows.length?'<div class="csum"><div><b>'+VIDS.length+'</b><span>events</span></div><div class="red"><b>'+ser+'</b><span>serious</span></div><div><b>'+rows.length+'</b><span>drivers</span></div><div><b>'+VIDS.filter(x=>evMedia(x).videos.length).length+'</b><span>with video</span></div></div>'
+    +rows.map(r=>{const tr=[...new Set(r.ix.map(i=>truckOf(VIDS[i])).filter(Boolean))],c={};r.ix.forEach(i=>{const t=evName(pick(VIDS[i],'eventType','eventName'));c[t]=(c[t]||0)+1});
+      const top=Object.entries(c).sort((a,b)=>b[1]-a[1]);
+      return '<section class="cdrv"><div class="cdh">'+avatar(r.n,1)+'<div><b>'+esc(r.n)+'</b><small>'+esc(tr.join(', ')||'No truck')+'</small></div>'
+        +'<div class="cdn"><span><b>'+r.ix.length+'</b> event'+(r.ix.length>1?'s':'')+'</span>'+(r.ser?'<span class="red"><b>'+r.ser+'</b> serious</span>':'<span class="ok">nothing serious</span>')+'</div>'
+        +'<div class="cdt">'+top.slice(0,3).map(([t,n])=>'<span class="pill '+evClass(t)+'">'+esc(t)+' '+n+'</span>').join('')+(top.length>3?'<span class="muted">+'+(top.length-3)+' more</span>':'')+'</div></div>'
+        +'<div class="cstrip">'+r.ix.map(i=>{const x=VIDS[i],e=pick(x,'eventType','eventName'),m=evMedia(x),th=m.snaps[0]&&m.snaps[0].url||m.videos[0]&&m.videos[0].poster;
+          return '<button class="cshot'+(isSerious(x)?' ser':'')+'" data-i="'+i+'"'+(m.videos[0]?' data-vid="'+esc(m.videos[0].url)+'"':'')+'><span class="cim">'+(th?'<img src="'+esc(th)+'" alt="" loading="lazy">':'<em>'+(x.requested?'Waiting on camera':'No photo')+'</em>')
+            +'<span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span>'+(m.videos.length?'<i>'+ICON.play+'</i>':'')+'</span><span class="cwhen">'+hm(tOf(x))+(truckOf(x)&&tr.length>1?' · '+esc(truckOf(x)):'')+'</span></button>'}).join('')+'</div></section>'}).join('')
+    :'<div class="empty">No camera events match.</div>'}
+function isSerious(x){return /hard\s*-?\s*core|(hard|harsh)\s*br[ae]a?k|critical\s*distance|tailgat|following\s*distance|violent\s*turn|harsh\s*turn|sharp\s*turn|rolling\s*stop|stop\s*sign|phone|cell|distract/i.test(String(pick(x,'eventType','eventName')||'').replace(/_/g,' '))}
+document.addEventListener('click',e=>{const c=e.target.closest('.cshot');if(c)openMedia(+c.dataset.i)});
+// hovering a card that has video plays it silently right in the card
+document.addEventListener('mouseover',e=>{const c=e.target.closest('.cshot[data-vid]');if(!c||c.querySelector('video')||matchMedia('(prefers-reduced-motion: reduce)').matches)return;
+  const v=document.createElement('video');v.src=c.dataset.vid;v.muted=v.loop=v.playsInline=v.autoplay=true;c.querySelector('.cim').appendChild(v);c.addEventListener('mouseleave',()=>v.remove(),{once:true})});
 document.addEventListener('click',e=>{const b=e.target.closest('.cchip');if(!b)return;camTabType=b.dataset.ct;renderCamTab()});
 // a few bubbles drifting up behind the page
 (()=>{const b=document.createElement('div');b.id='bubbles';b.setAttribute('aria-hidden','true');for(let k=0;k<14;k++){const i=document.createElement('i'),z=8+Math.random()*22;i.style.cssText='left:'+(Math.random()*100).toFixed(1)+'%;width:'+z+'px;height:'+z+'px;animation-duration:'+(14+Math.random()*16).toFixed(1)+'s;animation-delay:-'+(Math.random()*30).toFixed(1)+'s';b.appendChild(i)}document.body.appendChild(b)})();
