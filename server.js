@@ -766,11 +766,16 @@ async function scoreFor(vehicleId, name) {
 // MPG is estimated from the driver's Ramp gas spending at GAS_PRICE dollars a gallon (default $4.30).
 const GAS_PRICE = +process.env.GAS_PRICE || 4.3;   // NJ average, Oct 2026 (AAA)
 const tripTotals = () => cached('trips', 3600, async () => {
+  // A week at a time with the same request shape Azuga's own Scores report accepts (one 30-day ask gave Azuga a server error)
   const by = {};
-  for (let page = 0; page < 40; page++) {
-    const rows = list(await azuga('https://services.azuga.com/reports/v3/reports/trip?appId=FLEET', { startDate: azIso(daysAgo(30)), endDate: azIso(new Date()), browserTimezone: 'US/Eastern', index: page, size: 500 }));
-    for (const r of rows) { const v = by[r.vehicleId] = by[r.vehicleId] || { km: 0, fuel: 0, trips: 0 }; v.km += +r.tripDistance || 0; v.fuel += +r.fuelConsumed || 0; v.trips++; }
-    if (rows.length < 500) break; await sleep(20000);
+  for (let w = 0; w < 5; w++) {
+    for (let page = 0; page < 20; page++) {
+      const rows = list(await azuga('https://services.azuga.com/reports/v3/reports/trip?appId=FLEET', { startDate: azIso(daysAgo(Math.min(30, 7 * (w + 1)))), endDate: azIso(daysAgo(7 * w)),
+        browserTimezone: 'US/Eastern', reportFilter: 'trips_Default', index: page, size: 200, desc: false, filter: { orFilter: {}, matchFilter: {} } }));
+      for (const r of rows) { const v = by[r.vehicleId] = by[r.vehicleId] || { km: 0, fuel: 0, trips: 0 }; v.km += +r.tripDistance || 0; v.fuel += +r.fuelConsumed || 0; v.trips++; }
+      if (rows.length < 200) break; await sleep(15000);
+    }
+    await sleep(5000);
   }
   return by;
 });
@@ -783,11 +788,17 @@ function withFlags(m, trucks) {
   m.flags = f; return m;
 }
 async function mpgFor(name, rampPerson) {
-  const trips = (cache.get('trips') || {}).data;   // filled by the background job; clicks never wait on Azuga for this
-  if (!trips || !name) return null;
+  if (!name) return null;
+  const trips = (cache.get('trips') || {}).data || {};   // filled by the background job; clicks never wait on Azuga for this
   const td = await truckDrivers(), mine = Object.keys(trips).filter(v => dupeName(td[v] || '') === dupeName(name));
-  const km = mine.reduce((t, v) => t + trips[v].km, 0), fuel = mine.reduce((t, v) => t + trips[v].fuel, 0), miles = km * 0.621371;
-  if (miles < 20) return null;
+  const km = mine.reduce((t, v) => t + trips[v].km, 0), fuel = mine.reduce((t, v) => t + trips[v].fuel, 0);
+  let miles = km * 0.621371;
+  if (miles < 20) {   // no trip data: use the miles from Azuga's Scores report and estimate gallons from Ramp
+    const az = await azugaScore('', name).catch(() => null);
+    if (!az || !(az.miles > 20) || !rampPerson || !(rampPerson.gas > 0)) return null;
+    const g = rampPerson.gas / GAS_PRICE, m = az.miles / g;
+    return m >= 4 && m <= 60 ? withFlags({ mpg: m, miles: az.miles, gallons: g, source: 'ramp', price: GAS_PRICE }, []) : null;
+  }
   const ok = m => m >= 4 && m <= 60;
   if (fuel > 0) {   // Azuga's fuel figure: gallons, or litres on some devices
     if (ok(miles / fuel)) return withFlags({ mpg: miles / fuel, miles, gallons: fuel, source: 'azuga' }, mine);
@@ -1050,7 +1061,7 @@ const autoSync = () => reconcile().catch(e => { if (!/already running/.test(e.me
 if (process.argv[2] !== 'test') {
   const job = (name, fn) => { const run = () => fn().then(() => { WARM[name] = { ok: new Date().toISOString() }; setTimeout(run, 31 * 60e3); },
     e => { WARM[name] = { error: e.message, at: new Date().toISOString() }; console.error('Score warm-up', name + ':', e.message); setTimeout(run, 3 * 60e3); }); return run; };
-  setTimeout(job('miles', scoreRows), 90e3); setTimeout(job('trips', tripTotals), 6 * 60e3);
+  setTimeout(job('miles', scoreRows), 90e3); setTimeout(job('trips', tripTotals), 2 * 60e3);
   const week = () => routes['/api/videos'](new URLSearchParams()).then(() => setTimeout(week, 10 * 60e3), () => setTimeout(week, 3 * 60e3));
   setTimeout(week, 45e3);
   const back = () => backfillWeek().then(() => { WARM.backfill = { ok: new Date().toISOString(), weeksBack: EVA.weeks.length, done: backfillDone() }; if (!backfillDone()) setTimeout(back, 2 * 60e3); },
@@ -1772,6 +1783,8 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;bor
 
 .ramp .rdates{margin-left:auto;font-size:11.5px;font-weight:600;color:#d9f99d;background:rgba(228,242,34,.12);border:1px solid rgba(228,242,34,.3);padding:2px 9px;border-radius:999px}
 .rgrid .rgas{position:relative}.rgas .spark{position:absolute;right:12px;top:12px;width:42%;height:30px;fill:#3a3d00;opacity:.75}
+.kv.kscore{position:relative}.kscore>span .flag{position:absolute;top:9px;right:9px;margin:0}
+.mgauge{position:relative;display:inline-block;width:90px;height:7px;border-radius:99px;background:rgba(255,255,255,.12);overflow:hidden;align-self:center}.mgauge i{position:absolute;inset:0 auto 0 0;border-radius:99px;animation:mg .9s cubic-bezier(.3,.9,.3,1) both}.mgauge u{position:absolute;top:0;bottom:0;left:50%;width:33%;border-left:1px dashed rgba(255,255,255,.35);border-right:1px dashed rgba(255,255,255,.35)}@keyframes mg{from{width:0}}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -2370,7 +2383,7 @@ async function rampBox(id,name){const el=$('rampBox');if(!el)return;if(!name){el
   if(r.since){const f=d=>new Date(d).toLocaleDateString([], {month:'short',day:'numeric'});head=head.replace('</h4>','<span class="rdates">'+f(r.since)+' – '+f(r.until||Date.now())+'</span></h4>')}
   if(r.flags&&r.flags.length)head=head.replace('</h4>',flag(r.flags)+'</h4>');
   if(!r.connected){el.innerHTML=head+'<div class="rmuted">Ramp is not connected yet.</div>'+(r.mpg?'<div class="rmile mpg"><b>'+r.mpg.mpg.toFixed(1)+' mpg'+flag(r.mpg.flags)+'</b><span>'+Math.round(r.mpg.miles).toLocaleString()+' miles in 30 days</span></div>':'');return}
-  const mpgH=(r.mpg?'<div class="rmile mpg"><b>'+r.mpg.mpg.toFixed(1)+' mpg'+flag(r.mpg.flags)+'</b><span>'+Math.round(r.mpg.miles).toLocaleString()+' miles in 30 days</span><em>'+(r.mpg.source==='azuga'?'From the truck\u2019s fuel data':'Estimate: Ramp gas at $'+r.mpg.price.toFixed(2)+'/gal')+'</em></div>':'');
+  const mpgH=(r.mpg?'<div class="rmile mpg"><b>'+r.mpg.mpg.toFixed(1)+' mpg'+flag(r.mpg.flags)+'</b><span class="mgauge" title="Pickups usually get 15-25 mpg"><i style="width:'+Math.min(100,r.mpg.mpg/30*100).toFixed(0)+'%;background:'+(r.mpg.mpg<12?'#f87171':r.mpg.mpg<16?'#fbbf24':'#4ade80')+'"></i><u></u></span><span>'+Math.round(r.mpg.miles).toLocaleString()+' miles in 30 days</span><em>'+(r.mpg.source==='azuga'?'From the truck\u2019s fuel data':'Estimate: Ramp gas at $'+r.mpg.price.toFixed(2)+'/gal')+'</em></div>':'');
   const p=r.person;if(!p){el.innerHTML=head+'<div class="rmuted">No Ramp spend found under this name.</div>'+mpgH;return}
   el.innerHTML=head+'<div class="rgrid"><div class="rgas"><span>Gas</span>'+spark(p.daily)+'<b>'+usd(p.gas)+'</b><i>'+p.gasN+(p.gasN===1?' fill-up':' fill-ups')+'</i></div><div><span>Everything else</span><b>'+usd(p.other)+'</b><i>'+p.otherN+(p.otherN===1?' purchase':' purchases')+'</i></div></div>'
    +(r.gasPerMile?(g=>'<div class="rmile'+(g.perMile>g.max?' bad':'')+'"><b>'+usd(g.perMile)+' per mile'+flag(g.flags)+'</b><span>'+usd(p.gas)+' of gas ÷ '+Math.round(g.miles).toLocaleString()+' miles driven</span><em>'+(g.perMile>g.max?'Over the '+usd(g.max)+'/mile limit · −'+g.points+' on driver score':'Normal (limit '+usd(g.max)+'/mile)')+'</em></div>')(r.gasPerMile):'')
