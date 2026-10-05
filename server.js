@@ -93,21 +93,16 @@ const routes = {
     if (r.gasPerMile) r.gasPerMile.flags = ['Miles come from Azuga for this driver; gas comes from Ramp. If the driver used more than one truck or paid for someone else\'s gas, this can be off.'];
     return r; },
   // Breadcrumbs: where one truck has been (Azuga's breadcrumb report), oldest first
-  '/api/trail': q => { const id = String(q.get('vehicleId') || ''), hours = Math.min(72, Math.max(1, +q.get('hours') || 24));
+  '/api/trail': async q => { const id = String(q.get('vehicleId') || ''), date = q.get('date'), hours = Math.min(72, Math.max(1, +q.get('hours') || 24));
     if (!id) throw new Error('Pick a truck.');
-    const since = hours === 'today' ? etDay().start : new Date(Date.now() - hours * 36e5);
-    return cached('trail:' + id + ':' + hours, 120, async () => {
-      let pts = [];
-      for (let page = 0; page < 6; page++) {
-        const rows = list(await azuga('https://services.azuga.com/reports/v3/reports/breadcrumb?appId=FLEET', { startDate: azIso(since), endDate: azIso(new Date()), browserTimezone: 'US/Eastern',
-          index: page, size: 1000, desc: false, sortField: 'locationTimeInDTZ', filter: { orFilter: { vehicleId: [id] } } }));
-        pts = pts.concat(rows); if (rows.length < 1000) break; await sleep(1500);
-      }
-      const t = x => { const v = x.locationTime ?? x.locationTimeInDTZ ?? x.time; return typeof v === 'number' ? v : Date.parse(v) || 0; };
-      return pts.map(x => ({ lat: +x.latitude, lng: +x.longitude, t: t(x), mph: Math.round((+x.obdSpeed || +x.speed || 0) * 0.621371), addr: clean(x.address), ev: clean(x.eventName) }))
-        .filter(p => p.lat && p.lng && Math.abs(p.lat) <= 90 && Math.abs(p.lng) <= 180).sort((a, b) => a.t - b.t);
-    }).then(points => ({ hours, points }));
+    if (date) { if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('Bad date.'); const d = etDay(new Date(date + 'T16:00:00Z')); return { date, points: await trailRange(id, d.start, d.end, true) }; }
+    return { hours, points: await trailRange(id, new Date(Date.now() - hours * 36e5), new Date(), false) };
   },
+  // How long a tech spent at each pool on a given day: POM's schedule + the truck's breadcrumbs
+  '/api/visits': async q => { const date = q.get('date') || etDay().ymd;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('Bad date.');
+    if (!clean(process.env.POM_API_KEY)) return { connected: false };
+    return { connected: true, ...(await visitsFor(q.get('name') || '', date)) }; },
   '/api/pom/route': async q => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
     const name = q.get('name') || ''; return { connected: true, day: etDay().ymd, ...(name ? await pomStopsFor(name) : {}) }; },
   '/api/pom/stops': async () => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
@@ -831,6 +826,49 @@ async function mpgFor(name, rampPerson) {
   return null;
 }
 
+// ---------------- Breadcrumbs (Azuga) and time spent at each pool ----------------
+async function trailRange(id, start, end, past) {
+  const key = 'trail:' + id + ':' + Math.round(+start / 6e4) + ':' + (past ? Math.round(+end / 6e4) : 'now');
+  return cached(key, past ? 6 * 3600 : 120, async () => {
+    let pts = [];
+    for (let page = 0; page < 6; page++) {
+      const rows = list(await azuga('https://services.azuga.com/reports/v3/reports/breadcrumb?appId=FLEET', { startDate: azIso(start), endDate: azIso(end), browserTimezone: 'US/Eastern',
+        index: page, size: 1000, desc: false, sortField: 'locationTimeInDTZ', filter: { orFilter: { vehicleId: [id] } } }));
+      pts = pts.concat(rows); if (rows.length < 1000) break; await sleep(1500);
+    }
+    const t = x => { const v = x.locationTime ?? x.locationTimeInDTZ ?? x.time; return typeof v === 'number' ? v : Date.parse(v) || 0; };
+    return pts.map(x => ({ lat: +x.latitude, lng: +x.longitude, t: t(x), mph: Math.round((+x.obdSpeed || +x.speed || 0) * 0.621371), addr: clean(x.address), ev: clean(x.eventName) }))
+      .filter(p => p.lat && p.lng && Math.abs(p.lat) <= 90 && Math.abs(p.lng) <= 180).sort((a, b) => a.t - b.t);
+  });
+}
+const miles = (a, b) => { const R = 3958.8, r = Math.PI / 180, dl = (b.lat - a.lat) * r, dn = (b.lng - a.lng) * r;
+  return 2 * R * Math.asin(Math.sqrt(Math.sin(dl / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dn / 2) ** 2)); };
+const AT_POOL_MI = 0.1;   // within ~160 m of the pool's address counts as "at the property"
+// Arrived = the first ignition-off (or first stop) at the property; left = the last breadcrumb there before driving away.
+function visitAt(stop, pts) {
+  if (!stop.lat || !stop.lng) return null;
+  const runs = []; let run = null;
+  for (const p of pts) {
+    if (miles(p, stop) <= AT_POOL_MI) { if (!run) runs.push(run = []); run.push(p); } else run = null;
+  }
+  const real = runs.filter(r => r.length && r[r.length - 1].t - r[0].t >= 2 * 60e3);
+  if (!real.length) return null;
+  const best = real.sort((a, b) => (b[b.length - 1].t - b[0].t) - (a[a.length - 1].t - a[0].t))[0];
+  const off = best.find(p => /ignition\s*off|engine\s*off|stop/i.test(p.ev)) || best.find(p => p.mph === 0) || best[0];
+  const leave = best[best.length - 1].t;
+  return { arrive: off.t, leave, mins: Math.max(0, Math.round((leave - off.t) / 6e4)), visits: real.length };
+}
+async function visitsFor(name, ymd) {
+  const { tech, stops } = await pomStopsFor(name, ymd);
+  if (!tech) return { tech: null, date: ymd, stops: [] };
+  const td = await truckDrivers(), trucks = Object.keys(td).filter(v => dupeName(td[v] || '') === dupeName(name));
+  const d = etDay(new Date(ymd + 'T16:00:00Z')), past = ymd !== etDay().ymd;
+  let pts = [];
+  for (const v of trucks) pts = pts.concat(await trailRange(v, d.start, past ? d.end : new Date(), past).catch(() => []));
+  pts.sort((a, b) => a.t - b.t);
+  return { tech, date: ymd, trucks, points: pts.length, stops: stops.map(s => ({ ...s, visit: visitAt(s, pts) })) };
+}
+
 // ---------------- Pool Office Manager: today's pool stops for each tech ----------------
 // Read-only. POM_API_KEY lives in Render. POM's backend is GraphQL; these are the same queries POM's own schedule uses.
 const POM_GQL = process.env.POM_API_URL || 'https://backend.poolservicemanager.com/graphql';
@@ -862,8 +900,9 @@ function etDay(d = new Date()) {
   const start = new Date(ymd + 'T00:00:00Z'); start.setUTCHours(off);
   return { ymd, start, end: new Date(+start + 864e5 - 1) };
 }
-const pomToday = () => cached('pomToday', 120, async () => {
-  const { start, end } = etDay(), out = [];
+const pomToday = () => pomDay(etDay().ymd);
+const pomDay = ymd => cached('pom:' + ymd, ymd === etDay().ymd ? 120 : 3600, async () => {   // past days don't change much
+  const { start, end } = etDay(new Date(ymd + 'T16:00:00Z')), out = [];
   let after = null;
   for (let page = 0; page < 10; page++) {
     const d = await pom(`query($selector: AppointmentsV2Selector, $first: Int, $after: String) { infiniteAppointmentsV2(selector: $selector, first: $first, after: $after) {
@@ -883,8 +922,8 @@ const pomStop = a => { const c = a.customer || {}, w = a.primaryWorker || (a.wor
     customer: [c.firstName, c.lastName].filter(Boolean).join(' '), address: [c.streetAddress, c.city, c.state].filter(Boolean).join(', '),
     lat: +c.latitude || null, lng: +c.longitude || null }; };
 // Tech names in POM may be spelled a little differently from Airtable (DiMaio / Dimeo): same matching rules as Ramp
-async function pomStopsFor(name) {
-  const stops = (await pomToday()).map(pomStop), techs = [...new Set(stops.map(s => s.tech).filter(Boolean))].map(n => ({ name: n }));
+async function pomStopsFor(name, ymd) {
+  const stops = (await (ymd ? pomDay(ymd) : pomToday())).map(pomStop), techs = [...new Set(stops.map(s => s.tech).filter(Boolean))].map(n => ({ name: n }));
   const m = rampMatch(techs, name) || techs.find(t => { const a = dupeName(t.name).split(' '), b = dupeName(name).split(' ');
     return a[0] && b[0] && a[0].slice(0, 3) === b[0].slice(0, 3) && near(a[a.length - 1], b[b.length - 1]); });
   return { tech: m ? m.name : null, stops: m ? stops.filter(s => s.tech === m.name).sort((x, y) => Date.parse(x.time) - Date.parse(y.time)) : [] };
@@ -1886,6 +1925,15 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;bor
 .trailbar button:hover{border-color:#0891b2;color:#0e7490}.trailbar button.on{background:linear-gradient(135deg,#0891b2,#0e7490);border-color:transparent;color:#fff;box-shadow:0 4px 10px -4px rgba(14,116,144,.7)}
 .trailbar em{flex-basis:100%;font-style:normal;color:#64748b;font-size:12px}.trailbar em b{color:#0f172a}
 .tlegend{margin-left:10px;white-space:nowrap}.tlegend i{display:inline-block;width:14px;height:4px;border-radius:2px;margin:0 3px 2px 6px;vertical-align:middle}
+
+/* look back at a day: date picker, time-at-pool, day timeline */
+.pom .pdate{margin-left:6px}.pom .pdate input{font:inherit;font-size:12px;font-weight:600;color:#0369a1;border:1px solid #bae6fd;background:#fff;border-radius:8px;padding:2px 6px;cursor:pointer}
+.pom.loading{opacity:.55;transition:opacity .2s}.psum{font-size:12.5px;color:#0c4a6e;margin:2px 0 6px}.psum b{font-size:14px}
+.ptl{position:relative;height:16px;margin:4px 0 18px;border-radius:6px;background:repeating-linear-gradient(90deg,#e0f2fe 0 10%,#f0f9ff 10% 20%)}
+.ptl i{position:absolute;top:2px;bottom:2px;border-radius:4px;background:linear-gradient(180deg,#38bdf8,#0284c7);box-shadow:0 0 0 1px #fff;cursor:help}.ptl i:hover{background:#0c4a6e}
+.ptl span{position:absolute;top:18px;font-size:10.5px;color:#64748b}.ptl span:last-child{right:0}
+.plist .pvisit{color:#0369a1!important;font-weight:600}.plist .pvisit.none{color:#94a3b8!important;font-weight:500}
+.plist .vmins{display:block;font-size:13px;color:#0c4a6e}.plist .vmins.short{color:#dc2626}.plist .vmins.long{color:#c2410c}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -2473,16 +2521,28 @@ setTimeout(loadScores,1500);setInterval(loadScores,5*60e3);
 const spark=d=>{if(!d||!d.length)return '';const m=Math.max(...d,1);return '<svg class="spark" viewBox="0 0 90 22" preserveAspectRatio="none" aria-label="Gas by day, last 30 days">'+d.map((v,i)=>'<rect x="'+(i*3)+'" y="'+(22-Math.max(v?2:0.6,v/m*22)).toFixed(1)+'" width="2" height="'+Math.max(v?2:0.6,v/m*22).toFixed(1)+'" rx=".6"'+(v?'':' opacity=".25"')+'><title>'+(v?'$'+v.toFixed(0):'none')+'</title></rect>').join('')+'</svg>'};
 // Pool Office Manager: the driver's pools for today, in order, done or not
 let POMSTOPS=null;
-async function pomBox(id,name){const el=$('pomBox');if(!el)return;el.hidden=true;if(!name)return;let r;
-  try{r=await get('/api/pom/route?name='+encodeURIComponent(name))}catch(e){if(sel!=id)return;el.hidden=false;el.innerHTML='<h4>Today\u2019s pools</h4><div class="muted">Pool Office Manager is not answering: '+esc(e.message)+'</div>';return}
-  if(sel!=id||!r.connected)return;
-  if(!r.tech){el.hidden=false;el.innerHTML='<h4>Today\u2019s pools</h4><div class="muted">No pools on '+esc(name.split(' ')[0])+'\u2019s route in Pool Office Manager today.</div>';return}
-  const st=r.stops,done=st.filter(s=>s.done).length,pct=st.length?Math.round(done/st.length*100):0,t=x=>x?new Date(x).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}):'';
-  el.hidden=false;
-  el.innerHTML='<h4><span class="ptag">POM</span>Today\u2019s pools<span class="pcount">'+done+' of '+st.length+' done</span></h4><div class="pbar"><i style="width:'+pct+'%"></i></div>'
+async function pomBox(id,name,date){const el=$('pomBox');if(!el)return;if(!name){el.hidden=true;return}
+  const today=new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'});date=date||today;const isToday=date===today;
+  const fd=d=>new Date(d+'T12:00:00').toLocaleDateString([], {weekday:'short',month:'short',day:'numeric'}),t=x=>x?new Date(x).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}):'';
+  const head=right=>'<h4><span class="ptag">POM</span>'+(isToday?'Today’s pools':'Pools on '+fd(date))+'<label class="pdate" title="Look back at another day"><input type="date" id="pomDate" value="'+date+'" max="'+today+'"></label>'+(right||'')+'</h4>';
+  const bind=()=>{const inp=$('pomDate');if(inp)inp.onchange=()=>{const v=inp.value||today;pomBox(id,name,v);if(v!==today)showTrail(id,0,v);else{clearTrail();document.querySelectorAll('.trailbar button').forEach(x=>x.classList.toggle('on',x.dataset.h==='0'))}}};
+  if(!el.hidden)el.classList.add('loading');
+  let r;try{r=await get('/api/visits?name='+encodeURIComponent(name)+'&date='+date)}catch(e){if(sel!=id)return;el.classList.remove('loading');el.hidden=false;el.innerHTML=head()+'<div class="muted">Could not load: '+esc(e.message)+'</div>';bind();return}
+  if(sel!=id||!r.connected)return;el.classList.remove('loading');el.hidden=false;
+  if(!r.tech){el.innerHTML=head()+'<div class="muted">No pools on '+esc(name.split(' ')[0])+'’s route in Pool Office Manager '+(isToday?'today':'that day')+'.</div>';bind();return}
+  const st=r.stops,done=st.filter(s=>s.done).length,pct=st.length?Math.round(done/st.length*100):0,vis=st.filter(s=>s.visit),tot=vis.reduce((a,s)=>a+s.visit.mins,0);
+  // day timeline: one block per property visit
+  let tl='';if(vis.length){const a=Math.min(...vis.map(s=>s.visit.arrive)),b=Math.max(...vis.map(s=>s.visit.leave)),span=Math.max(b-a,1);
+    tl='<div class="ptl" aria-label="Time at each pool">'+vis.map(s=>'<i style="left:'+((s.visit.arrive-a)/span*100).toFixed(2)+'%;width:'+Math.max(1.2,(s.visit.leave-s.visit.arrive)/span*100).toFixed(2)+'%" title="'+esc(s.customer)+': '+s.visit.mins+' min ('+t(s.visit.arrive)+' - '+t(s.visit.leave)+')"></i>').join('')+'<span>'+t(a)+'</span><span>'+t(b)+'</span></div>'}
+  el.innerHTML=head('<span class="pcount">'+done+' of '+st.length+' done</span>')+'<div class="pbar"><i style="width:'+pct+'%"></i></div>'
+   +(vis.length?'<div class="psum"><b>'+Math.floor(tot/60)+'h '+(tot%60)+'m</b> at pools · '+vis.length+' of '+st.length+' visits found in the truck’s breadcrumbs</div>'+tl:(r.points?'':'<div class="muted" style="font-size:12px">No breadcrumbs from the truck '+(isToday?'yet today':'that day')+', so time on site can’t be measured.</div>'))
    +(r.tech.toLowerCase()!==name.toLowerCase()?'<div class="muted" style="font-size:12px;margin:4px 0">Shown as '+esc(r.tech)+' in Pool Office Manager</div>':'')
-   +'<ol class="plist">'+st.map((s,i)=>'<li class="'+(s.done?'done':'')+'" data-i="'+i+'"><span class="pn">'+(s.done?'\u2713':i+1)+'</span><div><b>'+esc(s.customer||'Customer')+'</b><span>'+esc(s.address||'No address')+'</span></div><em>'+(s.done?'Done':esc(String(s.serviceStatus||s.status||'To do').toLowerCase().split('_').join(' ').replace(/^./,c=>c.toUpperCase())))+(s.time?'<small>'+t(s.time)+'</small>':'')+'</em></li>').join('')+'</ol>';
+   +'<ol class="plist">'+st.map((s,i)=>'<li class="'+(s.done?'done':'')+'" data-i="'+i+'"><span class="pn">'+(s.done?'✓':i+1)+'</span><div><b>'+esc(s.customer||'Customer')+'</b><span>'+esc(s.address||'No address')+'</span>'
+     +(s.visit?'<span class="pvisit">Arrived '+t(s.visit.arrive)+' · left '+t(s.visit.leave)+(s.visit.visits>1?' · came back '+(s.visit.visits-1)+'×':'')+'</span>':(!isToday||s.done?'<span class="pvisit none">Truck not seen at this address</span>':''))+'</div>'
+     +'<em>'+(s.visit?'<strong class="vmins'+(s.visit.mins<5?' short':s.visit.mins>60?' long':'')+'">'+s.visit.mins+' min</strong>':'')+(s.done?'Done':esc(String(s.serviceStatus||s.status||'To do').toLowerCase().split('_').join(' ').replace(/^./,c=>c.toUpperCase())))+(s.time?'<small>Scheduled '+t(s.time)+'</small>':'')+'</em></li>').join('')+'</ol>';
+  bind();POMDAY=isToday?null:st;
   el.querySelectorAll('.plist li').forEach(li=>li.onclick=()=>{const s=st[+li.dataset.i];if(s.lat&&s.lng){map.setView([s.lat,s.lng],17);showPools()}})}
+let POMDAY=null;
 // Pools on the map once you zoom in: every tech's stops for today
 const poolLayer=L.layerGroup();
 const poolIcon=s=>L.divIcon({className:'poolpin'+(s.done?' done':''),html:'<span>'+(s.done?'\u2713':'')+'</span>',iconSize:[22,16],iconAnchor:[11,8]});
@@ -2495,18 +2555,20 @@ const trailLayer=L.layerGroup();
 function clearTrail(){trailLayer.clearLayers();if(map.hasLayer(trailLayer))map.removeLayer(trailLayer);const i=$('trailInfo');if(i)i.textContent=''}
 const spdColor=m=>m<1?'#94a3b8':m<30?'#22c55e':m<50?'#84cc16':m<65?'#f59e0b':'#ef4444';
 const hav=(a,b)=>{const R=3958.8,r=Math.PI/180,dl=(b.lat-a.lat)*r,dn=(b.lng-a.lng)*r,x=Math.sin(dl/2)**2+Math.cos(a.lat*r)*Math.cos(b.lat*r)*Math.sin(dn/2)**2;return 2*R*Math.asin(Math.sqrt(x))};
-async function showTrail(id,h){const info=$('trailInfo');clearTrail();if(info)info.textContent='Loading...';let r;
-  try{r=await get('/api/trail?vehicleId='+encodeURIComponent(id)+'&hours='+h)}catch(e){if(info&&sel==id)info.textContent='Azuga trail unavailable: '+e.message;return}
-  if(sel!=id)return;const p=r.points;if(!p.length){info.textContent='No movement recorded in that time.';return}
+async function showTrail(id,h,date){const info=$('trailInfo');clearTrail();if(info)info.textContent='Loading...';let r;
+  if(date)document.querySelectorAll('.trailbar button').forEach(x=>x.classList.remove('on'));
+  try{r=await get('/api/trail?vehicleId='+encodeURIComponent(id)+(date?'&date='+date:'&hours='+h))}catch(e){if(info&&sel==id)info.textContent='Azuga trail unavailable: '+e.message;return}
+  if(sel!=id)return;const p=r.points;if(!p.length){info.textContent=date?'No breadcrumbs for this truck on '+date+'.':'No movement recorded in that time.';return}
   const tm=t=>new Date(t).toLocaleString([], {weekday:'short',hour:'numeric',minute:'2-digit'});
   let run=[p[0]],col=spdColor(p[0].mph),miles=0;
   const flush=()=>{if(run.length>1){L.polyline(run.map(x=>[x.lat,x.lng]),{color:'#0b2533',weight:7,opacity:.25}).addTo(trailLayer);L.polyline(run.map(x=>[x.lat,x.lng]),{color:col,weight:4,opacity:.95,lineCap:'round'}).addTo(trailLayer)}};
   for(let i=1;i<p.length;i++){const d=hav(p[i-1],p[i]);if(d<200)miles+=d;const c=spdColor(p[i].mph);run.push(p[i]);if(c!==col||d>5){flush();run=[p[i]];col=c}}flush();
   for(let i=1;i<p.length;i++){const gap=p[i].t-p[i-1].t;if(gap>=10*60e3&&hav(p[i-1],p[i])<0.2)L.circleMarker([p[i].lat,p[i].lng],{radius:5,color:'#fff',weight:2,fillColor:'#6366f1',fillOpacity:1}).bindTooltip('Stopped '+Math.round(gap/60e3)+' min<br>'+tm(p[i-1].t)+(p[i].addr?'<br>'+esc(p[i].addr):''),{direction:'top'}).addTo(trailLayer)}
   const dot=(x,c,label)=>L.circleMarker([x.lat,x.lng],{radius:7,color:'#fff',weight:2.5,fillColor:c,fillOpacity:1}).bindTooltip(label+' · '+tm(x.t)+(x.addr?'<br>'+esc(x.addr):''),{direction:'top'}).addTo(trailLayer);
-  dot(p[0],'#0ea5e9','Start');dot(p[p.length-1],'#0f172a','Latest');
+  dot(p[0],'#0ea5e9','Start');dot(p[p.length-1],'#0f172a',date?'Last':'Latest');
+  if(date&&POMDAY)POMDAY.filter(s=>s.lat&&s.lng).forEach(s=>L.marker([s.lat,s.lng],{icon:poolIcon(s),zIndexOffset:500}).bindTooltip('<b>'+esc(s.customer||'Pool')+'</b><br>'+esc(s.address)+'<br>'+(s.visit?s.visit.mins+' min on site':'Truck not seen here'),{direction:'top',offset:[0,-8]}).addTo(trailLayer));
   trailLayer.addTo(map);map.fitBounds(L.latLngBounds(p.map(x=>[x.lat,x.lng])),{paddingTopLeft:[40,90],paddingBottomRight:[40,40],maxZoom:15});
-  info.innerHTML='<b>'+Math.round(miles)+' mi</b> · '+p.length+' points · since '+tm(p[0].t)+'<span class="tlegend"><i style="background:#22c55e"></i>&lt;30 <i style="background:#84cc16"></i>30-50 <i style="background:#f59e0b"></i>50-65 <i style="background:#ef4444"></i>65+ mph</span>'}
+  info.innerHTML=(date?'<b>'+date+'</b> · ':'')+'<b>'+Math.round(miles)+' mi</b> · '+p.length+' points · '+(date?'from ':'since ')+tm(p[0].t)+'<span class="tlegend"><i style="background:#22c55e"></i>&lt;30 <i style="background:#84cc16"></i>30-50 <i style="background:#f59e0b"></i>50-65 <i style="background:#ef4444"></i>65+ mph</span>'}
 // Small flag for numbers that might be wrong; hover or tap shows why
 const flag=t=>t&&t.length?'<span class="flag" tabindex="0" role="img" aria-label="Possible data issue" data-tip="'+esc([].concat(t).join('\\n\\n'))+'">⚑</span>':'';
 (function(){let tip;const show=e=>{const f=e.target.closest&&e.target.closest('.flag');if(!f)return;if(!tip){tip=document.createElement('div');tip.id='fltip';document.body.appendChild(tip)}
