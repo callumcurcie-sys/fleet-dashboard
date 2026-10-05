@@ -92,6 +92,22 @@ const routes = {
     if (r.person && r.person.otherN && r.person.gasN === 0) r.flags.push('No gas found, only other purchases. If this driver buys gas, it may be filed under a category or store name the site does not recognise as gas.');
     if (r.gasPerMile) r.gasPerMile.flags = ['Miles come from Azuga for this driver; gas comes from Ramp. If the driver used more than one truck or paid for someone else\'s gas, this can be off.'];
     return r; },
+  // Breadcrumbs: where one truck has been (Azuga's breadcrumb report), oldest first
+  '/api/trail': q => { const id = String(q.get('vehicleId') || ''), hours = Math.min(72, Math.max(1, +q.get('hours') || 24));
+    if (!id) throw new Error('Pick a truck.');
+    const since = hours === 'today' ? etDay().start : new Date(Date.now() - hours * 36e5);
+    return cached('trail:' + id + ':' + hours, 120, async () => {
+      let pts = [];
+      for (let page = 0; page < 6; page++) {
+        const rows = list(await azuga('https://services.azuga.com/reports/v3/reports/breadcrumb?appId=FLEET', { startDate: azIso(since), endDate: azIso(new Date()), browserTimezone: 'US/Eastern',
+          index: page, size: 1000, desc: false, sortField: 'locationTimeInDTZ', filter: { orFilter: { vehicleId: [id] } } }));
+        pts = pts.concat(rows); if (rows.length < 1000) break; await sleep(1500);
+      }
+      const t = x => { const v = x.locationTime ?? x.locationTimeInDTZ ?? x.time; return typeof v === 'number' ? v : Date.parse(v) || 0; };
+      return pts.map(x => ({ lat: +x.latitude, lng: +x.longitude, t: t(x), mph: Math.round((+x.obdSpeed || +x.speed || 0) * 0.621371), addr: clean(x.address), ev: clean(x.eventName) }))
+        .filter(p => p.lat && p.lng && Math.abs(p.lat) <= 90 && Math.abs(p.lng) <= 180).sort((a, b) => a.t - b.t);
+    }).then(points => ({ hours, points }));
+  },
   '/api/pom/route': async q => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
     const name = q.get('name') || ''; return { connected: true, day: etDay().ymd, ...(name ? await pomStopsFor(name) : {}) }; },
   '/api/pom/stops': async () => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
@@ -1863,6 +1879,13 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;bor
 .poolpin span{display:grid;place-items:center;width:22px;height:16px;border-radius:6px;background:linear-gradient(180deg,#67e8f9,#0891b2);border:2px solid #fff;box-shadow:0 2px 6px rgba(8,51,68,.35);font-size:10px;color:#fff;font-weight:800;position:relative;overflow:hidden}
 .poolpin span::after{content:'';position:absolute;left:-4px;right:-4px;top:4px;height:3px;border-radius:50%;border-top:1.5px solid rgba(255,255,255,.7)}
 .poolpin.done span{background:linear-gradient(180deg,#86efac,#16a34a)}.poolpin.done span::after{display:none}
+
+/* breadcrumb trail controls */
+.trailbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:10px 0 2px;font-size:12.5px}.trailbar>span{font-weight:700;color:#334155;margin-right:2px}
+.trailbar button{font:inherit;font-size:12px;font-weight:600;border:1px solid #cbd5e1;background:#fff;color:#334155;padding:4px 10px;border-radius:999px;cursor:pointer;transition:all .15s}
+.trailbar button:hover{border-color:#0891b2;color:#0e7490}.trailbar button.on{background:linear-gradient(135deg,#0891b2,#0e7490);border-color:transparent;color:#fff;box-shadow:0 4px 10px -4px rgba(14,116,144,.7)}
+.trailbar em{flex-basis:100%;font-style:normal;color:#64748b;font-size:12px}.trailbar em b{color:#0f172a}
+.tlegend{margin-left:10px;white-space:nowrap}.tlegend i{display:inline-block;width:14px;height:4px;border-radius:2px;margin:0 3px 2px 6px;vertical-align:middle}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -2117,12 +2140,14 @@ async function select(id){
   $('detail').innerHTML='<div class="dh">'+avatar(d,1)+'<div><h2>'+tno(id)+esc(title(r))+'</h2>'+azSub(r)+'<p>'+(named?esc(d):'No driver assigned')+(()=>{const az=dname(r),L=link(id),n=s=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');return L&&L.linked&&named&&/[a-z]/i.test(az)&&n(az)!==n(d)?flag('Azuga has '+az+' assigned to this truck, but Airtable says '+d+'. The site goes by Airtable; the next sync should update Azuga.'):''})()+(mmy&&!title(r).includes(mmy)?' · '+esc(mmy):'')+'</p></div><div style="margin-left:auto;display:flex;align-items:center">'+status(r)+(named?'<a class="repbtn" href="/report?driver='+encodeURIComponent(d)+'" target="_blank" rel="noopener">Driver report</a>':'')+'<button class="dclose" id="dclose" aria-label="Close details">×</button></div></div>'
    +'<div class="grid"><div class="kv"><span>Odometer</span><b>'+esc(odo(r))+'</b></div><div class="kv"><span>Speed</span><b>'+(moving(r)?Math.round(speed(r)):0)+' mph</b></div><div class="kv"><span>Group</span><b>'+esc(pick(r,'groupName')||'–')+'</b></div><div class="kv"><span>Plate</span><b>'+esc(pick(r,'licensePlate','licensePlateNo','plateNumber')||'–')+'</b></div><div class="kv kscore" id="kscore"><span>Driver score</span><b>…</b><small></small></div></div>'
    +'<div class="addr">'+ICON.pin+(pick(r,'address','landmark')?esc(pick(r,'address','landmark')):'<span class="trk">Tracker unavailable</span> <span class="muted">No location from Azuga for this truck right now.</span>')+'</div>'
+   +'<div class="trailbar"><span>Where it\u2019s been</span>'+[['0','Off'],['6','6 h'],['24','24 h'],['72','3 days']].map(([h,l])=>'<button data-h="'+h+'"'+(h==='0'?' class="on"':'')+'>'+l+'</button>').join('')+'<em id="trailInfo"></em></div>'
    +'<div id="pomBox" class="pom" hidden></div>'
    +'<div id="rampBox" class="ramp"></div>'
    +atBox(id)
    +'<h3>Maintenance</h3><div id="m"><div class="sk" style="width:55%"></div></div>'
    +'<details><summary>All Azuga data for this vehicle</summary><pre>'+esc(JSON.stringify(r,null,2))+'</pre></details>';
-  rampBox(id,named?d:'');scoreTile(id,named?d:'');pomBox(id,named?d:'');
+  rampBox(id,named?d:'');scoreTile(id,named?d:'');pomBox(id,named?d:'');clearTrail();
+  document.querySelectorAll('.trailbar button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.trailbar button').forEach(x=>x.classList.toggle('on',x===b));+b.dataset.h?showTrail(id,+b.dataset.h):clearTrail()});
   try{if(!maint)maint=list(await get('/api/maintenance'));if(sel!=id)return;
     const m=maint.filter(x=>vid(x)==id||vname(x)==vname(r));
     $('m').innerHTML=m.length?m.map(x=>{const s=String(pick(x,'status','reminderStatus')||'');return '<div class="ev"><span class="pill '+(/over/i.test(s)?'bad':/up/i.test(s)?'warn':'idle')+'">'+esc(s||'Scheduled')+'</span><b>'+esc(pick(x,'serviceType','serviceName')||'Service')+'</b><span class="t">'+esc(when(pick(x,'nextServiceDate','dueDate')))+(pick(x,'nextServiceOdometer')?' · at '+esc(pick(x,'nextServiceOdometer'))+' mi':'')+'</span></div>'}).join(''):'<span class="muted">'+(r.maintenanceEnabled===false?'Maintenance tracking is off for this truck in Azuga.':'Nothing due.')+'</span>';
@@ -2132,7 +2157,7 @@ async function select(id){
     TRUCKV=v;camType='';drawCams();
   }catch(e){if(sel!=id)return;$('vids').innerHTML='<span class="muted">'+esc(e.message)+'</span>';$('donut').innerHTML='';retry(id)}
 }
-function closeDetail(){sel=null;$('right').classList.remove('open','big');const bb=document.querySelector('.bigbtn');if(bb){bb.textContent='Bigger map';bb.setAttribute('aria-pressed',false)}setTimeout(()=>map.invalidateSize(),0);render()}
+function closeDetail(){clearTrail();sel=null;$('right').classList.remove('open','big');const bb=document.querySelector('.bigbtn');if(bb){bb.textContent='Bigger map';bb.setAttribute('aria-pressed',false)}setTimeout(()=>map.invalidateSize(),0);render()}
 document.addEventListener('click',e=>{if(e.target.id==='dclose')closeDetail()});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('media').open&&sel&&!$('vMap').hidden)closeDetail()});
 // Camera events: Azuga gives video links when a clip has uploaded, otherwise still photos from both cameras
@@ -2465,6 +2490,23 @@ async function loadPools(){try{const r=await get('/api/pom/stops');if(!r.connect
 function showPools(){if(!POMSTOPS)return;const on=map.getZoom()>=13;if(on&&!map.hasLayer(poolLayer)){poolLayer.addTo(map)}else if(!on&&map.hasLayer(poolLayer)){map.removeLayer(poolLayer);return}
   poolLayer.clearLayers();POMSTOPS.forEach(s=>L.marker([s.lat,s.lng],{icon:poolIcon(s),keyboard:false,zIndexOffset:-500}).bindTooltip('<b>'+esc(s.customer||'Pool')+'</b><br>'+esc(s.address)+'<br>'+esc(s.tech||'')+' · '+(s.done?'Done':'Not done yet'),{direction:'top',offset:[0,-8]}).addTo(poolLayer))}
 map.on('zoomend',showPools);setTimeout(loadPools,2000);setInterval(loadPools,3*60e3);
+// Breadcrumb trail: colored by speed, dots where it started and where it is now, small stops where it sat 10+ minutes
+const trailLayer=L.layerGroup();
+function clearTrail(){trailLayer.clearLayers();if(map.hasLayer(trailLayer))map.removeLayer(trailLayer);const i=$('trailInfo');if(i)i.textContent=''}
+const spdColor=m=>m<1?'#94a3b8':m<30?'#22c55e':m<50?'#84cc16':m<65?'#f59e0b':'#ef4444';
+const hav=(a,b)=>{const R=3958.8,r=Math.PI/180,dl=(b.lat-a.lat)*r,dn=(b.lng-a.lng)*r,x=Math.sin(dl/2)**2+Math.cos(a.lat*r)*Math.cos(b.lat*r)*Math.sin(dn/2)**2;return 2*R*Math.asin(Math.sqrt(x))};
+async function showTrail(id,h){const info=$('trailInfo');clearTrail();if(info)info.textContent='Loading...';let r;
+  try{r=await get('/api/trail?vehicleId='+encodeURIComponent(id)+'&hours='+h)}catch(e){if(info&&sel==id)info.textContent='Azuga trail unavailable: '+e.message;return}
+  if(sel!=id)return;const p=r.points;if(!p.length){info.textContent='No movement recorded in that time.';return}
+  const tm=t=>new Date(t).toLocaleString([], {weekday:'short',hour:'numeric',minute:'2-digit'});
+  let run=[p[0]],col=spdColor(p[0].mph),miles=0;
+  const flush=()=>{if(run.length>1){L.polyline(run.map(x=>[x.lat,x.lng]),{color:'#0b2533',weight:7,opacity:.25}).addTo(trailLayer);L.polyline(run.map(x=>[x.lat,x.lng]),{color:col,weight:4,opacity:.95,lineCap:'round'}).addTo(trailLayer)}};
+  for(let i=1;i<p.length;i++){const d=hav(p[i-1],p[i]);if(d<200)miles+=d;const c=spdColor(p[i].mph);run.push(p[i]);if(c!==col||d>5){flush();run=[p[i]];col=c}}flush();
+  for(let i=1;i<p.length;i++){const gap=p[i].t-p[i-1].t;if(gap>=10*60e3&&hav(p[i-1],p[i])<0.2)L.circleMarker([p[i].lat,p[i].lng],{radius:5,color:'#fff',weight:2,fillColor:'#6366f1',fillOpacity:1}).bindTooltip('Stopped '+Math.round(gap/60e3)+' min<br>'+tm(p[i-1].t)+(p[i].addr?'<br>'+esc(p[i].addr):''),{direction:'top'}).addTo(trailLayer)}
+  const dot=(x,c,label)=>L.circleMarker([x.lat,x.lng],{radius:7,color:'#fff',weight:2.5,fillColor:c,fillOpacity:1}).bindTooltip(label+' · '+tm(x.t)+(x.addr?'<br>'+esc(x.addr):''),{direction:'top'}).addTo(trailLayer);
+  dot(p[0],'#0ea5e9','Start');dot(p[p.length-1],'#0f172a','Latest');
+  trailLayer.addTo(map);map.fitBounds(L.latLngBounds(p.map(x=>[x.lat,x.lng])),{paddingTopLeft:[40,90],paddingBottomRight:[40,40],maxZoom:15});
+  info.innerHTML='<b>'+Math.round(miles)+' mi</b> · '+p.length+' points · since '+tm(p[0].t)+'<span class="tlegend"><i style="background:#22c55e"></i>&lt;30 <i style="background:#84cc16"></i>30-50 <i style="background:#f59e0b"></i>50-65 <i style="background:#ef4444"></i>65+ mph</span>'}
 // Small flag for numbers that might be wrong; hover or tap shows why
 const flag=t=>t&&t.length?'<span class="flag" tabindex="0" role="img" aria-label="Possible data issue" data-tip="'+esc([].concat(t).join('\\n\\n'))+'">⚑</span>':'';
 (function(){let tip;const show=e=>{const f=e.target.closest&&e.target.closest('.flag');if(!f)return;if(!tip){tip=document.createElement('div');tip.id='fltip';document.body.appendChild(tip)}
