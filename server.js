@@ -2010,9 +2010,7 @@ body[data-v=vPom] .vopt,body[data-v=vCam] .vopt{display:none}body[data-v=vPom] .
 .tstops span{flex:1;min-width:0}.tstops b{display:block;font-weight:600}.tstops small{color:var(--muted)}.tstops em{font-style:normal;font-size:12px;color:var(--muted);white-space:nowrap}.tstops li.done b{color:var(--muted)}
 .ctypes{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}.cchip{font:inherit;font-size:13px;font-weight:600;border:1px solid var(--line2);background:#fff;border-radius:999px;padding:6px 12px;cursor:pointer;transition:transform .15s,box-shadow .15s}
 .cchip:hover{transform:translateY(-1px)}.cchip b{margin-left:4px;opacity:.7}.cchip.on{box-shadow:0 0 0 2px var(--ink);border-color:transparent}.cchip:not(.pill).on{background:var(--deep);color:#fff}
-.cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
-.cgrid .evb{background:var(--card);box-shadow:inset 0 3px 0 var(--c-cams),var(--sh)!important;border-radius:14px;padding:12px;margin:0}.evtruck{color:var(--ink2);font-weight:600}.cgrid .evgo{position:static;align-self:center;white-space:nowrap}
-@media(max-width:900px){#vPom,#vCam{padding:12px 16px}.tgrid,.cgrid{grid-template-columns:1fr}}
+@media(max-width:900px){#vPom,#vCam{padding:12px 16px}.tgrid{grid-template-columns:1fr}}
 
 /* ===== v10: bubbles rising, shimmering name ===== */
 #bubbles{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
@@ -2023,21 +2021,36 @@ body[data-v=vPom] .vopt,body[data-v=vCam] .vopt{display:none}body[data-v=vPom] .
 .brand>div:last-child{text-shadow:none;filter:drop-shadow(0 1px 6px rgba(0,0,0,.3))}@keyframes namesh{0%,100%{background-position:0 0}50%{background-position:100% 0}}
 @media (prefers-reduced-motion:reduce){#bubbles,.brand>div:last-child{animation:none!important}#bubbles{display:none}}
 
-/* Cameras tab: day groups, big photo cards */
-.cgrid{display:block}.cday{margin-bottom:22px}.cday h3{display:flex;align-items:baseline;gap:10px;margin:0 0 10px;font-size:16px;font-weight:700;color:var(--ink)}.cday h3 span{font-size:12.5px;font-weight:500;color:var(--muted)}
-.cdgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
-.ccard{font:inherit;text-align:left;color:inherit;border:0;padding:0;background:var(--card);border-radius:16px;overflow:hidden;cursor:pointer;box-shadow:var(--sh);transition:transform .2s cubic-bezier(.2,.8,.2,1),box-shadow .2s;animation:rise .35s ease-out both}
-.ccard:hover,.ccard:focus-visible{transform:translateY(-3px);box-shadow:0 18px 32px -18px rgba(76,29,149,.55),var(--sh)}
-.cmedia{position:relative;height:168px;display:flex;gap:2px;background:#0f172a}.cmedia figure{position:relative;flex:1;margin:0;overflow:hidden}
-.cmedia img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .4s}.ccard:hover .cmedia img{transform:scale(1.05)}
-.cmedia figcaption{position:absolute;left:6px;bottom:6px;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#fff;background:rgba(15,23,42,.6);padding:2px 7px;border-radius:6px}
-.cmedia>.pill{position:absolute;left:10px;top:10px;box-shadow:0 2px 8px rgba(0,0,0,.25)}
-.cplay{position:absolute;right:10px;top:10px;display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:700;color:#fff;background:rgba(124,58,237,.9);padding:3px 9px 3px 6px;border-radius:999px}.cplay svg{width:14px;height:14px}
-.cnone{flex:1;display:grid;place-items:center;color:#94a3b8;font-size:13px;background:repeating-linear-gradient(135deg,#1e293b 0 12px,#243247 12px 24px)}
-.cprev{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;z-index:1}
-.cbody{padding:11px 14px 13px}.cbody>div{display:flex;align-items:center;gap:6px}.cbody b{font-size:15px}.cbody em{margin-left:auto;font-style:normal;font-size:13px;font-weight:600;color:var(--ink2);font-variant-numeric:tabular-nums}
-.cbody small{display:block;margin-top:2px;color:var(--muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-@media(max-width:900px){.cdgrid{grid-template-columns:1fr}}
+/* Cameras tab: inbox + big preview */
+#vCam{max-width:1400px}body[data-v=vCam] .bar{max-width:1400px}#camSort{font:inherit;padding:7px 10px;border:1px solid var(--line2);border-radius:10px;background:#fff}
+.cinbox{display:grid;grid-template-columns:minmax(320px,400px) 1fr;gap:14px;align-items:start}
+.clist{background:var(--card);border-radius:16px;box-shadow:inset 0 3px 0 var(--c-cams),var(--sh);max-height:calc(100vh - 290px);min-height:420px;overflow:auto;padding:6px}
+.cgh{position:sticky;top:-6px;z-index:1;display:flex;justify-content:space-between;align-items:center;padding:10px 10px 6px;margin:0 -6px;background:linear-gradient(var(--card) 80%,transparent);font-size:12px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--ink2)}
+.cgh span{font-weight:600;color:var(--muted);background:var(--deck2);border-radius:99px;padding:1px 8px;letter-spacing:0}
+.crow{width:100%;display:flex;align-items:center;gap:10px;font:inherit;text-align:left;color:inherit;background:none;border:0;border-radius:11px;padding:7px 8px;cursor:pointer;transition:background .12s}
+.crow:hover{background:#f5f3ff}.crow.on{background:#ede9fe;box-shadow:inset 3px 0 0 #8b5cf6}
+.cth{position:relative;flex:none;width:64px;height:40px;border-radius:7px;overflow:hidden;background:#1e293b}.cth img{width:100%;height:100%;object-fit:cover}.cth i{position:absolute;inset:0;display:grid;place-items:center;color:#fff;background:rgba(0,0,0,.25)}.cth i svg{width:16px;height:16px}
+.cri{flex:1;min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:2px}.cri .pill{font-size:11px;padding:1px 8px}.cri b{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.crow em{flex:none;font-style:normal;font-size:12px;font-weight:600;color:var(--ink2);text-align:right;font-variant-numeric:tabular-nums}
+.cpane{position:sticky;top:12px;background:var(--card);border-radius:16px;box-shadow:inset 0 3px 0 var(--c-cams),var(--sh);padding:16px 18px;animation:fadein .25s}
+.cph{display:flex;justify-content:space-between;align-items:center}.cpn{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.cpane h3{margin:8px 0 2px;font-size:20px;display:flex;align-items:center;gap:6px}.cpane>p{margin:0}
+.cshots{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0 10px}.cshots.n1,.cshots.n0{grid-template-columns:1fr}.cshots.n1 figure{aspect-ratio:16/9;max-height:52vh}
+.cshots figure{position:relative;margin:0;border-radius:12px;overflow:hidden;background:#0f172a;aspect-ratio:16/10}.cshots img,.cshots video{width:100%;height:100%;object-fit:cover;display:block}
+.cshots figcaption{position:absolute;left:8px;top:8px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#fff;background:rgba(15,23,42,.6);padding:2px 8px;border-radius:6px;pointer-events:none}
+.cshots .cnone{aspect-ratio:16/7;display:grid;place-items:center;border-radius:12px;color:#94a3b8;background:repeating-linear-gradient(135deg,#1e293b 0 12px,#243247 12px 24px)}
+.caddr{display:flex;align-items:center;gap:6px;color:var(--ink2);font-size:13.5px}.caddr svg{width:15px;height:15px;flex:none}
+.cact{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}.cact .muted{margin-left:auto;font-size:12px}
+@media(max-width:900px){.cinbox{grid-template-columns:1fr}.clist{max-height:45vh;min-height:0}.cpane{position:static}.cact .muted{display:none}}
+
+/* ===== v12: icons on every tab ===== */
+.tabs button,.tabs .reptab{display:inline-flex;align-items:center;gap:6px}
+.ti{width:16px;height:16px;flex:none;transition:transform .25s cubic-bezier(.2,.9,.3,1.4)}
+.tabs button:hover .ti,.tabs .reptab:hover .ti{transform:translateY(-2px) rotate(-8deg) scale(1.12)}
+.tabs button.on .ti{color:#0891b2;animation:tibounce .5s cubic-bezier(.2,.9,.3,1.4)}
+@keyframes tibounce{0%{transform:scale(.6)}60%{transform:scale(1.25)}100%{transform:scale(1)}}
+@media(max-width:1180px){.tabs .ti{display:none}}
+@media (prefers-reduced-motion:reduce){.ti{animation:none!important;transition:none}}
 
 /* ===== v11: a sun (or moon) that travels across the header sky ===== */
 header[data-sky=night]::before{display:none}
@@ -2058,7 +2071,7 @@ header[data-sky=dawn] .sun,header[data-sky=dusk] .sun{background:radial-gradient
  <svg class="hwave front" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M3 9c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0"/><path d="M3 15c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0" opacity=".6"/></svg></div><div>Millennial Pools<small>Fleet</small></div></div>
  <div class="live" id="live"><span class="dot"></span><span id="upd">Connecting to Azuga...</span></div>
- <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on">Live map</button><button data-v="vEdit">Edit vehicles</button><button data-v="vDrv">Drivers</button><button data-v="vPom">Pools</button><button data-v="vCam">Cameras</button><a class="reptab" href="/report" target="_blank" rel="noopener">Score report</a></nav>
+ <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Live map</button><button data-v="vEdit"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l2-5h11l3 5v4H3z"/><circle cx="7" cy="17" r="2"/><circle cx="16" cy="17" r="2"/></svg>Edit vehicles</button><button data-v="vDrv"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><circle cx="17" cy="9" r="2.4"/><path d="M15.5 14.6c2.8.2 5 2.1 5 5.4"/></svg>Drivers</button><button data-v="vPom"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M2 19.5c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M8 12V5a2 2 0 0 1 4 0M14 12V5a2 2 0 0 1 4 0M8 8h6"/></svg>Pools</button><button data-v="vCam"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3z"/></svg>Cameras</button><a class="reptab" href="/report" target="_blank" rel="noopener"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Score report</a></nav>
 </header>
 <div class="bar"><div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search trucks or drivers" aria-label="Search trucks or drivers"></div><nav class="sum" id="sum" aria-label="Filter vehicles"></nav>
  <div class="vopt"><button id="voBtn" aria-expanded="false" aria-controls="voPop"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>View<span id="voHid"></span></button>
@@ -2136,8 +2149,8 @@ header[data-sky=dawn] .sun,header[data-sky=dusk] .sun{background:radial-gradient
 </div>
 <div id="vCam" hidden>
  <div class="crewhead"><div><h2>Camera events</h2><p id="camCount" class="muted">Loading the last 7 days from Azuga...</p></div><span style="flex:1"></span>
-  <select id="camDrv" aria-label="Filter by driver"><option value="">All drivers</option></select></div>
- <div id="camTypes" class="ctypes"></div><div id="cgrid" class="cgrid"></div>
+  <select id="camSort" aria-label="Sort events"><option value="new">Newest first</option><option value="old">Oldest first</option><option value="drv">By driver</option><option value="truck">By truck</option><option value="type">By event type</option></select><select id="camDrv" aria-label="Filter by driver"><option value="">All drivers</option></select></div>
+ <div id="camTypes" class="ctypes"></div><div class="cinbox"><div id="cgrid" class="clist" role="listbox" aria-label="Camera events"></div><aside id="cprev" class="cpane"></aside></div>
 </div>
 <div id="vEdit" hidden><div class="ed">
  <aside class="panel edl"><div class="edf"><label><input type="checkbox" id="needs"> Only show trucks that need attention</label><div id="syncBar" style="margin-top:10px"></div><div class="syncp sm" id="syncE"></div></div><div id="edList"></div></aside>
@@ -2906,7 +2919,7 @@ fleetVids();
 function sky(){const d=new Date(),h=d.getHours(),hd=document.querySelector('header');if(!hd)return;hd.dataset.sky=h>=5&&h<8?'dawn':h<17&&h>=8?'day':h>=17&&h<20?'dusk':'night';
   // the sun rises at 6 and sets at 20 on an arc across the sky; at night the moon takes the same path
   const m=h*60+d.getMinutes(),day=m>=360&&m<1200,f=day?(m-360)/840:((m-1200+1440)%1440)/600,sn=hd.querySelector('.sun');
-  if(sn){sn.style.left=(6+Math.min(1,f)*80).toFixed(1)+'%';sn.style.top=(62-Math.sin(Math.min(1,f)*Math.PI)*50).toFixed(1)+'px';sn.classList.toggle('moon',!day)}}
+  if(sn){sn.style.left=(6+Math.min(1,f)*80).toFixed(1)+'%';sn.style.top=(64-Math.sin(Math.min(1,f)*Math.PI)*14).toFixed(1)+'px';sn.classList.toggle('moon',!day)}}
 sky();setInterval(sky,10*60e3);
 // ---- Pools tab: every tech's POM route for the day, with progress ----
 let POMB=null,pomTimer=null;
@@ -2936,7 +2949,7 @@ document.addEventListener('click',e=>{const b=e.target.closest('.tchip');if(!b)r
 let CAMALL=[],camTabType='';
 async function loadCamTab(){if(!CAMALL.length)$('cgrid').innerHTML='<div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div>';
   try{CAMALL=await fleetVids();renderCamTab()}catch(e){$('cgrid').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
-$('camDrv').onchange=()=>renderCamTab();
+$('camDrv').onchange=$('camSort').onchange=()=>renderCamTab();
 function renderCamTab(){const ev=CAMALL,q=$('q').value.trim().toLowerCase(),dv=$('camDrv').value;
   const truckOf=x=>{const r=all().find(v=>vid(v)==x.vehicleId);return r?title(r):''};
   const drivers=[...new Set(ev.map(x=>evDriver(x).name).filter(Boolean))].sort();
@@ -2946,23 +2959,35 @@ function renderCamTab(){const ev=CAMALL,q=$('q').value.trim().toLowerCase(),dv=$
   $('camTypes').innerHTML='<button class="cchip'+(camTabType?'':' on')+'" data-ct="">All <b>'+byDrv.length+'</b></button>'+Object.entries(c).sort((a,b)=>b[1]-a[1]).map(([t,n])=>'<button class="cchip pill '+evClass(t)+(camTabType===t?' on':'')+'" data-ct="'+esc(t)+'">'+esc(t)+' <b>'+n+'</b></button>').join('');
   VIDS=byDrv.filter(x=>(!camTabType||evName(pick(x,'eventType','eventName'))===camTabType)&&(!q||(evDriver(x).name+' '+truckOf(x)+' '+evName(pick(x,'eventType','eventName'))+' '+(pick(x,'address')||'')).toLowerCase().includes(q)));
   $('camCount').textContent=ev.length+' events across the fleet · last 7 days';
-  // grouped by day, newest first; each card shows the photos big so you can tell what it is before opening it
+  // inbox: compact rows grouped (by day, driver, truck or type) on the left, the picked event shown big on the right
   const tOf=x=>{const v=pick(x,'eventTime','startTime');return +v||Date.parse(v)||0},dayKey=t=>new Date(t).toLocaleDateString('en-CA');
-  const today=dayKey(Date.now()),yest=dayKey(Date.now()-864e5),groups=[];
-  VIDS.forEach((x,i)=>{const k=dayKey(tOf(x)),g=groups[groups.length-1];if(g&&g.k===k)g.items.push(i);else groups.push({k,items:[i]})});
-  $('cgrid').innerHTML=groups.length?groups.map(g=>'<section class="cday"><h3>'+(g.k===today?'Today':g.k===yest?'Yesterday':new Date(g.k+'T12:00').toLocaleDateString([],{weekday:'long',month:'short',day:'numeric'}))+'<span>'+g.items.length+' event'+(g.items.length>1?'s':'')+'</span></h3><div class="cdgrid">'+g.items.map(i=>camCard(VIDS[i],i,truckOf(VIDS[i]),tOf(VIDS[i]))).join('')+'</div></section>').join(''):'<div class="empty">No camera events match.</div>'}
-function camCard(x,i,truck,t){const e=pick(x,'eventType','eventName'),md=evMedia(x),D=evDriver(x);
-  const pics=md.snaps.length?md.snaps.slice(0,2):md.videos.filter(v=>v.poster).slice(0,2).map(v=>({name:v.name,url:v.poster}));
-  return '<button class="ccard" data-i="'+i+'"'+(md.videos[0]?' data-vid="'+esc(md.videos[0].url)+'"':'')+'><div class="cmedia n'+pics.length+'">'
-    +(pics.length?pics.map(p=>'<figure><img src="'+esc(p.url)+'" alt="'+esc(p.name)+' camera" loading="lazy"><figcaption>'+(/driver/i.test(p.name)?'Driver':'Road')+'</figcaption></figure>').join(''):'<div class="cnone">'+(x.requested?'Waiting on the camera to upload':'No photos for this event')+'</div>')
-    +'<span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span>'+(md.videos.length?'<span class="cplay">'+ICON.play+' Video</span>':'')+'</div>'
-    +'<div class="cbody"><div><b>'+esc(D.name||'Unknown driver')+'</b>'+(D.azuga?flag('The camera stamped this alert with '+D.azuga+', but Airtable lists '+(D.name||'someone else')+' as this truck’s driver.'):'')+'<em>'+(t?new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'')+'</em></div>'
-    +'<small>'+(truck?esc(truck)+' · ':'')+esc(pick(x,'address')||'')+'</small></div></button>'}
-// open on click; hovering a card with video plays it silently so you can see what happened
-document.addEventListener('click',e=>{const c=e.target.closest('.ccard');if(c)openMedia(+c.dataset.i)});
-document.addEventListener('mouseover',e=>{const c=e.target.closest('.ccard[data-vid]');if(!c||c.querySelector('video')||matchMedia('(prefers-reduced-motion: reduce)').matches)return;
-  const v=document.createElement('video');v.src=c.dataset.vid;v.muted=v.loop=v.playsInline=true;v.autoplay=true;v.className='cprev';c.querySelector('.cmedia').appendChild(v);
-  c.addEventListener('mouseleave',()=>v.remove(),{once:true})});
+  const today=dayKey(Date.now()),yest=dayKey(Date.now()-864e5),srt=$('camSort').value;
+  const dayName=k=>k===today?'Today':k===yest?'Yesterday':new Date(k+'T12:00').toLocaleDateString([],{weekday:'long',month:'short',day:'numeric'});
+  const keyOf={new:x=>dayName(dayKey(tOf(x))),old:x=>dayName(dayKey(tOf(x))),drv:x=>evDriver(x).name||'Unknown driver',truck:x=>truckOf(x)||'Unknown truck',type:x=>evName(pick(x,'eventType','eventName'))}[srt];
+  VIDS.sort((a,b)=>srt==='old'?tOf(a)-tOf(b):srt==='new'?tOf(b)-tOf(a):keyOf(a).localeCompare(keyOf(b))||tOf(b)-tOf(a));
+  const groups=[];VIDS.forEach((x,i)=>{const k=keyOf(x),g=groups[groups.length-1];if(g&&g.k===k)g.items.push(i);else groups.push({k,items:[i]})});
+  let at=VIDS.indexOf(CAMSEL);if(at<0)at=0;CAMSEL=VIDS[at]||null;
+  const hm=t=>t?new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'',md2=t=>new Date(t).toLocaleDateString([],{month:'short',day:'numeric'});
+  $('cgrid').innerHTML=groups.length?groups.map(g=>'<div class="cgh">'+esc(g.k)+'<span>'+g.items.length+'</span></div>'+g.items.map(i=>{const x=VIDS[i],e=pick(x,'eventType','eventName'),D=evDriver(x),m=evMedia(x),th=m.snaps[0]&&m.snaps[0].url||m.videos[0]&&m.videos[0].poster;
+    return '<button class="crow'+(i===at?' on':'')+'" data-ci="'+i+'" role="option" aria-selected="'+(i===at)+'"><span class="cth">'+(th?'<img src="'+esc(th)+'" alt="" loading="lazy">':'')+(m.videos.length?'<i>'+ICON.play+'</i>':'')+'</span>'
+      +'<span class="cri"><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><b>'+esc(srt==='drv'?(truckOf(x)||'Unknown truck'):(D.name||'Unknown driver'))+'</b></span><em>'+(srt==='new'||srt==='old'?'':md2(tOf(x))+'<br>')+hm(tOf(x))+'</em></button>'}).join('')).join(''):'<div class="empty">No camera events match.</div>';
+  camPreview()}
+let CAMSEL=null;
+function camPreview(){const x=CAMSEL,el=$('cprev');if(!x){el.innerHTML='<div class="empty">Pick an event on the left to see it here.</div>';return}
+  const i=VIDS.indexOf(x),e=pick(x,'eventType','eventName'),md=evMedia(x),D=evDriver(x),r=all().find(v=>vid(v)==x.vehicleId),v=pick(x,'eventTime','startTime'),t=+v||Date.parse(v)||0;
+  const shots=md.videos.length?md.videos.map(m=>'<figure><video src="'+esc(m.url)+'"'+(m.poster?' poster="'+esc(m.poster)+'"':'')+' controls muted playsinline preload="none"></video><figcaption>'+(/driver/i.test(m.name)?'Driver':'Road')+'</figcaption></figure>').join('')
+    :md.snaps.length?md.snaps.map(m=>'<figure><img src="'+esc(m.url)+'" alt="'+esc(m.name)+' camera"><figcaption>'+(/driver/i.test(m.name)?'Driver':'Road')+'</figcaption></figure>').join('')
+    :'<div class="cnone">'+(x.requested?'Waiting on the camera to upload this clip':'No photos or video for this event')+'</div>';
+  el.innerHTML='<div class="cph"><span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="cpn">'+(i+1)+' of '+VIDS.length+'</span></div>'
+    +'<h3>'+esc(D.name||'Unknown driver')+(D.azuga?flag('The camera stamped this alert with '+D.azuga+', but Airtable lists '+(D.name||'someone else')+' as this truck’s driver.'):'')+'</h3>'
+    +'<p class="muted">'+(r?esc(title(r))+' · ':'')+(t?new Date(t).toLocaleString([],{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'')+'</p>'
+    +'<div class="cshots n'+Math.min(2,md.videos.length||md.snaps.length)+'">'+shots+'</div>'
+    +'<p class="caddr">'+ICON.pin+esc(pick(x,'address')||'No address')+(x.speed?' · '+Math.round(x.speed*0.621371)+' mph':'')+'</p>'
+    +'<div class="cact"><button class="btn2" data-cfull="'+i+'">Open full size</button>'+(r?'<button class="btn2" data-cmap="'+esc(vid(r))+'">Show truck on map</button>':'')+'<span class="muted">Use ↑ ↓ to move through events</span></div>'}
+document.addEventListener('click',e=>{const c=e.target.closest('.crow');if(c){CAMSEL=VIDS[+c.dataset.ci];document.querySelectorAll('.crow.on').forEach(x=>{x.classList.remove('on');x.setAttribute('aria-selected','false')});c.classList.add('on');c.setAttribute('aria-selected','true');camPreview();return}
+  const f=e.target.closest('[data-cfull]');if(f)return openMedia(+f.dataset.cfull);const m=e.target.closest('[data-cmap]');if(m){document.querySelector('.tabs button[data-v=vMap]').click();select(m.dataset.cmap)}});
+document.addEventListener('keydown',e=>{if($('vCam').hidden||$('media').open||/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)||!/^Arrow(Up|Down)$/.test(e.key))return;
+  const i=VIDS.indexOf(CAMSEL)+(e.key==='ArrowDown'?1:-1),row=document.querySelector('.crow[data-ci="'+i+'"]');if(!row)return;e.preventDefault();row.click();row.scrollIntoView({block:'nearest'})});
 document.addEventListener('click',e=>{const b=e.target.closest('.cchip');if(!b)return;camTabType=b.dataset.ct;renderCamTab()});
 // a few bubbles drifting up behind the page
 (()=>{const b=document.createElement('div');b.id='bubbles';b.setAttribute('aria-hidden','true');for(let k=0;k<14;k++){const i=document.createElement('i'),z=8+Math.random()*22;i.style.cssText='left:'+(Math.random()*100).toFixed(1)+'%;width:'+z+'px;height:'+z+'px;animation-duration:'+(14+Math.random()*16).toFixed(1)+'s;animation-delay:-'+(Math.random()*30).toFixed(1)+'s';b.appendChild(i)}document.body.appendChild(b)})();
