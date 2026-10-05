@@ -843,20 +843,30 @@ async function trailRange(id, start, end, past) {
 }
 const miles = (a, b) => { const R = 3958.8, r = Math.PI / 180, dl = (b.lat - a.lat) * r, dn = (b.lng - a.lng) * r;
   return 2 * R * Math.asin(Math.sqrt(Math.sin(dl / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dn / 2) ** 2)); };
-const AT_POOL_MI = 0.1;   // within ~160 m of the pool's address counts as "at the property"
+// POM addresses are sometimes off (or have no map pin), so: look close first (~500 ft), then widen (~0.3 mi),
+// then fall back to Azuga's own street address for each breadcrumb (same street, house number within 100).
+const AT_POOL_MI = [0.1, 0.3];
+const SUFFIX = { road: 'rd', street: 'st', avenue: 'ave', av: 'ave', drive: 'dr', lane: 'ln', court: 'ct', place: 'pl', boulevard: 'blvd', circle: 'cir', terrace: 'ter', parkway: 'pkwy', highway: 'hwy', route: 'rt' };
+const streetOf = a => { const m = String(a || '').toLowerCase().split(',')[0].replace(/[.#]/g, '').match(/^(\d+)[a-z]?\s+(.+)$/);
+  return m ? { n: +m[1], st: m[2].split(/\s+/).map(w => SUFFIX[w] || w).join(' ') } : null; };
 // Arrived = the first ignition-off (or first stop) at the property; left = the last breadcrumb there before driving away.
 function visitAt(stop, pts) {
-  if (!stop.lat || !stop.lng) return null;
-  const runs = []; let run = null;
-  for (const p of pts) {
-    if (miles(p, stop) <= AT_POOL_MI) { if (!run) runs.push(run = []); run.push(p); } else run = null;
+  const home = streetOf(stop.address), tests = [];
+  if (stop.lat && stop.lng) for (const r of AT_POOL_MI) tests.push({ at: p => miles(p, stop) <= r, how: r > AT_POOL_MI[0] ? 'wide' : '' });
+  if (home) tests.push({ at: p => { const x = streetOf(p.addr); return x && x.st === home.st && Math.abs(x.n - home.n) <= 100; }, how: 'addr' });
+  for (const { at, how } of tests) {
+    const runs = []; let run = null;
+    for (const p of pts) { if (at(p)) { if (!run) runs.push(run = []); run.push(p); } else run = null; }
+    const real = runs.filter(x => x[x.length - 1].t - x[0].t >= 2 * 60e3);
+    if (!real.length) continue;
+    const best = real.sort((a, b) => (b[b.length - 1].t - b[0].t) - (a[a.length - 1].t - a[0].t))[0];
+    const off = best.find(p => /ignition\s*off|engine\s*off|stop/i.test(p.ev)) || best.find(p => p.mph === 0) || best[0];
+    const leave = best[best.length - 1].t;
+    const ft = stop.lat && stop.lng ? Math.round(Math.min(...best.map(p => miles(p, stop))) * 5280) : null;
+    const kind = how === 'wide' && ft <= AT_POOL_MI[0] * 5280 ? '' : how;   // parked close, just stepped out of the small circle for a bit
+    return { arrive: off.t, leave, mins: Math.max(0, Math.round((leave - off.t) / 6e4)), visits: real.length, ft, how: kind, wide: !!kind, parkedAt: off.addr, lat: off.lat, lng: off.lng };
   }
-  const real = runs.filter(r => r.length && r[r.length - 1].t - r[0].t >= 2 * 60e3);
-  if (!real.length) return null;
-  const best = real.sort((a, b) => (b[b.length - 1].t - b[0].t) - (a[a.length - 1].t - a[0].t))[0];
-  const off = best.find(p => /ignition\s*off|engine\s*off|stop/i.test(p.ev)) || best.find(p => p.mph === 0) || best[0];
-  const leave = best[best.length - 1].t;
-  return { arrive: off.t, leave, mins: Math.max(0, Math.round((leave - off.t) / 6e4)), visits: real.length };
+  return null;
 }
 async function visitsFor(name, ymd) {
   const { tech, stops } = await pomStopsFor(name, ymd);
@@ -1501,6 +1511,7 @@ main{display:grid;grid-template-columns:390px 1fr;gap:14px;padding:12px 24px 24p
 #right.open{grid-template-columns:minmax(300px,34%) 1fr;grid-template-rows:minmax(240px,40%) 1fr;grid-template-areas:"donut map" "cams detail"}
 #right:not(.open) #detail,#right:not(.open) .pane{display:none}
 #right:not(.open) .bigbtn{display:none}
+#right.open.min-cams{grid-template-areas:"donut map" "detail detail"}#right.open.min-donut{grid-template-areas:"map map" "cams detail"}#right.open.min-donut.min-cams{grid-template-areas:"map map" "detail detail"}#right.min-cams #cams,#right.min-cams .minb[data-min=cams],#right.min-donut #donut,#right.min-donut .minb[data-min=donut],main.min-list #list,main.min-list>.minb{display:none}main>#list{grid-area:1/1}main>#right{grid-area:1/2}main.min-list>#right{grid-area:1/1}main.min-list{grid-template-columns:1fr}.minb{z-index:5;justify-self:end;align-self:start;margin:8px 8px 0 0;width:26px;height:26px;border:0;border-radius:8px;background:var(--card);color:var(--muted);box-shadow:0 1px 3px rgba(15,23,42,.18);font:700 16px/1 system-ui;cursor:pointer;display:grid;place-items:center;transition:background .15s,color .15s,transform .15s}.minb:hover,.minb:focus-visible{background:#0c4a6e;color:#fff;transform:scale(1.08)}#right:not(.open) .minb{display:none}#dock{position:fixed;right:24px;bottom:18px;z-index:900;display:flex;gap:6px;padding:6px;border-radius:999px;background:rgba(12,74,110,.88);backdrop-filter:blur(8px);box-shadow:0 8px 24px rgba(12,74,110,.35);animation:dockin .35s cubic-bezier(.2,.8,.2,1)}#dock[hidden]{display:none}#dock button{border:0;border-radius:999px;padding:6px 12px;background:rgba(255,255,255,.14);color:#fff;font:600 12.5px system-ui;cursor:pointer;transition:background .15s}#dock button:hover,#dock button:focus-visible{background:rgba(255,255,255,.3)}@keyframes dockin{from{opacity:0;transform:translateY(16px)}}#donut .ph,#cams .ph{padding-right:30px}@media(max-width:900px){.minb{display:none!important}main>#list,main>#right{grid-area:auto!important}}
 #right.open.big{grid-template-columns:1fr;grid-template-rows:1fr;grid-template-areas:"map"}#right.open.big>:not(#map){display:none}
 #right.open #map{grid-area:map}#donut{grid-area:donut}#cams{grid-area:cams}#detail{grid-area:detail}
 .pane{background:var(--card);border-radius:var(--r);box-shadow:var(--sh);padding:16px 18px;overflow:auto;min-height:0}
@@ -1933,7 +1944,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;bor
 .ptl i{position:absolute;top:2px;bottom:2px;border-radius:4px;background:linear-gradient(180deg,#38bdf8,#0284c7);box-shadow:0 0 0 1px #fff;cursor:help}.ptl i:hover{background:#0c4a6e}
 .ptl span{position:absolute;top:18px;font-size:10.5px;color:#64748b}.ptl span:last-child{right:0}
 .plist .pvisit{color:#0369a1!important;font-weight:600}.plist .pvisit.none{color:#94a3b8!important;font-weight:500}
-.plist .vmins{display:block;font-size:13px;color:#0c4a6e}.plist .vmins.short{color:#dc2626}.plist .vmins.long{color:#c2410c}
+.plist .pfar{display:inline-block;margin-left:4px;padding:0 6px;border-radius:9px;background:#fff7ed;color:#c2410c;font-size:11px;font-weight:600}.plist .vmins{display:block;font-size:13px;color:#0c4a6e}.plist .vmins.short{color:#dc2626}.plist .vmins.long{color:#c2410c}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -1980,7 +1991,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;bor
 </form></dialog>
 <div id="vMap">
 <main><div id="list"><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div><div class="card"><div class="av none"></div><div class="ci"><div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div><div class="sk" style="width:80%"></div></div></div></div>
-<div id="right"><div id="donut" class="pane"></div><div id="map"></div><div id="cams" class="pane"><div class="ph"><h3>Camera events</h3><span id="camN">last 7 days</span></div><div id="vids"></div></div><div id="detail"></div></div></main></div>
+<button type="button" class="minb" data-min="list" style="grid-area:1/1" title="Minimize truck list" aria-label="Minimize truck list">–</button><div id="right"><button type="button" class="minb" data-min="donut" style="grid-area:donut" title="Minimize events chart" aria-label="Minimize events chart">–</button><button type="button" class="minb" data-min="cams" style="grid-area:cams" title="Minimize camera events" aria-label="Minimize camera events">–</button><div id="donut" class="pane"></div><div id="map"></div><div id="cams" class="pane"><div class="ph"><h3>Camera events</h3><span id="camN">last 7 days</span></div><div id="vids"></div></div><div id="detail"></div></div></main><div id="dock" hidden role="toolbar" aria-label="Minimized panels"></div></div>
 <div id="vDrv" hidden>
  <div class="crewhead">
   <div><h2>Your crew</h2><p id="drvCount" class="muted">Loading drivers from Airtable...</p></div>
@@ -2071,7 +2082,7 @@ let tileErrs=0;const osm=()=>L.tileLayer('https://tile.openstreetmap.org/{z}/{x}
 const hot=L.tileLayer('https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png',{subdomains:'abc',attribution:'&copy; OpenStreetMap, tiles by HOT',maxZoom:19}).addTo(map);
 hot.on('tileerror',()=>{if(++tileErrs===6){map.removeLayer(hot);osm().addTo(map)}});
 const Legend=L.Control.extend({onAdd(){const d=L.DomUtil.create('div','legend');d.innerHTML='<span><i style="background:#16a34a"></i>Moving</span><span><i style="background:#0a2c40"></i>Parked</span><span><i style="background:#fff;border:2px solid #c2410c;border-radius:3px;box-shadow:none"></i>Office</span><button type="button">Show all trucks</button><button type="button" class="bigbtn" aria-pressed="false">Bigger map</button>';L.DomEvent.disableClickPropagation(d);d.querySelector('button').onclick=fitAll;d.querySelector('.bigbtn').onclick=()=>bigMap(!$('right').classList.contains('big'));return d}});
-function bigMap(on){$('right').classList.toggle('big',on);const b=document.querySelector('.bigbtn');if(b){b.textContent=on?'Smaller map':'Bigger map';b.setAttribute('aria-pressed',on)}setTimeout(()=>{map.invalidateSize();const m=sel&&markers[sel];if(m)map.panTo(m.getLatLng(),{animate:false})},0)}
+const MINS={list:'Truck list',donut:'Events chart',cams:'Camera events'};function applyMin(){const m=OPTS.min||[];document.querySelector('main').classList.toggle('min-list',m.includes('list'));['donut','cams'].forEach(k=>$('right').classList.toggle('min-'+k,m.includes(k)));const d=$('dock');d.hidden=!m.length;d.innerHTML=m.map(k=>'<button type="button" data-k="'+k+'" title="Show '+MINS[k].toLowerCase()+' again">+ '+MINS[k]+'</button>').join('');setTimeout(()=>map.invalidateSize(),0)}function setMin(k,on){const m=(OPTS.min||[]).filter(x=>x!==k);if(on)m.push(k);OPTS.min=m;saveOpts();applyMin()}document.addEventListener('click',e=>{const b=e.target.closest('.minb');if(b)return setMin(b.dataset.min,true);const c=e.target.closest('#dock button');if(c)setMin(c.dataset.k,false)});function bigMap(on){$('right').classList.toggle('big',on);const b=document.querySelector('.bigbtn');if(b){b.textContent=on?'Smaller map':'Bigger map';b.setAttribute('aria-pressed',on)}setTimeout(()=>{map.invalidateSize();const m=sel&&markers[sel];if(m)map.panTo(m.getLatLng(),{animate:false})},0)}
 new Legend({position:'topright'}).addTo(map);
 // Nearby trucks merge into one numbered bubble; trucks parked on the same spot fan out when clicked
 const cluster=L.markerClusterGroup({showCoverageOnHover:false,maxClusterRadius:42,spiderfyOnMaxZoom:true,
@@ -2113,7 +2124,7 @@ let filt='all';
 const OPT_DEF={hideNoDriver:true,hideUnlinked:false,hideNoLoc:false,sort:'moving'};
 let OPTS={...OPT_DEF};try{Object.assign(OPTS,JSON.parse(localStorage.getItem('fleetView')||'{}'))}catch(e){}
 if(!OPTS.sortV2){OPTS.sort='moving';OPTS.sortV2=1;try{localStorage.setItem('fleetView',JSON.stringify(OPTS))}catch(e){}}   // new default for everyone, once
-const saveOpts=()=>{try{localStorage.setItem('fleetView',JSON.stringify(OPTS))}catch(e){}};
+const saveOpts=()=>{try{localStorage.setItem('fleetView',JSON.stringify(OPTS))}catch(e){}};applyMin();
 const hasDriver=r=>/[a-z]/i.test(who(r)),hasLoc=r=>+pick(r,'latitude','lat')&&+pick(r,'longitude','lng','lon');
 const hiddenBy=r=>(OPTS.hideNoDriver&&!hasDriver(r))||(OPTS.hideUnlinked&&!(link(vid(r))||{}).linked)||(OPTS.hideNoLoc&&!hasLoc(r));
 const visible=()=>all().filter(r=>!hiddenBy(r));
@@ -2538,7 +2549,7 @@ async function pomBox(id,name,date){const el=$('pomBox');if(!el)return;if(!name)
    +(vis.length?'<div class="psum"><b>'+Math.floor(tot/60)+'h '+(tot%60)+'m</b> at pools · '+vis.length+' of '+st.length+' visits found in the truck’s breadcrumbs</div>'+tl:(r.points?'':'<div class="muted" style="font-size:12px">No breadcrumbs from the truck '+(isToday?'yet today':'that day')+', so time on site can’t be measured.</div>'))
    +(r.tech.toLowerCase()!==name.toLowerCase()?'<div class="muted" style="font-size:12px;margin:4px 0">Shown as '+esc(r.tech)+' in Pool Office Manager</div>':'')
    +'<ol class="plist">'+st.map((s,i)=>'<li class="'+(s.done?'done':'')+'" data-i="'+i+'"><span class="pn">'+(s.done?'✓':i+1)+'</span><div><b>'+esc(s.customer||'Customer')+'</b><span>'+esc(s.address||'No address')+'</span>'
-     +(s.visit?'<span class="pvisit">Arrived '+t(s.visit.arrive)+' · left '+t(s.visit.leave)+(s.visit.visits>1?' · came back '+(s.visit.visits-1)+'×':'')+'</span>':(!isToday||s.done?'<span class="pvisit none">Truck not seen at this address</span>':''))+'</div>'
+     +(s.visit?'<span class="pvisit">Arrived '+t(s.visit.arrive)+' · left '+t(s.visit.leave)+(s.visit.visits>1?' · came back '+(s.visit.visits-1)+'×':'')+(s.visit.how==='wide'?' <span class="pfar">parked ~'+(s.visit.ft>=1000?(s.visit.ft/5280).toFixed(2)+' mi':s.visit.ft+' ft')+' away</span>'+flag('The truck never stopped within 500 ft of the address in Pool Office Manager, so this visit was matched from up to 0.3 mi away. The address in POM may be off, or this could be a neighbouring stop.'):s.visit.how==='addr'?' <span class="pfar">matched by street</span>'+flag('Matched by street address instead of map position: the truck stopped at '+(s.visit.parkedAt||'a nearby number on the same street')+'. '+(s.lat?'POM\\'s map pin for this pool is more than 0.3 mi away, so the pin is probably wrong.':'POM has no map pin for this pool.')):'')+'</span>':(!isToday||s.done?'<span class="pvisit none">Truck not seen at this address</span>':''))+'</div>'
      +'<em>'+(s.visit?'<strong class="vmins'+(s.visit.mins<5?' short':s.visit.mins>60?' long':'')+'">'+s.visit.mins+' min</strong>':'')+(s.done?'Done':esc(String(s.serviceStatus||s.status||'To do').toLowerCase().split('_').join(' ').replace(/^./,c=>c.toUpperCase())))+(s.time?'<small>Scheduled '+t(s.time)+'</small>':'')+'</em></li>').join('')+'</ol>';
   bind();POMDAY=isToday?null:st;
   el.querySelectorAll('.plist li').forEach(li=>li.onclick=()=>{const s=st[+li.dataset.i];if(s.lat&&s.lng){map.setView([s.lat,s.lng],17);showPools()}})}
@@ -2566,7 +2577,7 @@ async function showTrail(id,h,date){const info=$('trailInfo');clearTrail();if(in
   for(let i=1;i<p.length;i++){const gap=p[i].t-p[i-1].t;if(gap>=10*60e3&&hav(p[i-1],p[i])<0.2)L.circleMarker([p[i].lat,p[i].lng],{radius:5,color:'#fff',weight:2,fillColor:'#6366f1',fillOpacity:1}).bindTooltip('Stopped '+Math.round(gap/60e3)+' min<br>'+tm(p[i-1].t)+(p[i].addr?'<br>'+esc(p[i].addr):''),{direction:'top'}).addTo(trailLayer)}
   const dot=(x,c,label)=>L.circleMarker([x.lat,x.lng],{radius:7,color:'#fff',weight:2.5,fillColor:c,fillOpacity:1}).bindTooltip(label+' · '+tm(x.t)+(x.addr?'<br>'+esc(x.addr):''),{direction:'top'}).addTo(trailLayer);
   dot(p[0],'#0ea5e9','Start');dot(p[p.length-1],'#0f172a',date?'Last':'Latest');
-  if(date&&POMDAY)POMDAY.filter(s=>s.lat&&s.lng).forEach(s=>L.marker([s.lat,s.lng],{icon:poolIcon(s),zIndexOffset:500}).bindTooltip('<b>'+esc(s.customer||'Pool')+'</b><br>'+esc(s.address)+'<br>'+(s.visit?s.visit.mins+' min on site':'Truck not seen here'),{direction:'top',offset:[0,-8]}).addTo(trailLayer));
+  if(date&&POMDAY)POMDAY.map(s=>s.lat&&s.lng?s:s.visit&&s.visit.lat?{...s,lat:s.visit.lat,lng:s.visit.lng}:null).filter(Boolean).forEach(s=>L.marker([s.lat,s.lng],{icon:poolIcon(s),zIndexOffset:500}).bindTooltip('<b>'+esc(s.customer||'Pool')+'</b><br>'+esc(s.address)+'<br>'+(s.visit?s.visit.mins+' min on site':'Truck not seen here'),{direction:'top',offset:[0,-8]}).addTo(trailLayer));
   trailLayer.addTo(map);map.fitBounds(L.latLngBounds(p.map(x=>[x.lat,x.lng])),{paddingTopLeft:[40,90],paddingBottomRight:[40,40],maxZoom:15});
   info.innerHTML=(date?'<b>'+date+'</b> · ':'')+'<b>'+Math.round(miles)+' mi</b> · '+p.length+' points · '+(date?'from ':'since ')+tm(p[0].t)+'<span class="tlegend"><i style="background:#22c55e"></i>&lt;30 <i style="background:#84cc16"></i>30-50 <i style="background:#f59e0b"></i>50-65 <i style="background:#ef4444"></i>65+ mph</span>'}
 // Small flag for numbers that might be wrong; hover or tap shows why
