@@ -124,11 +124,30 @@ const routes = {
       rows.map(pomStop).filter(s => s.tech && pomCheckup(s)).forEach(s => list.push(s));
     }
     const td = await truckDrivers().catch(() => ({})), drivers = Object.keys(td).filter(v => td[v]).map(v => ({ name: td[v], v })), trucks = {};
+    const custIds = [...new Set(list.map(s => s.customerId).filter(Boolean))], svcs = [];
+    for (const c of custIds) svcs.push(...await pomServices(c).catch(e => { console.error('POM services:', e.message); return []; }));
+    const svcName = v => { const w = (v.workers || []).find(x => x.primary) || (v.workers || [])[0]; return w && w.user ? [w.user.firstName, w.user.lastName].filter(Boolean).join(' ') : ''; };
+    list.forEach(s => { const day = etDay(new Date(s.time)).ymd, hit = svcs.find(v => v.appointmentIdentifier && v.appointmentIdentifier.id === s.id)
+      || svcs.find(v => svcName(v) === s.tech && etDay(new Date(v.startTime)).ymd === day);
+      if (hit) { s.service = hit.id; s.done = true; } });
     const at = await atData().catch(() => ({ drivers: [] })), people = at.drivers.filter(d => d.name && d.status !== 'Inactive'), roles = {}, seen = new Set();
     [...new Set(list.map(s => s.tech))].forEach(n => { const m = rampMatch(drivers, n), p = rampMatch(people, n); trucks[n] = m ? m.v : null; roles[n] = p ? p.role : ''; if (p) seen.add(p.id); });
     // Techs, tech assistants and auditors submit the weekly truck form; owners, district, regional and staffers don't
     const missing = people.filter(d => CHECKUP_ROLES.includes(d.role) && !seen.has(d.id)).map(d => ({ name: d.name, role: d.role }));
     return { connected: true, now: Date.now(), today: etDay().ymd, weeks, checkups: list.sort((a, b) => Date.parse(b.time) - Date.parse(a.time)), trucks, roles, missing }; },
+  '/api/pom/probe': async () => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
+    const out = {}, tryIt = async (k, q, v) => { try { out[k] = await pom(q, v); } catch (e) { out[k] = { error: e.message }; } };
+    await tryIt('needs', 'mutation($data: CreateAppointmentRecurringRuleInput!) { createAppointmentRecurringRule(data: $data) { id } }', { data: {} });
+    await tryIt('unknown', 'mutation($data: CreateAppointmentRecurringRuleInput!) { createAppointmentRecurringRule(data: $data) { id } }', { data: { zzzNotAField: 1 } });
+    await tryIt('users', '{ infiniteUsers(first: 200) { edges { node { id firstName lastName isActive } } } }');
+    const { start } = etDay(), from = new Date(+start - 8 * 864e5);
+    await tryIt('rules', `query($s: AppointmentsV2Selector) { infiniteAppointmentsV2(selector: $s, first: 200) { edges { node { id date duration recurringRuleId recurringDate
+      recurringRule { id rruleString startDate endDate } serviceType { id display } customer { id firstName lastName } primaryWorker { id firstName lastName } } } } }`,
+      { s: { startDate: from.toISOString(), endDate: new Date(+start + 864e5).toISOString(), includePinned: true } });
+    if (out.rules && out.rules.infiniteAppointmentsV2) out.rules = out.rules.infiniteAppointmentsV2.edges.map(e => e.node).filter(n => pomCheckup({ type: n.serviceType && n.serviceType.display, customer: [n.customer && n.customer.firstName, n.customer && n.customer.lastName].join(' ') }));
+    const cid = Array.isArray(out.rules) && out.rules[0] && out.rules[0].customer && out.rules[0].customer.id;
+    if (cid) await tryIt('services', `query($c: String!) { infiniteServices(selector: {filters: {customerId: {equals: $c}}}, first: 3, sort: {field: startTime, order: DESC}) { edges { node { ${POM_SVC_FIELDS} } } } }`, { c: cid });
+    return out; },
   '/api/pom/stops': async () => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
     return { connected: true, day: etDay().ymd, stops: (await pomToday()).map(pomStop).filter(s => s.tech && !pomCheckup(s) && s.lat && s.lng) }; },
   '/api/pom/debug': async () => { const { start, end } = etDay();   // behind the dashboard login: what POM sends back, for setting this up
@@ -952,13 +971,26 @@ async function pomRange(start, end) {
   return out;
 }
 const pomDay = ymd => cached('pom:' + ymd, ymd === etDay().ymd ? 120 : 3600, () => { const { start, end } = etDay(new Date(ymd + 'T16:00:00Z')); return pomRange(start, end); });   // past days don't change much
+// A submitted check-up is a POM "service" (the form the tech fills in), linked back to its appointment
+const POM_SVC_FIELDS = `id startTime endTime internalNotes customerNotes createdAt
+  workers { primary user { id firstName lastName } } type { id display }
+  appointmentIdentifier { id recurringRuleId recurringDate }
+  pictures { id description createdAt file { id url } }
+  media { id description mediaType createdAt customServiceReportFieldLabel file { id url thumbnails { thumbnail450Url thumbnail900Url } } }
+  customServiceReport { id name }
+  customFields { id value customField { id name type } newCustomField { id name type } }`;
+const pomServices = (customerId, first = 200) => cached('pomsvc:' + customerId + ':' + first, 120, async () => {
+  const d = await pom(`query($c: String!, $n: Int!) { infiniteServices(selector: {filters: {customerId: {equals: $c}}}, first: $n, sort: {field: startTime, order: DESC}) { edges { node { ${POM_SVC_FIELDS} } } } }`, { c: customerId, n: first });
+  return ((d.infiniteServices || {}).edges || []).map(e => e.node).filter(Boolean); });
+const pomService = async id => { const d = await pom(`query($id: ID!) { infiniteServices(selector: {filters: {id: {equals: $id}}}) { edges { node { ${POM_SVC_FIELDS} customer { id firstName lastName } } } } }`, { id });
+  return (((d.infiniteServices || {}).edges || [])[0] || {}).node || null; };
 // Weekly truck check-ups live in POM as appointments ("Truck Check-Up" for "Trucks Submissions"); they aren't pool visits
 const pomCheckup = s => /truck\s*(check|submission|inspection)/i.test((s.type || '') + ' ' + (s.customer || ''));
 const pomDone = a => /complet|done|finish|serviced|closed/i.test(String(a.status || '') + ' ' + (a.serviceStatus && a.serviceStatus.name || ''));
 const pomStop = a => { const c = a.customer || {}, w = a.primaryWorker || (a.workers || []).find(x => x.primary) || (a.workers || [])[0] || {};
   return { id: a.id, time: a.date, mins: a.duration, status: a.status, serviceStatus: a.serviceStatus && a.serviceStatus.name, done: pomDone(a),
     type: a.serviceType && a.serviceType.display, tech: [w.firstName, w.lastName].filter(Boolean).join(' '),
-    customer: [c.firstName, c.lastName].filter(Boolean).join(' '), address: [c.streetAddress, c.city, c.state].filter(Boolean).join(', '),
+    customerId: c.id || null, customer: [c.firstName, c.lastName].filter(Boolean).join(' '), address: [c.streetAddress, c.city, c.state].filter(Boolean).join(', '),
     lat: +c.latitude || null, lng: +c.longitude || null }; };
 // Tech names in POM may be spelled a little differently from Airtable (DiMaio / Dimeo): same matching rules as Ramp
 async function pomStopsFor(name, ymd) {
@@ -1385,6 +1417,34 @@ function fleetHtml(rows, shareUrl, link) {
 // Every driver's score in one small call (for the chips on truck cards and in the Drivers list)
 routes['/api/scores'] = () => cached('scoresAll', 300, async () => { if (!Object.keys(EVA.ev).length) return {};
   return Object.fromEntries((await fleetReport()).map(x => [dupeName(x.name), x.r.score])); });
+// One submitted truck check-up, laid out like the score reports (logged-in only)
+async function serveCheckup(res, id) {
+  const send = (code, h) => { res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }); res.end(h); };
+  const shell = (title, body) => `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${H(title)}</title><style>${REPORT_CSS}
+.ans{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}.ans div{background:#f8fafc;border-radius:12px;padding:10px 14px}.ans span{display:block;font-size:12px;color:#64748b;font-weight:600}.ans b{font-size:16px}
+.yes{color:#15803d}.no{color:#dc2626}.pics{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.pics figure{margin:0;background:#f1f5f9;border-radius:12px;overflow:hidden}.pics img{width:100%;height:180px;object-fit:cover;display:block}.pics figcaption{padding:8px 10px;font-size:12.5px;color:#475569}</style></head>
+<body><div class="wrap"><div class="top"><div class="logo">MP</div><div><h1>${H(title)}</h1><p>Millennial Pools fleet · weekly truck check-up from Pool Office Manager</p></div></div>${body}</div></body></html>`;
+  try {
+    if (!clean(process.env.POM_API_KEY)) return send(503, shell('Check-up', '<div class="card">Pool Office Manager is not connected.</div>'));
+    const v = await pomService(String(id || '').slice(0, 60));
+    if (!v) return send(404, shell('Check-up not found', '<div class="card">POM has no submission with that id. It may have been deleted.</div>'));
+    const w = (v.workers || []).find(x => x.primary) || (v.workers || [])[0], who = w && w.user ? [w.user.firstName, w.user.lastName].filter(Boolean).join(' ') : 'Unknown';
+    const when = t => t ? new Date(t).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+    const at = await atData().catch(() => ({ trucks: [] })), tm = rampMatch(at.trucks.filter(t => t.driver && t.driver.name).map(t => ({ name: t.driver.name, t })), who), truck = tm ? tm.t : null;
+    const val = (f, x) => { const t = String((f && f.type) || '').toLowerCase(), raw = x == null ? '' : String(x);
+      if (/bool|check/.test(t) || /^(true|false)$/i.test(raw)) return /^(true|yes|1)$/i.test(raw) ? '<b class="yes">✓ Yes</b>' : '<b class="no">✕ No</b>';
+      return raw ? '<b>' + H(raw) + '</b>' : '<b class="muted">–</b>'; };
+    const ans = (v.customFields || []).map(c => { const f = c.newCustomField || c.customField || {}; return f.name ? '<div><span>' + H(f.name) + '</span>' + val(f, c.value) + '</div>' : ''; }).join('');
+    const pics = [...(v.media || []).filter(x => x.file && x.file.url && !/video/i.test(x.mediaType || '')).map(x => ({ url: (x.file.thumbnails && x.file.thumbnails.thumbnail900Url) || x.file.url, full: x.file.url, cap: x.customServiceReportFieldLabel || x.description || '' })),
+      ...(v.pictures || []).filter(x => x.file && x.file.url).map(x => ({ url: x.file.url, full: x.file.url, cap: x.description || '' }))];
+    const notes = [v.customerNotes, v.internalNotes].filter(x => clean(x));
+    const body = `<div class="card"><div class="head"><span class="score good" style="font-size:20px">✓<i>done</i></span><div><h2>${H(who)}</h2><div class="muted">Submitted ${H(when(v.endTime || v.startTime || v.createdAt))}${truck ? ' · ' + H([truck.truckNo && '#' + truck.truckNo.split(/[ ~(]/)[0], truck.year, truck.make, truck.model].filter(Boolean).join(' ')) : ''}${v.customServiceReport && v.customServiceReport.name ? ' · ' + H(v.customServiceReport.name) : ''}</div></div></div></div>`
+      + `<div class="card"><h3 style="margin-top:0">Answers</h3>${ans ? '<div class="ans">' + ans + '</div>' : '<p class="muted">No form answers on this submission.</p>'}</div>`
+      + `<div class="card"><h3 style="margin-top:0">Photos</h3>${pics.length ? '<div class="pics">' + pics.map(x => `<figure><a href="${H(x.full)}" target="_blank" rel="noopener"><img src="${H(x.url)}" alt="${H(x.cap || 'Check-up photo')}" loading="lazy"></a>${x.cap ? '<figcaption>' + H(x.cap) + '</figcaption>' : ''}</figure>`).join('') + '</div>' : '<p class="muted">No photos were added.</p>'}</div>`
+      + (notes.length ? `<div class="card"><h3 style="margin-top:0">Notes</h3>${notes.map(n => '<p>' + H(n) + '</p>').join('')}</div>` : '');
+    return send(200, shell('Truck check-up · ' + who, body));
+  } catch (e) { return send(503, shell('Check-up', '<div class="card">Could not load this check-up from Pool Office Manager: ' + H(e.message) + '</div>')); }
+}
 async function serveReport(res, kind, name, base, publicView, tok) {
   const send = h => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }); res.end(h); };
   try {
@@ -1441,6 +1501,7 @@ http.createServer(async (req, res) => {
     }
   }
   if (url.pathname === '/api/media') return media(url.searchParams.get('u'), req, res);
+  if (url.pathname === '/checkup') return serveCheckup(res, url.searchParams.get('id'));
   if (url.pathname === '/report') return serveReport(res, url.searchParams.get('driver') ? 'driver' : 'fleet', url.searchParams.get('driver'), base, false);
   const route = routes[url.pathname];
   if (!route) { res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(PAGE); }
@@ -2094,7 +2155,7 @@ header[data-sky=dawn] .sun,header[data-sky=dusk] .sun{background:radial-gradient
 .chk tbody tr{animation:rise .35s ease-out both;animation-delay:calc(var(--i)*40ms)}.chk tbody tr:hover{background:#fffbeb}
 .chd{display:flex;align-items:center;gap:10px}.chd b{display:block;font-size:14.5px}
 .chc{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:9px;font-weight:800;font-size:15px}
-.chc.ok{background:#dcfce7;color:#15803d}.chc.miss{background:#fee2e2;color:#dc2626}.chc.due{background:#fef3c7;color:#b45309;animation:duep 1.6s ease-in-out infinite}.chc.none{background:repeating-linear-gradient(135deg,#f1f5f9 0 4px,#fff 4px 8px);box-shadow:inset 0 0 0 1px #e2e8f0}
+.chc.ok{background:#dcfce7;color:#15803d}a.chc{text-decoration:none;cursor:pointer;transition:transform .15s,box-shadow .15s}a.chc:hover{transform:scale(1.15);box-shadow:0 0 0 3px rgba(22,163,74,.3)}.chc.miss{background:#fee2e2;color:#dc2626}.chc.due{background:#fef3c7;color:#b45309;animation:duep 1.6s ease-in-out infinite}.chc.none{background:repeating-linear-gradient(135deg,#f1f5f9 0 4px,#fff 4px 8px);box-shadow:inset 0 0 0 1px #e2e8f0}
 @keyframes duep{50%{box-shadow:0 0 0 4px rgba(245,158,11,.25)}}
 .chr{font-size:14px}.chr.g{color:#15803d}.chr.y{color:#b45309}.chr.r{color:#dc2626}.chs2{font-size:13px;color:#15803d}
 .chleg{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);padding:10px 18px 6px;margin:0}.chleg .chc{width:22px;height:22px;font-size:12px;border-radius:6px;margin-left:8px}
@@ -2135,10 +2196,17 @@ header[data-sky=night] .birds{display:none}
 .edhero.mk-ford{background:linear-gradient(115deg,#1e3a8a,#2563eb 60%,#60a5fa)}.edhero.mk-chevy{background:linear-gradient(115deg,#78350f,#d97706 60%,#fbbf24)}.edhero.mk-ram,.edhero.mk-dodge{background:linear-gradient(115deg,#7f1d1d,#dc2626 60%,#f87171)}.edhero.mk-gmc{background:linear-gradient(115deg,#450a0a,#b91c1c 60%,#ef4444)}.edhero.mk-toyota{background:linear-gradient(115deg,#3f3f46,#71717a 60%,#d4d4d8)}.edhero.mk-nissan{background:linear-gradient(115deg,#1f2937,#475569 60%,#94a3b8)}
 .edhero h2{color:#fff}.edhero .azn,.edhero .pos{color:rgba(255,255,255,.85)!important}.edhero .tno,.edhero .mk{display:none}
 .ehno{flex:none;display:grid;place-items:center;min-width:64px;height:64px;padding:0 10px;border-radius:16px;background:rgba(255,255,255,.18);font-size:26px;font-weight:800;letter-spacing:-.02em;box-shadow:inset 0 0 0 1px rgba(255,255,255,.3);animation:ehpop .5s cubic-bezier(.2,.9,.3,1.4) both}.ehno svg{width:30px;height:30px}
-.ehtruck{position:absolute;right:120px;bottom:6px;width:86px;opacity:.9;animation:ehdrive 1.1s cubic-bezier(.2,.8,.2,1) both}
+.ehtruck{position:absolute;right:110px;bottom:-4px;width:170px;animation:ehdrive 1.1s cubic-bezier(.2,.8,.2,1) both}
 .edhero::after{content:'';position:absolute;right:-40px;top:-60px;width:220px;height:220px;border-radius:50%;background:radial-gradient(circle,rgba(255,255,255,.22),transparent 65%);pointer-events:none}
 @keyframes ehpop{from{transform:scale(.4) rotate(-12deg);opacity:0}}@keyframes ehdrive{from{transform:translateX(-420px);opacity:0}70%{opacity:1}}
 @media(max-width:900px){.ehtruck{display:none}}@media (prefers-reduced-motion:reduce){.ehno,.ehtruck{animation:none}}
+
+/* ===== v17: a swim ring rides the end of each tech's progress bar ===== */
+.tcard .pbar{overflow:visible;position:relative}.tcard .pbar i{position:relative}
+.tcard .pbar i::after{content:'';position:absolute;right:-12px;top:50%;width:24px;height:24px;margin-top:-12px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='8' fill='none' stroke='white' stroke-width='6'/%3E%3Ccircle cx='12' cy='12' r='8' fill='none' stroke='%23ef4444' stroke-width='6' stroke-dasharray='6.28 6.28'/%3E%3Ccircle cx='12' cy='12' r='11' fill='none' stroke='%230b2533' stroke-opacity='.35'/%3E%3Ccircle cx='12' cy='12' r='5' fill='none' stroke='%230b2533' stroke-opacity='.35'/%3E%3C/svg%3E") center/contain no-repeat;filter:drop-shadow(0 2px 3px rgba(8,74,99,.35));animation:ringbob 2.4s ease-in-out infinite}
+.tcard.fin .pbar i::after{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='8' fill='none' stroke='white' stroke-width='6'/%3E%3Ccircle cx='12' cy='12' r='8' fill='none' stroke='%2322c55e' stroke-width='6' stroke-dasharray='6.28 6.28'/%3E%3Ccircle cx='12' cy='12' r='11' fill='none' stroke='%230b2533' stroke-opacity='.35'/%3E%3Ccircle cx='12' cy='12' r='5' fill='none' stroke='%230b2533' stroke-opacity='.35'/%3E%3C/svg%3E")}
+@keyframes ringbob{0%,100%{transform:translateY(0) rotate(-8deg)}50%{transform:translateY(-3px) rotate(8deg)}}
+@media (prefers-reduced-motion:reduce){.tcard .pbar i::after{animation:none}}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -2583,7 +2651,7 @@ async function openEd(id){
     return '<label>'+label+(fa?'<span class="fromAt">FROM AIRTABLE</span>':'')+'<input name="'+k+'" type="'+type+'" '+(opt?'maxlength="'+opt+'"':'')+' value="'+esc(cur??'')+'" data-orig="'+esc(orig??'')+'"'+(fa?' class="dirty"':'')+(k==='odometer'?' placeholder="Now: '+esc(odo(v))+'"':'')+'>'+(k==='odometer'?'<span class="hint">Leave blank to keep the current reading</span>':'')+'</label>'};
   const eL=link(vid(v)),eNo=eL&&eL.linked&&eL.truck.truckNo?eL.truck.truckNo.split(/[ ~(]/)[0]:'',eMk=String((eL&&eL.linked&&eL.truck.make)||v.make||'').toLowerCase().split(' ')[0];
   $('edCard').innerHTML='<div class="edh edhero mk-'+(MAKES[eMk]?MAKES[eMk][1].replace(/^mk-/,''):'other')+'"><div class="ehno">'+(eNo?'#'+esc(eNo):ICON.truck)+'</div><div><h2>'+tno(vid(v))+esc(title(v))+'</h2>'+azSub(v)+'</div><span class="pos">'+(i+1)+' of '+rs.length+'</span>'
-    +'<svg class="ehtruck" viewBox="0 0 100 50" aria-hidden="true"><path d="M6 20h46v-8h14l13 13v13H6z" fill="#fff"/><path d="M55 14.5h10l10.5 10.5H55z" fill="#bae6fd"/><rect x="6" y="27" width="73" height="4" fill="rgba(0,0,0,.18)"/><circle cx="21" cy="40" r="7" fill="#0f172a"/><circle cx="21" cy="40" r="3" fill="#cbd5e1"/><circle cx="64" cy="40" r="7" fill="#0f172a"/><circle cx="64" cy="40" r="3" fill="#cbd5e1"/><path d="M2 24h-8M0 30h-12M2 36h-8" stroke="#fff" stroke-width="2" stroke-linecap="round" opacity=".7"/></svg></div>'
+    +'<div class="ehtruck" aria-hidden="true">'+truckArt(truckKind([(eL&&eL.linked&&eL.truck.model)||v.model||'',title(v)].join(' ')))+'</div></div>'
 
    +(lk?'<div class="at"><h4>Linked to Airtable'+(L.truck.truckNo?' truck #'+esc(L.truck.truckNo):'')+' · matched by '+esc(L.how)+'</h4>'
       +(Object.keys(L.changes).length?'Fields marked <span class="fromAt">FROM AIRTABLE</span> have newer info in Airtable. Click Save to update Azuga.':'Azuga matches Airtable.')
@@ -3041,6 +3109,47 @@ function renderPom(){const r=POMB;if(!r)return;
       +(nx?'<div class="tnext"><span>Next</span><b>'+esc(nx.customer||'Pool')+'</b><small>'+esc(nx.address)+(nx.time?' · '+hm(nx.time):'')+'</small></div>':'<div class="tnext fin"><span>All done</span><b>Route finished</b></div>')
       +'<details><summary>All '+t.total+' stops</summary><ol class="tstops">'+t.stops.map(stopLi).join('')+'</ol></details></div>'}).join(''):'<div class="empty">'+(q?'No techs match your search.':'No pools scheduled for this day.')+'</div>')}
 document.addEventListener('click',e=>{const b=e.target.closest('.tchip');if(!b)return;document.querySelector('.tabs button[data-v=vMap]').click();select(b.dataset.truck)});
+// Side-view work vehicles, facing right, plain white fleet paint, no logos. kind: mid | full | van
+function truckArt(kind){
+ const P={ // y0 = sill line, w = wheel centre y
+  mid: {W:250,bed:46,roof:16,cb:98,ws:[160,182],hood:42,nose:236,y0:68,wy:72,r:17,wh:[58,194]},
+  full:{W:262,bed:40,roof:10,cb:104,ws:[170,190],hood:34,nose:250,y0:68,wy:72,r:19,wh:[62,206]}}[kind];
+ const d='<defs><linearGradient id="tbB" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset=".6" stop-color="#e8edf3"/><stop offset="1" stop-color="#b8c2ce"/></linearGradient>'
+  +'<linearGradient id="tbG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#dbeafe"/><stop offset=".5" stop-color="#7dd3fc"/><stop offset="1" stop-color="#1e3a5f"/></linearGradient>'
+  +'<radialGradient id="tbR" cx=".4" cy=".35" r=".7"><stop offset="0" stop-color="#f8fafc"/><stop offset="1" stop-color="#94a3b8"/></radialGradient></defs>';
+ const well=(x,y,r)=>'<path d="M'+(x-r-5)+' '+(y+1)+' A'+(r+5)+' '+(r+5)+' 0 0 1 '+(x+r+5)+' '+(y+1)+' Z" fill="#111827"/>';
+ const wheel=(x,y,r)=>{let s='';for(let a=0;a<6;a++){const t=(a*60-90)*Math.PI/180;s+='<path d="M'+x+' '+y+'L'+(x+Math.cos(t)*r*.58).toFixed(1)+' '+(y+Math.sin(t)*r*.58).toFixed(1)+'" stroke="#64748b" stroke-width="2.2" stroke-linecap="round"/>'}
+   return '<circle cx="'+x+'" cy="'+y+'" r="'+r+'" fill="#1f2937"/><circle cx="'+x+'" cy="'+y+'" r="'+(r-2.5)+'" fill="none" stroke="#374151" stroke-width="1.2"/><circle cx="'+x+'" cy="'+y+'" r="'+(r*.62)+'" fill="url(#tbR)" stroke="#475569"/>'+s+'<circle cx="'+x+'" cy="'+y+'" r="'+(r*.17)+'" fill="#334155"/>'};
+ if(kind==='van'){const W=244,y0=68,wy=72,r=17,wh=[56,190];
+  return '<svg viewBox="0 0 '+W+' 100" xmlns="http://www.w3.org/2000/svg">'+d+'<ellipse cx="'+W/2+'" cy="92" rx="'+(W/2-14)+'" ry="3.5" fill="rgba(0,0,0,.2)"/>'
+   +'<path d="M14 '+y0+' V24 Q14 14 24 14 H176 Q190 14 202 32 L226 46 Q236 50 236 58 V'+y0+' Z" fill="url(#tbB)" stroke="#475569" stroke-width="1.2"/>'
+   +well(wh[0],wy,r)+well(wh[1],wy,r)
+   +'<path d="M178 20 H184 Q192 20 202 36 H178 Z" fill="url(#tbG)" stroke="#334155"/><path d="M150 22 H172 V38 H150 Z" fill="url(#tbG)" stroke="#334155"/>'
+   +'<path d="M176 18 V64 M146 18 V64 M90 16 V64 M20 20 V64" stroke="#9aa6b5" stroke-width="1.1"/><rect x="160" y="44" width="8" height="2.4" rx="1.2" fill="#64748b"/><rect x="132" y="44" width="8" height="2.4" rx="1.2" fill="#64748b"/>'
+   +'<path d="M14 42 H222" stroke="#fff" stroke-width="1.4" opacity=".8"/><path d="M14 43.5 H222" stroke="#9aa6b5" stroke-width=".8"/>'
+   +'<path d="M226 47 Q234 50 235 55 H224 Z" fill="#fef3c7" stroke="#92400e" stroke-width=".7"/><rect x="230" y="57" width="7" height="7" rx="1.5" fill="#1f2937"/>'
+   +'<path d="M196 30 l7 -3 v7 h-7z" fill="#1e293b"/><rect x="14" y="30" width="5" height="14" rx="1.5" fill="#dc2626"/>'
+   +'<rect x="8" y="62" width="14" height="7" rx="3" fill="#475569"/><rect x="226" y="62" width="14" height="7" rx="3" fill="#475569"/><rect x="'+(wh[0]+r+6)+'" y="65" width="'+(wh[1]-wh[0]-2*r-12)+'" height="4" rx="2" fill="#334155"/>'
+   +wheel(wh[0],wy,r)+wheel(wh[1],wy,r)+'</svg>'}
+ const {W,bed,roof,cb,ws,hood,nose,y0,wy,r,wh}=P,mid=(cb+ws[0])/2+2;
+ return '<svg viewBox="0 0 '+W+' 100" xmlns="http://www.w3.org/2000/svg">'+d+'<ellipse cx="'+W/2+'" cy="92" rx="'+(W/2-14)+'" ry="3.5" fill="rgba(0,0,0,.2)"/>'
+  +'<path d="M14 '+y0+' V'+bed+' H'+cb+' V'+(roof+8)+' Q'+cb+' '+roof+' '+(cb+8)+' '+roof+' H'+ws[0]+' Q'+(ws[0]+6)+' '+roof+' '+(ws[0]+10)+' '+(roof+6)+' L'+ws[1]+' '+(hood-2)
+  +' L'+(nose-14)+' '+hood+' Q'+(nose-2)+' '+(hood+1)+' '+nose+' '+(hood+8)+' V'+y0+' Z" fill="url(#tbB)" stroke="#475569" stroke-width="1.2"/>'
+  +well(wh[0],wy,r)+well(wh[1],wy,r)
+  +'<path d="M18 '+(bed+3)+' H'+(cb-3)+'" stroke="#9aa6b5" stroke-width="1"/><path d="M'+(cb-1)+' '+(bed+1)+' V'+(y0-2)+'" stroke="#9aa6b5" stroke-width="1"/>'
+  +'<path d="M'+(cb+5)+' '+(roof+5)+' H'+(mid-3)+' V'+(hood-4)+' H'+(cb+5)+' Z" fill="url(#tbG)" stroke="#334155"/>'
+  +'<path d="M'+(mid+3)+' '+(roof+5)+' H'+(ws[0]+2)+' Q'+(ws[0]+7)+' '+(roof+5)+' '+(ws[1]-6)+' '+(hood-4)+' H'+(mid+3)+' Z" fill="url(#tbG)" stroke="#334155"/>'
+  +'<path d="M'+mid+' '+(roof+3)+' V'+(y0-3)+' M'+(ws[1]-4)+' '+(hood-2)+' V'+(y0-5)+'" stroke="#9aa6b5" stroke-width="1.1"/>'
+  +'<path d="M14 '+(hood+4)+' H'+(nose-6)+'" stroke="#fff" stroke-width="1.5" opacity=".85"/><path d="M14 '+(hood+5.6)+' H'+(nose-6)+'" stroke="#9aa6b5" stroke-width=".8"/>'
+  +'<rect x="'+(mid-16)+'" y="'+(hood+8)+'" width="8" height="2.4" rx="1.2" fill="#64748b"/><rect x="'+(ws[1]-18)+'" y="'+(hood+8)+'" width="8" height="2.4" rx="1.2" fill="#64748b"/>'
+  +'<path d="M'+(ws[1]-8)+' '+(hood-9)+' l8 -2 v7 h-8z" fill="#1e293b"/>'
+  +'<path d="M'+(nose-12)+' '+(hood+2)+' Q'+(nose-1)+' '+(hood+3)+' '+(nose)+' '+(hood+9)+' H'+(nose-12)+' Z" fill="#fef3c7" stroke="#92400e" stroke-width=".7"/>'
+  +'<rect x="'+(nose-3)+'" y="'+(hood+11)+'" width="6" height="'+(y0-hood-17)+'" rx="1.5" fill="#1f2937"/><path d="M'+(nose-3)+' '+(hood+14)+' h6 M'+(nose-3)+' '+(hood+17)+' h6" stroke="#64748b" stroke-width=".8"/>'
+  +'<rect x="14" y="'+(bed+5)+'" width="5" height="11" rx="1.5" fill="#dc2626"/><path d="M15 '+(bed+1)+' H'+(cb-4)+'" stroke="#fff" stroke-width="1.4" opacity=".8"/>'
+  +'<rect x="8" y="'+(y0-6)+'" width="14" height="7" rx="3" fill="#475569"/><rect x="'+(nose-10)+'" y="'+(y0-6)+'" width="15" height="7" rx="3" fill="#475569"/>'
+  +'<rect x="'+(wh[0]+r+6)+'" y="'+(y0-3)+'" width="'+(wh[1]-wh[0]-2*r-12)+'" height="4" rx="2" fill="#334155"/>'
+  +wheel(wh[0],wy,r)+wheel(wh[1],wy,r)+'</svg>'}
+const truckKind=m=>/transit|promaster|express|savana|sprinter|econoline|e-?series|van/i.test(m)?'van':/f-?[123]50|silverado|sierra|ram|tundra|titan|super ?duty/i.test(m)?'full':'mid';
 // ---- Truck check-ups tab: the weekly POM truck form, per driver, week by week ----
 let CHK=null;
 async function loadChk(){if(!CHK)$('chkGrid').innerHTML='<div class="panel" style="padding:16px"><div class="sk" style="width:60%"></div><div class="sk" style="width:80%"></div></div>';
@@ -3067,7 +3176,7 @@ function renderChk(){const r=CHK;if(!r)return;
   const icon={ok:'✓',miss:'✕',due:'•',none:''},word={ok:'Submitted',miss:'Missed',due:'Due',none:'Not assigned'};
   $('chkGrid').innerHTML=rows.length?'<div class="chk panel"><table><thead><tr><th>Driver</th>'+days.map((d,i)=>'<th class="'+(i?'':'now')+'">'+wk(d)+'<br>'+lbl(d)+'</th>').join('')+'<th>On time</th><th>Streak</th></tr></thead><tbody>'
     +rows.map((x,ri)=>{const tr=r.trucks[x.n];return '<tr style="--i:'+ri+'"><td><div class="chd">'+avatar(x.n)+'<div><b>'+esc(x.n)+(role(x.n)?'<span class="role r'+RL.indexOf(role(x.n))+'">'+esc(role(x.n))+'</span>':'<span class="role" title="Set a role on the Drivers tab">No role</span>')+'</b>'+(tr?'<button class="tchip" data-truck="'+esc(tr)+'">'+tno(tr)+'Show on map</button>':'<small class="muted">No truck matched</small>')+'</div></div></td>'
-      +x.st.map((st,i)=>{const s=x.cs[i];return '<td><span class="chc '+st+'" title="'+word[st]+(s?' · '+esc(new Date(s.time).toLocaleString([],{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})):'')+'">'+icon[st]+'</span></td>'}).join('')
+      +x.st.map((st,i)=>{const s=x.cs[i],tip=word[st]+(s?' · '+esc(new Date(s.time).toLocaleString([],{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})):'')+(s&&s.service?' · click to open':'');return '<td>'+(s&&s.service?'<a class="chc '+st+' open" href="/checkup?id='+encodeURIComponent(s.service)+'" target="_blank" rel="noopener" title="'+tip+'">'+icon[st]+'</a>':'<span class="chc '+st+'" title="'+tip+'">'+icon[st]+'</span>')+'</td>'}).join('')
       +'<td><b class="chr '+(x.rate===null?'':x.rate>=80?'g':x.rate>=50?'y':'r')+'">'+(x.rate===null?'–':x.rate+'%')+'</b></td><td>'+(x.streak?'<b class="chs2">'+x.streak+' wk'+(x.streak>1?'s':'')+'</b>':'<span class="muted">–</span>')+'</td></tr>'}).join('')
     +(r.missing||[]).filter(m=>!q||m.name.toLowerCase().includes(q)).map(m=>'<tr class="chmiss"><td><div class="chd">'+avatar(m.name)+'<div><b>'+esc(m.name)+'<span class="role r'+RL.indexOf(m.role)+'">'+esc(m.role)+'</span></b><small>No check-up set up in POM</small></div></div></td><td colspan="'+days.length+'"><span class="chwarn">⚠ '+esc(m.role)+'s should get the weekly truck check-up. Add it for them in Pool Office Manager.</span></td><td>–</td><td>–</td></tr>').join('')
     +'</tbody></table>'+(skip.length?'<p class="chskip">Not required: '+skip.map(n=>esc(n)+' ('+esc(role(n))+')').join(', ')+'. Owners, district, regional and staffers don\u2019t submit check-ups, so they aren\u2019t counted.</p>':'')+'<p class="chleg"><span class="chc ok">✓</span> Submitted <span class="chc miss">✕</span> Missed <span class="chc due">•</span> Still due <span class="chc none"></span> Not assigned that week</p></div>'
