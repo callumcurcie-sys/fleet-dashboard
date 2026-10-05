@@ -115,9 +115,9 @@ const routes = {
     const td = await truckDrivers().catch(() => ({})), drivers = Object.keys(td).filter(v => td[v]).map(v => ({ name: td[v], v }));
     const techs = Object.entries(by).filter(([n]) => n).map(([name, stops]) => { const m = rampMatch(drivers, name);
       return { name, truck: m ? m.v : null, driver: m ? m.name : null, total: stops.length, done: stops.filter(s => s.done).length, stops }; });
-    return { connected: true, date, today: date === etDay().ymd, techs, unassigned: by[''] || [] }; },
+    return { connected: true, date, today: date === etDay().ymd, techs }; },   // stops with no tech are ignored
   '/api/pom/stops': async () => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
-    return { connected: true, day: etDay().ymd, stops: (await pomToday()).map(pomStop).filter(s => s.lat && s.lng) }; },
+    return { connected: true, day: etDay().ymd, stops: (await pomToday()).map(pomStop).filter(s => s.tech && s.lat && s.lng) }; },
   '/api/pom/debug': async () => { const { start, end } = etDay();   // behind the dashboard login: what POM sends back, for setting this up
     try { const all = await pomToday(); return { auth: pomAuth, day: etDay().ymd, start, end, count: all.length, techs: [...new Set(all.map(a => pomStop(a).tech))], statuses: [...new Set(all.map(a => a.status + ' / ' + (a.serviceStatus && a.serviceStatus.name)))], sample: all.slice(0, 2) }; }
     catch (e) { return { error: e.message }; } },
@@ -2013,6 +2013,18 @@ body[data-v=vPom] .vopt,body[data-v=vCam] .vopt{display:none}body[data-v=vPom] .
 .cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
 .cgrid .evb{background:var(--card);box-shadow:inset 0 3px 0 var(--c-cams),var(--sh)!important;border-radius:14px;padding:12px;margin:0}.evtruck{color:var(--ink2);font-weight:600}.cgrid .evgo{position:static;align-self:center;white-space:nowrap}
 @media(max-width:900px){#vPom,#vCam{padding:12px 16px}.tgrid,.cgrid{grid-template-columns:1fr}}
+
+/* ===== v10: ripples where you click, bubbles rising, shimmering name ===== */
+.rip{position:fixed;z-index:9999;pointer-events:none;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;border:2px solid rgba(8,145,178,.55);animation:ripc .7s ease-out forwards}
+.rip.b{animation-delay:.12s;border-color:rgba(34,211,238,.45)}
+@keyframes ripc{from{transform:scale(.3);opacity:1}to{transform:scale(5);opacity:0}}
+#bubbles{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
+#bubbles i{position:absolute;bottom:-40px;border-radius:50%;background:radial-gradient(circle at 32% 30%,rgba(255,255,255,.95) 0 14%,rgba(165,243,252,.35) 40%,rgba(8,145,178,.12) 70%);box-shadow:inset 0 0 0 1px rgba(8,145,178,.25);animation:bub linear infinite}
+@keyframes bub{0%{transform:translate(0,0)}25%{transform:translate(14px,-25vh)}50%{transform:translate(-10px,-50vh)}75%{transform:translate(12px,-75vh)}100%{transform:translate(0,-110vh)}}
+.brand>div:last-child{background:linear-gradient(90deg,#fff 0%,#a5f3fc 30%,#fff 45%,#fde68a 60%,#fff 75%);background-size:300% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:namesh 7s ease-in-out infinite}
+.brand>div:last-child small{-webkit-text-fill-color:#a5f3fc;color:#a5f3fc}
+.brand>div:last-child{text-shadow:none;filter:drop-shadow(0 1px 6px rgba(0,0,0,.3))}@keyframes namesh{0%,100%{background-position:0 0}50%{background-position:100% 0}}
+@media (prefers-reduced-motion:reduce){.rip,#bubbles,.brand>div:last-child{animation:none!important}#bubbles{display:none}}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -2881,7 +2893,7 @@ function renderPom(){const r=POMB;if(!r)return;
   if(!r.connected){$('pbCount').textContent='Pool Office Manager is not connected (add POM_API_KEY in Render).';$('pbSum').innerHTML=$('pbList').innerHTML='';return}
   const q=$('q').value.trim().toLowerCase(),hit=t=>!q||t.name.toLowerCase().includes(q)||t.stops.some(s=>(s.customer+' '+s.address).toLowerCase().includes(q));
   const T=r.techs.filter(hit).sort((a,b)=>(a.done===a.total)-(b.done===b.total)||a.done/a.total-b.done/b.total||a.name.localeCompare(b.name));
-  const tot=r.techs.reduce((a,t)=>a+t.total,0)+r.unassigned.length,done=r.techs.reduce((a,t)=>a+t.done,0)+r.unassigned.filter(s=>s.done).length,pct=tot?Math.round(done/tot*100):0;
+  const tot=r.techs.reduce((a,t)=>a+t.total,0),done=r.techs.reduce((a,t)=>a+t.done,0),pct=tot?Math.round(done/tot*100):0;
   $('pbCount').textContent=r.techs.length+' techs · '+tot+' pools scheduled'+(r.today?' · updates every 2 minutes':'');
   $('pbSum').innerHTML='<div class="pbs"><div class="pbring" style="--v:'+pct+'"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9" pathLength="100"/><circle class="fill" cx="18" cy="18" r="15.9" pathLength="100"/></svg><b>'+pct+'%</b></div>'
     +'<div><b>'+done+'</b><span>done</span></div><div><b>'+(tot-done)+'</b><span>to go</span></div><div><b>'+r.techs.filter(t=>t.done<t.total).length+'</b><span>techs still on route</span></div><div><b>'+r.techs.filter(t=>t.total&&t.done===t.total).length+'</b><span>finished</span></div></div>';
@@ -2890,8 +2902,7 @@ function renderPom(){const r=POMB;if(!r)return;
       +(t.truck?'<button class="tchip" data-truck="'+esc(t.truck)+'">'+tno(t.truck)+'Show on map</button>':'<small class="muted">No truck matched in Airtable</small>')+'</div><span class="tpct">'+(fin?'Done':p+'%')+'</span></div>'
       +'<div class="pbar"><i style="width:'+p+'%"></i></div><div class="tmeta"><b>'+t.done+' of '+t.total+'</b> pools done'+(last?' · last at '+esc(last.customer||'a pool'):'')+'</div>'
       +(nx?'<div class="tnext"><span>Next</span><b>'+esc(nx.customer||'Pool')+'</b><small>'+esc(nx.address)+(nx.time?' · '+hm(nx.time):'')+'</small></div>':'<div class="tnext fin"><span>All done</span><b>Route finished</b></div>')
-      +'<details><summary>All '+t.total+' stops</summary><ol class="tstops">'+t.stops.map(stopLi).join('')+'</ol></details></div>'}).join(''):'<div class="empty">'+(q?'No techs match your search.':'No pools scheduled for this day.')+'</div>')
-    +(r.unassigned.length&&!q?'<div class="tcard un"><div class="th"><div class="av none">?</div><div><b>Not assigned to a tech</b><small class="muted">'+r.unassigned.length+' pools</small></div></div><ol class="tstops">'+r.unassigned.map(stopLi).join('')+'</ol></div>':'')}
+      +'<details><summary>All '+t.total+' stops</summary><ol class="tstops">'+t.stops.map(stopLi).join('')+'</ol></details></div>'}).join(''):'<div class="empty">'+(q?'No techs match your search.':'No pools scheduled for this day.')+'</div>')}
 document.addEventListener('click',e=>{const b=e.target.closest('.tchip');if(!b)return;document.querySelector('.tabs button[data-v=vMap]').click();select(b.dataset.truck)});
 // ---- Cameras tab: every camera event in the fleet, filter by type and driver ----
 let CAMALL=[],camTabType='';
@@ -2909,6 +2920,9 @@ function renderCamTab(){const ev=CAMALL,q=$('q').value.trim().toLowerCase(),dv=$
   $('camCount').textContent=ev.length+' events across the fleet · last 7 days';
   $('cgrid').innerHTML=VIDS.length?VIDS.map((x,i)=>evRow(x,i,truckOf(x))).join(''):'<div class="empty">No camera events match.</div>'}
 document.addEventListener('click',e=>{const b=e.target.closest('.cchip');if(!b)return;camTabType=b.dataset.ct;renderCamTab()});
+// water ripples wherever you click, and a few bubbles drifting up behind the page
+document.addEventListener('pointerdown',e=>{if(matchMedia('(prefers-reduced-motion: reduce)').matches)return;['','b'].forEach(c=>{const r=document.createElement('i');r.className='rip '+c;r.style.left=e.clientX+'px';r.style.top=e.clientY+'px';document.body.appendChild(r);setTimeout(()=>r.remove(),900)})},{passive:true});
+(()=>{const b=document.createElement('div');b.id='bubbles';b.setAttribute('aria-hidden','true');for(let k=0;k<14;k++){const i=document.createElement('i'),z=8+Math.random()*22;i.style.cssText='left:'+(Math.random()*100).toFixed(1)+'%;width:'+z+'px;height:'+z+'px;animation-duration:'+(14+Math.random()*16).toFixed(1)+'s;animation-delay:-'+(Math.random()*30).toFixed(1)+'s';b.appendChild(i)}document.body.appendChild(b)})();
 // sliding white pill behind the active tab
 function moveTab(){const b=document.querySelector('.tabs button.on'),i=document.querySelector('.tabind');if(b&&i){i.style.left=b.offsetLeft+'px';i.style.width=b.offsetWidth+'px'}}
 addEventListener('resize',moveTab);(document.fonts&&document.fonts.ready||Promise.resolve()).then(moveTab);setTimeout(moveTab,50);
