@@ -92,6 +92,13 @@ const routes = {
     if (r.person && r.person.otherN && r.person.gasN === 0) r.flags.push('No gas found, only other purchases. If this driver buys gas, it may be filed under a category or store name the site does not recognise as gas.');
     if (r.gasPerMile) r.gasPerMile.flags = ['Miles come from Azuga for this driver; gas comes from Ramp. If the driver used more than one truck or paid for someone else\'s gas, this can be off.'];
     return r; },
+  '/api/pom/route': async q => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
+    const name = q.get('name') || ''; return { connected: true, day: etDay().ymd, ...(name ? await pomStopsFor(name) : {}) }; },
+  '/api/pom/stops': async () => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
+    return { connected: true, day: etDay().ymd, stops: (await pomToday()).map(pomStop).filter(s => s.lat && s.lng) }; },
+  '/api/pom/debug': async () => { const { start, end } = etDay();   // behind the dashboard login: what POM sends back, for setting this up
+    try { const all = await pomToday(); return { auth: pomAuth, day: etDay().ymd, start, end, count: all.length, techs: [...new Set(all.map(a => pomStop(a).tech))], statuses: [...new Set(all.map(a => a.status + ' / ' + (a.serviceStatus && a.serviceStatus.name)))], sample: all.slice(0, 2) }; }
+    catch (e) { return { error: e.message }; } },
   '/api/score/status': () => ({ jobs: WARM, events: Object.keys(EVA.ev).length, weeksBackfilled: EVA.weeks, miles: !!(cache.get('scores') || {}).data }),
   '/api/score': q => scoreFor(q.get('vehicleId') || '', q.get('name') || ''),
   '/api/videos': q => {
@@ -806,6 +813,65 @@ async function mpgFor(name, rampPerson) {
   }
   if (rampPerson && rampPerson.gas > 0) { const g = rampPerson.gas / GAS_PRICE, m = miles / g; if (ok(m)) return withFlags({ mpg: m, miles, gallons: g, source: 'ramp', price: GAS_PRICE }, mine); }
   return null;
+}
+
+// ---------------- Pool Office Manager: today's pool stops for each tech ----------------
+// Read-only. POM_API_KEY lives in Render. POM's backend is GraphQL; these are the same queries POM's own schedule uses.
+const POM_GQL = process.env.POM_API_URL || 'https://backend.poolservicemanager.com/graphql';
+let pomAuth = null;   // which header style POM accepted
+async function pom(query, variables) {
+  const key = clean(process.env.POM_API_KEY);
+  if (!key) throw new Error('Pool Office Manager is not connected (add POM_API_KEY in Render).');
+  const styles = pomAuth ? [pomAuth] : ['bearer', 'x-api-key', 'both'];
+  let last = '';
+  for (const st of styles) {
+    const h = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    if (st !== 'x-api-key') h.Authorization = 'Bearer ' + key;
+    if (st !== 'bearer') h['x-api-key'] = key;
+    const r = await fetch(POM_GQL, { method: 'POST', headers: h, body: JSON.stringify({ query, variables }) });
+    const j = await r.json().catch(() => ({}));
+    const err = (j.errors || []).map(e => e.message).join('; ');
+    if (r.ok && j.data && !/unauth|forbidden|not authenticated|invalid.*(key|token)/i.test(err)) { pomAuth = st; if (err) console.error('POM partial:', err); return j.data; }
+    last = r.status + ' ' + (err || JSON.stringify(j).slice(0, 160));
+    if (pomAuth) break;
+  }
+  throw new Error('Pool Office Manager said: ' + last);
+}
+const POM_STOP_FIELDS = `id date duration status pinned primaryWorker { id firstName lastName } workers { id firstName lastName primary }
+  serviceType { id display } serviceStatus { id name } customer { id firstName lastName streetAddress city state zipCode latitude longitude }`;
+// Midnight-to-midnight today in New Jersey time
+function etDay(d = new Date()) {
+  const ymd = d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const off = -parseInt((new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', timeZoneName: 'shortOffset' }).formatToParts(new Date(ymd + 'T12:00:00Z')).find(x => x.type === 'timeZoneName') || {}).value.replace('GMT', '') || '-5', 10);   // hours behind UTC: 4 or 5
+  const start = new Date(ymd + 'T00:00:00Z'); start.setUTCHours(off);
+  return { ymd, start, end: new Date(+start + 864e5 - 1) };
+}
+const pomToday = () => cached('pomToday', 120, async () => {
+  const { start, end } = etDay(), out = [];
+  let after = null;
+  for (let page = 0; page < 10; page++) {
+    const d = await pom(`query($selector: AppointmentsV2Selector, $first: Int, $after: String) { infiniteAppointmentsV2(selector: $selector, first: $first, after: $after) {
+      edges { node { ${POM_STOP_FIELDS} } } pageInfo { endCursor hasNextPage } } }`,
+      { selector: { startDate: start.toISOString(), endDate: end.toISOString(), includePinned: true }, first: 200, after });
+    const c = d.infiniteAppointmentsV2 || {};
+    (c.edges || []).forEach(e => e && e.node && out.push(e.node));
+    if (!c.pageInfo || !c.pageInfo.hasNextPage) break;
+    after = c.pageInfo.endCursor;
+  }
+  return out;
+});
+const pomDone = a => /complet|done|finish|serviced|closed/i.test(String(a.status || '') + ' ' + (a.serviceStatus && a.serviceStatus.name || ''));
+const pomStop = a => { const c = a.customer || {}, w = a.primaryWorker || (a.workers || []).find(x => x.primary) || (a.workers || [])[0] || {};
+  return { id: a.id, time: a.date, mins: a.duration, status: a.status, serviceStatus: a.serviceStatus && a.serviceStatus.name, done: pomDone(a),
+    type: a.serviceType && a.serviceType.display, tech: [w.firstName, w.lastName].filter(Boolean).join(' '),
+    customer: [c.firstName, c.lastName].filter(Boolean).join(' '), address: [c.streetAddress, c.city, c.state].filter(Boolean).join(', '),
+    lat: +c.latitude || null, lng: +c.longitude || null }; };
+// Tech names in POM may be spelled a little differently from Airtable (DiMaio / Dimeo): same matching rules as Ramp
+async function pomStopsFor(name) {
+  const stops = (await pomToday()).map(pomStop), techs = [...new Set(stops.map(s => s.tech).filter(Boolean))].map(n => ({ name: n }));
+  const m = rampMatch(techs, name) || techs.find(t => { const a = dupeName(t.name).split(' '), b = dupeName(name).split(' ');
+    return a[0] && b[0] && a[0].slice(0, 3) === b[0].slice(0, 3) && near(a[a.length - 1], b[b.length - 1]); });
+  return { tech: m ? m.name : null, stops: m ? stops.filter(s => s.tech === m.name).sort((x, y) => Date.parse(x.time) - Date.parse(y.time)) : [] };
 }
 
 // ---------------- Ramp: each driver's card spend over the last 30 days ----------------
@@ -1785,6 +1851,18 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;bor
 .rgrid .rgas{position:relative}.rgas .spark{position:absolute;right:12px;top:12px;width:42%;height:30px;fill:#3a3d00;opacity:.75}
 .kv.kscore{position:relative}.kscore>span .flag{position:absolute;top:9px;right:9px;margin:0}
 .mgauge{position:relative;display:inline-block;width:90px;height:7px;border-radius:99px;background:rgba(255,255,255,.12);overflow:hidden;align-self:center}.mgauge i{position:absolute;inset:0 auto 0 0;border-radius:99px;animation:mg .9s cubic-bezier(.3,.9,.3,1) both}.mgauge u{position:absolute;top:0;bottom:0;left:50%;width:33%;border-left:1px dashed rgba(255,255,255,.35);border-right:1px dashed rgba(255,255,255,.35)}@keyframes mg{from{width:0}}
+
+/* Pool Office Manager: route list + pool pins */
+.pom{margin:12px 0;padding:12px 14px;border-radius:14px;background:linear-gradient(180deg,#ecfeff,#f0f9ff);box-shadow:inset 0 0 0 1px #bae6fd}
+.pom h4{margin:0 0 8px;font-size:13px;display:flex;align-items:center;gap:8px;color:#0c4a6e}.pom .ptag{background:#0369a1;color:#fff;font-weight:800;border-radius:6px;padding:2px 7px;font-size:11px}
+.pom .pcount{margin-left:auto;font-weight:700;color:#0369a1}.pbar{height:8px;border-radius:99px;background:#e0f2fe;overflow:hidden;margin-bottom:8px}.pbar i{display:block;height:100%;background:linear-gradient(90deg,#22d3ee,#0ea5e9);border-radius:99px;animation:mg 1s cubic-bezier(.3,.9,.3,1) both}
+.plist{list-style:none;margin:0;padding:0;max-height:260px;overflow:auto}.plist li{display:flex;align-items:center;gap:10px;padding:7px 6px;border-radius:9px;cursor:pointer}.plist li:hover{background:rgba(14,165,233,.08)}
+.plist .pn{flex:none;width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:800;background:#fff;color:#0369a1;box-shadow:inset 0 0 0 1.5px #7dd3fc}
+.plist li.done .pn{background:#22c55e;color:#fff;box-shadow:none}.plist li div{flex:1;min-width:0}.plist li b{display:block;font-size:13px}.plist li span{display:block;font-size:12px;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.plist li em{font-style:normal;font-size:12px;font-weight:600;color:#0369a1;text-align:right}.plist li.done em{color:#15803d}.plist li em small{display:block;font-weight:500;color:#94a3b8}
+.poolpin span{display:grid;place-items:center;width:22px;height:16px;border-radius:6px;background:linear-gradient(180deg,#67e8f9,#0891b2);border:2px solid #fff;box-shadow:0 2px 6px rgba(8,51,68,.35);font-size:10px;color:#fff;font-weight:800;position:relative;overflow:hidden}
+.poolpin span::after{content:'';position:absolute;left:-4px;right:-4px;top:4px;height:3px;border-radius:50%;border-top:1.5px solid rgba(255,255,255,.7)}
+.poolpin.done span{background:linear-gradient(180deg,#86efac,#16a34a)}.poolpin.done span::after{display:none}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -2039,11 +2117,12 @@ async function select(id){
   $('detail').innerHTML='<div class="dh">'+avatar(d,1)+'<div><h2>'+tno(id)+esc(title(r))+'</h2>'+azSub(r)+'<p>'+(named?esc(d):'No driver assigned')+(()=>{const az=dname(r),L=link(id),n=s=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');return L&&L.linked&&named&&/[a-z]/i.test(az)&&n(az)!==n(d)?flag('Azuga has '+az+' assigned to this truck, but Airtable says '+d+'. The site goes by Airtable; the next sync should update Azuga.'):''})()+(mmy&&!title(r).includes(mmy)?' · '+esc(mmy):'')+'</p></div><div style="margin-left:auto;display:flex;align-items:center">'+status(r)+(named?'<a class="repbtn" href="/report?driver='+encodeURIComponent(d)+'" target="_blank" rel="noopener">Driver report</a>':'')+'<button class="dclose" id="dclose" aria-label="Close details">×</button></div></div>'
    +'<div class="grid"><div class="kv"><span>Odometer</span><b>'+esc(odo(r))+'</b></div><div class="kv"><span>Speed</span><b>'+(moving(r)?Math.round(speed(r)):0)+' mph</b></div><div class="kv"><span>Group</span><b>'+esc(pick(r,'groupName')||'–')+'</b></div><div class="kv"><span>Plate</span><b>'+esc(pick(r,'licensePlate','licensePlateNo','plateNumber')||'–')+'</b></div><div class="kv kscore" id="kscore"><span>Driver score</span><b>…</b><small></small></div></div>'
    +'<div class="addr">'+ICON.pin+(pick(r,'address','landmark')?esc(pick(r,'address','landmark')):'<span class="trk">Tracker unavailable</span> <span class="muted">No location from Azuga for this truck right now.</span>')+'</div>'
+   +'<div id="pomBox" class="pom" hidden></div>'
    +'<div id="rampBox" class="ramp"></div>'
    +atBox(id)
    +'<h3>Maintenance</h3><div id="m"><div class="sk" style="width:55%"></div></div>'
    +'<details><summary>All Azuga data for this vehicle</summary><pre>'+esc(JSON.stringify(r,null,2))+'</pre></details>';
-  rampBox(id,named?d:'');scoreTile(id,named?d:'');
+  rampBox(id,named?d:'');scoreTile(id,named?d:'');pomBox(id,named?d:'');
   try{if(!maint)maint=list(await get('/api/maintenance'));if(sel!=id)return;
     const m=maint.filter(x=>vid(x)==id||vname(x)==vname(r));
     $('m').innerHTML=m.length?m.map(x=>{const s=String(pick(x,'status','reminderStatus')||'');return '<div class="ev"><span class="pill '+(/over/i.test(s)?'bad':/up/i.test(s)?'warn':'idle')+'">'+esc(s||'Scheduled')+'</span><b>'+esc(pick(x,'serviceType','serviceName')||'Service')+'</b><span class="t">'+esc(when(pick(x,'nextServiceDate','dueDate')))+(pick(x,'nextServiceOdometer')?' · at '+esc(pick(x,'nextServiceOdometer'))+' mi':'')+'</span></div>'}).join(''):'<span class="muted">'+(r.maintenanceEnabled===false?'Maintenance tracking is off for this truck in Azuga.':'Nothing due.')+'</span>';
@@ -2367,6 +2446,25 @@ async function loadScores(){try{SCORES=await get('/api/scores');if(vehicles.leng
 setTimeout(loadScores,1500);setInterval(loadScores,5*60e3);
 // 30 little bars, one per day, showing when gas was bought
 const spark=d=>{if(!d||!d.length)return '';const m=Math.max(...d,1);return '<svg class="spark" viewBox="0 0 90 22" preserveAspectRatio="none" aria-label="Gas by day, last 30 days">'+d.map((v,i)=>'<rect x="'+(i*3)+'" y="'+(22-Math.max(v?2:0.6,v/m*22)).toFixed(1)+'" width="2" height="'+Math.max(v?2:0.6,v/m*22).toFixed(1)+'" rx=".6"'+(v?'':' opacity=".25"')+'><title>'+(v?'$'+v.toFixed(0):'none')+'</title></rect>').join('')+'</svg>'};
+// Pool Office Manager: the driver's pools for today, in order, done or not
+let POMSTOPS=null;
+async function pomBox(id,name){const el=$('pomBox');if(!el)return;el.hidden=true;if(!name)return;let r;
+  try{r=await get('/api/pom/route?name='+encodeURIComponent(name))}catch(e){if(sel!=id)return;el.hidden=false;el.innerHTML='<h4>Today\u2019s pools</h4><div class="muted">Pool Office Manager is not answering: '+esc(e.message)+'</div>';return}
+  if(sel!=id||!r.connected)return;
+  if(!r.tech){el.hidden=false;el.innerHTML='<h4>Today\u2019s pools</h4><div class="muted">No pools on '+esc(name.split(' ')[0])+'\u2019s route in Pool Office Manager today.</div>';return}
+  const st=r.stops,done=st.filter(s=>s.done).length,pct=st.length?Math.round(done/st.length*100):0,t=x=>x?new Date(x).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}):'';
+  el.hidden=false;
+  el.innerHTML='<h4><span class="ptag">POM</span>Today\u2019s pools<span class="pcount">'+done+' of '+st.length+' done</span></h4><div class="pbar"><i style="width:'+pct+'%"></i></div>'
+   +(r.tech.toLowerCase()!==name.toLowerCase()?'<div class="muted" style="font-size:12px;margin:4px 0">Shown as '+esc(r.tech)+' in Pool Office Manager</div>':'')
+   +'<ol class="plist">'+st.map((s,i)=>'<li class="'+(s.done?'done':'')+'" data-i="'+i+'"><span class="pn">'+(s.done?'\u2713':i+1)+'</span><div><b>'+esc(s.customer||'Customer')+'</b><span>'+esc(s.address||'No address')+'</span></div><em>'+(s.done?'Done':esc(String(s.serviceStatus||s.status||'To do').toLowerCase().split('_').join(' ').replace(/^./,c=>c.toUpperCase())))+(s.time?'<small>'+t(s.time)+'</small>':'')+'</em></li>').join('')+'</ol>';
+  el.querySelectorAll('.plist li').forEach(li=>li.onclick=()=>{const s=st[+li.dataset.i];if(s.lat&&s.lng){map.setView([s.lat,s.lng],17);showPools()}})}
+// Pools on the map once you zoom in: every tech's stops for today
+const poolLayer=L.layerGroup();
+const poolIcon=s=>L.divIcon({className:'poolpin'+(s.done?' done':''),html:'<span>'+(s.done?'\u2713':'')+'</span>',iconSize:[22,16],iconAnchor:[11,8]});
+async function loadPools(){try{const r=await get('/api/pom/stops');if(!r.connected)return;POMSTOPS=r.stops;showPools()}catch(e){}}
+function showPools(){if(!POMSTOPS)return;const on=map.getZoom()>=13;if(on&&!map.hasLayer(poolLayer)){poolLayer.addTo(map)}else if(!on&&map.hasLayer(poolLayer)){map.removeLayer(poolLayer);return}
+  poolLayer.clearLayers();POMSTOPS.forEach(s=>L.marker([s.lat,s.lng],{icon:poolIcon(s),keyboard:false,zIndexOffset:-500}).bindTooltip('<b>'+esc(s.customer||'Pool')+'</b><br>'+esc(s.address)+'<br>'+esc(s.tech||'')+' · '+(s.done?'Done':'Not done yet'),{direction:'top',offset:[0,-8]}).addTo(poolLayer))}
+map.on('zoomend',showPools);setTimeout(loadPools,2000);setInterval(loadPools,3*60e3);
 // Small flag for numbers that might be wrong; hover or tap shows why
 const flag=t=>t&&t.length?'<span class="flag" tabindex="0" role="img" aria-label="Possible data issue" data-tip="'+esc([].concat(t).join('\\n\\n'))+'">⚑</span>':'';
 (function(){let tip;const show=e=>{const f=e.target.closest&&e.target.closest('.flag');if(!f)return;if(!tip){tip=document.createElement('div');tip.id='fltip';document.body.appendChild(tip)}
