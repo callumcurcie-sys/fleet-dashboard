@@ -87,6 +87,10 @@ const routes = {
       if (!az && !r.milesError) r.milesError = 'Azuga has no miles for this driver in the last 30 days.';
       if (az && az.miles > 50) r.gasPerMile = { miles: az.miles, perMile: r.person.gas / az.miles, max: GAS_PER_MILE_MAX, points: GAS_POINTS }; }
     r.mpg = await mpgFor(q.get('name') || '', r.person).catch(() => null);
+    r.flags = [];
+    if (r.person && dupeName(r.person.name) !== dupeName(q.get('name') || '')) r.flags.push('Matched to "' + r.person.name + '" in Ramp because the names are close, not identical. If that is a different person, these numbers are not this driver\'s.');
+    if (r.person && r.person.otherN && r.person.gasN === 0) r.flags.push('No gas found, only other purchases. If this driver buys gas, it may be filed under a category or store name the site does not recognise as gas.');
+    if (r.gasPerMile) r.gasPerMile.flags = ['Miles come from Azuga for this driver; gas comes from Ramp. If the driver used more than one truck or paid for someone else\'s gas, this can be off.'];
     return r; },
   '/api/score/status': () => ({ jobs: WARM, events: Object.keys(EVA.ev).length, weeksBackfilled: EVA.weeks, miles: !!(cache.get('scores') || {}).data }),
   '/api/score': q => scoreFor(q.get('vehicleId') || '', q.get('name') || ''),
@@ -748,12 +752,19 @@ async function scoreFor(vehicleId, name) {
   const all = Object.values(ppl).map(p => p.lost), worst = Math.max(lost, ...all, 1);
   const score = Math.round(100 - 60 * lost / worst);
   const rank = 1 + all.filter(x => x < me.lost).length;
-  return { found: true, since: HISTORY.since, months: HISTORY.months, backfilling: !backfillDone(), score, rank, of: all.length + (ppl[dupeName(name)] ? 0 : 1), items: me.items, lost, gas, azuga: az && az.score, miles: az && az.miles, azugaError };
+  const flags = [];
+  { const td = await truckDrivers(), evs = await events30(), other = {};
+    evs.filter(x => dupeName(eventOwner(x, td)) === dupeName(name)).forEach(x => { const c = camName(x); if (c && dupeName(c) !== dupeName(name)) other[c] = (other[c] || 0) + 1; });
+    const n = Object.values(other).reduce((t, v) => t + v, 0);
+    if (n) flags.push(n + ' of these alerts were stamped by the camera as ' + Object.keys(other).slice(0, 3).join(', ') + '. They count for ' + name + ' because Airtable lists them as the driver of that truck. If someone else was driving that day, the score is too low.'); }
+  if (!backfillDone()) flags.push('Older camera history is still loading from Azuga, so this score may change over the next couple of hours.');
+  if (gas && gas.points) flags.push('The gas-per-mile penalty uses Ramp gas spending, which can include gas for other trucks, equipment or gas cans.');
+  return { found: true, flags, since: HISTORY.since, months: HISTORY.months, backfilling: !backfillDone(), score, rank, of: all.length + (ppl[dupeName(name)] ? 0 : 1), items: me.items, lost, gas, azuga: az && az.score, miles: az && az.miles, azugaError };
 }
 // ---------------- Miles per gallon from Azuga trip reports (last 30 days) ----------------
 // Each trip reports its distance (km) and the fuel the engine used. When a truck doesn't report fuel,
-// MPG is estimated from the driver's Ramp gas spending at GAS_PRICE dollars a gallon (default $3.20).
-const GAS_PRICE = +process.env.GAS_PRICE || 3.2;
+// MPG is estimated from the driver's Ramp gas spending at GAS_PRICE dollars a gallon (default $4.30).
+const GAS_PRICE = +process.env.GAS_PRICE || 4.3;   // NJ average, Oct 2026 (AAA)
 const tripTotals = () => cached('trips', 3600, async () => {
   const by = {};
   for (let page = 0; page < 40; page++) {
@@ -763,6 +774,14 @@ const tripTotals = () => cached('trips', 3600, async () => {
   }
   return by;
 });
+function withFlags(m, trucks) {
+  const f = [];
+  if (m.source === 'ramp') f.push('Estimated: this truck does not report its own fuel use, so gallons are guessed from Ramp gas spending at $' + m.price.toFixed(2) + '/gal. Gas bought for other trucks, equipment or cans, or at pricier stations, makes this look worse than it is.');
+  if (m.litres) f.push('Azuga reported this truck\'s fuel in an unclear unit; it was read as litres because gallons gave an impossible MPG.');
+  if (m.mpg < 10 || m.mpg > 35) f.push(m.mpg.toFixed(1) + ' mpg is unusual for a pickup (most get 15-25). Check for a fuel-sensor glitch or gas bought for another vehicle.');
+  if (trucks.length > 1) f.push('Combines ' + trucks.length + ' trucks this driver is listed on in Airtable.');
+  m.flags = f; return m;
+}
 async function mpgFor(name, rampPerson) {
   const trips = (cache.get('trips') || {}).data;   // filled by the background job; clicks never wait on Azuga for this
   if (!trips || !name) return null;
@@ -771,10 +790,10 @@ async function mpgFor(name, rampPerson) {
   if (miles < 20) return null;
   const ok = m => m >= 4 && m <= 60;
   if (fuel > 0) {   // Azuga's fuel figure: gallons, or litres on some devices
-    if (ok(miles / fuel)) return { mpg: miles / fuel, miles, gallons: fuel, source: 'azuga' };
-    if (ok(miles / (fuel / 3.78541))) return { mpg: miles / (fuel / 3.78541), miles, gallons: fuel / 3.78541, source: 'azuga' };
+    if (ok(miles / fuel)) return withFlags({ mpg: miles / fuel, miles, gallons: fuel, source: 'azuga' }, mine);
+    if (ok(miles / (fuel / 3.78541))) return withFlags({ mpg: miles / (fuel / 3.78541), miles, gallons: fuel / 3.78541, source: 'azuga', litres: true }, mine);
   }
-  if (rampPerson && rampPerson.gas > 0) { const g = rampPerson.gas / GAS_PRICE, m = miles / g; if (ok(m)) return { mpg: m, miles, gallons: g, source: 'ramp', price: GAS_PRICE }; }
+  if (rampPerson && rampPerson.gas > 0) { const g = rampPerson.gas / GAS_PRICE, m = miles / g; if (ok(m)) return withFlags({ mpg: m, miles, gallons: g, source: 'ramp', price: GAS_PRICE }, mine); }
   return null;
 }
 
@@ -1146,6 +1165,8 @@ const REPORT_CSS = `*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-u
 .pill{display:inline-block;font-weight:700;font-size:13px;padding:3px 10px;border-radius:999px;min-width:46px;text-align:center}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:9px 8px;border-bottom:1px solid #e2e8f0;vertical-align:top}th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#64748b}
 .why{color:#334155}.muted{color:#64748b;font-size:13px}.head{display:flex;gap:18px;align-items:center;flex-wrap:wrap}.head h2{margin:0;font-size:24px}
+.flag{display:inline-grid;place-items:center;width:15px;height:15px;margin-left:5px;border-radius:50%;background:#fff7ed;color:#ea580c;font-size:9px;font-weight:700;cursor:help;vertical-align:middle;box-shadow:0 0 0 1px #fdba74;position:relative}
+.flag:hover::after,.flag:focus::after{content:attr(data-tip);position:absolute;z-index:9;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%);width:260px;background:#0f172a;color:#f8fafc;font-size:12px;font-weight:500;line-height:1.45;padding:8px 10px;border-radius:8px;white-space:pre-line;text-align:left}
 .caps{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}.caps figure{margin:0;background:#f1f5f9;border-radius:12px;overflow:hidden}
 .caps video,.caps img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#0f172a}.caps figcaption{padding:8px 10px;font-size:13px;display:grid;gap:2px}.caps figcaption span{color:#64748b;font-size:12px}
 .ramp{background:#121212;color:#f4f4ef;border-radius:14px;padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px}.ramp div{background:#1d1d1d;border-radius:10px;padding:10px 12px}.ramp .g{background:#e4f222;color:#111}.ramp b{display:block;font-size:22px}
@@ -1159,7 +1180,8 @@ function pageShell(title, body, shareUrl) {
 <div class="top"><div class="logo">MP</div><div><h1>${H(title)}</h1><p>Millennial Pools fleet · score covers all camera history${HISTORY.since < Date.now() - 864e5 ? ' since ' + H(new Date(HISTORY.since).toLocaleDateString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium' })) : ''} · spend and mpg: last 30 days · as of ${H(asOf())}</p></div></div>${share}${body}
 <p class="muted">Score: starts at 100 and loses points for truck camera alerts over all time (each kind counted up to 3 times per month of history, +5 for every 3 days it happens on) and for gas over ${usd(GAS_PER_MILE_MAX)} a mile. 100 = no points lost, 40 = worst in the fleet.</p></div></body></html>`;
 }
-const mpgLine = m => m ? `<p><b style="font-size:20px">${m.mpg.toFixed(1)} mpg</b> <span class="muted">over ${Math.round(m.miles).toLocaleString()} miles in the last 30 days · ${m.source === 'azuga' ? 'from the truck’s fuel data' : 'estimated from Ramp gas at ' + usd(m.price) + '/gal'}</span></p>` : '';
+const rflag = t => t && t.length ? `<span class="flag" tabindex="0" data-tip="${H([].concat(t).join('\n\n'))}">⚑</span>` : '';
+const mpgLine = m => m ? `<p><b style="font-size:20px">${m.mpg.toFixed(1)} mpg${rflag(m.flags)}</b> <span class="muted">over ${Math.round(m.miles).toLocaleString()} miles in the last 30 days · ${m.source === 'azuga' ? 'from the truck’s fuel data' : 'estimated from Ramp gas at ' + usd(m.price) + '/gal'}</span></p>` : '';
 function capsHtml(events, via) {
   const caps = events.filter(e => e.media).slice(0, 12);
   if (!caps.length) return '';
@@ -1173,7 +1195,7 @@ function capsHtml(events, via) {
 <p class="muted">Clips and photos stay available from Azuga for about a week.</p></div>`;
 }
 function driverHtml(d, shareUrl, via) {
-  const r = d.score, sc = `<span class="score ${grade(r.score)}">${r.score}<i>/100</i></span>`;
+  const r = d.score, sc = `<span class="score ${grade(r.score)}">${r.score}<i>/100</i>${rflag(r.flags)}</span>`;
   const rows = (r.items || []).map(x => `<tr><td>${H(x.label)}</td><td>${x.count}${x.count > x.cap ? ` <span class="muted">(${x.cap} counted)</span>` : ''}</td><td>${x.days}</td><td>−${x.points}${x.repeat ? ' <span class="muted">incl. repeat</span>' : ''}</td></tr>`).join('')
     + (r.gas && r.gas.points ? `<tr><td>Gas per mile</td><td>${usd(r.gas.perMile)}/mi</td><td>–</td><td>−${r.gas.points}</td></tr>` : '');
   const g = d.ramp ? `<div class="card"><h3 style="margin-top:0">Ramp spend</h3><div class="ramp"><div class="g">Gas<b>${usd(d.ramp.gas)}</b>${plural(d.ramp.gasN, 'fill-up')}</div><div>Everything else<b>${usd(d.ramp.other)}</b>${plural(d.ramp.otherN, 'purchase')}</div></div>${r.gas ? `<p class="muted">${usd(r.gas.perMile)} per mile over ${Math.round(r.gas.miles)} miles driven.</p>` : ''}${mpgLine(d.mpg)}</div>` : (d.mpg ? `<div class="card">${mpgLine(d.mpg)}</div>` : '');
@@ -1184,9 +1206,12 @@ function driverHtml(d, shareUrl, via) {
 function fleetHtml(rows, shareUrl, link) {
   const avg = rows.length ? Math.round(rows.reduce((t, x) => t + x.r.score, 0) / rows.length) : 0, low = rows.filter(x => x.r.score < 70).length;
   const body = `<div class="card"><div class="head"><span class="score ${grade(avg)}">${avg}<i>avg</i></span><div><h2>${rows.length} drivers</h2><div class="muted">${low} below 70 · lowest first</div></div></div></div>
-<div class="card"><table><tr><th>Score</th><th>Driver</th><th>Why</th></tr>${rows.map(x => `<tr><td><span class="pill ${grade(x.r.score)}">${x.r.score}</span></td><td><b>${link ? `<a href="${H(link(x.name))}">${H(x.name)}</a>` : H(x.name)}</b><div class="muted">${H((x.trucks || []).join(', '))}</div>${x.mpg ? `<div class="muted"><b>${x.mpg.mpg.toFixed(1)} mpg</b>${x.mpg.source === 'ramp' ? ' (est.)' : ''}</div>` : ''}</td><td class="why">${H(x.why)}</td></tr>`).join('')}</table></div>`;
+<div class="card"><table><tr><th>Score</th><th>Driver</th><th>Why</th></tr>${rows.map(x => `<tr><td><span class="pill ${grade(x.r.score)}">${x.r.score}</span>${rflag(x.r.flags)}</td><td><b>${link ? `<a href="${H(link(x.name))}">${H(x.name)}</a>` : H(x.name)}</b><div class="muted">${H((x.trucks || []).join(', '))}</div>${x.mpg ? `<div class="muted"><b>${x.mpg.mpg.toFixed(1)} mpg</b>${rflag(x.mpg.flags)}</div>` : ''}</td><td class="why">${H(x.why)}</td></tr>`).join('')}</table></div>`;
   return pageShell('Driver score report', body, shareUrl);
 }
+// Every driver's score in one small call (for the chips on truck cards and in the Drivers list)
+routes['/api/scores'] = () => cached('scoresAll', 300, async () => { if (!Object.keys(EVA.ev).length) return {};
+  return Object.fromEntries((await fleetReport()).map(x => [dupeName(x.name), x.r.score])); });
 async function serveReport(res, kind, name, base, publicView, tok) {
   const send = h => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }); res.end(h); };
   try {
@@ -1723,6 +1748,25 @@ header[data-sky=night]{background:radial-gradient(1.2px 1.2px at 12% 22%,#fff 50
 header[data-sky=night] .caus{opacity:.25}header[data-sky=night]::before{content:'';position:absolute;right:30%;top:10px;width:22px;height:22px;border-radius:50%;box-shadow:-6px 3px 0 0 #fef3c7;filter:drop-shadow(0 0 6px rgba(254,243,199,.6));pointer-events:none;z-index:0}
 
 input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;border-color:#22d3ee!important;box-shadow:0 0 0 3px rgba(34,211,238,.35)}
+.flag{display:inline-grid;place-items:center;width:15px;height:15px;margin-left:5px;border-radius:50%;background:#fff7ed;color:#ea580c;font-size:9px;font-style:normal;font-weight:700;line-height:1;cursor:help;vertical-align:middle;box-shadow:0 0 0 1px #fdba74;letter-spacing:0;text-transform:none}
+.flag:hover,.flag:focus{background:#ffedd5;outline:none;box-shadow:0 0 0 2px #fb923c}
+#fltip{position:fixed;z-index:9999;background:#0f172a;color:#f8fafc;font-size:12.5px;line-height:1.45;padding:9px 11px;border-radius:9px;box-shadow:0 10px 30px -8px rgba(0,0,0,.45);white-space:pre-line;pointer-events:none}
+.kscore b{white-space:nowrap}.kscore small .flag{margin:0 2px 0 0;width:14px;height:14px}
+
+/* driver score chips + ring */
+.schip{display:inline-block;margin-left:6px;min-width:24px;padding:0 6px;border-radius:999px;font-size:11px;font-weight:800;line-height:17px;text-align:center;vertical-align:1px;letter-spacing:0}
+.schip.good{background:#dcfce7;color:#15803d}.schip.ok{background:#ffedd5;color:#c2410c}.schip.bad{background:#fee2e2;color:#b91c1c;box-shadow:0 0 0 0 rgba(239,68,68,.5);animation:schip 2.4s ease-out infinite}
+@keyframes schip{0%{box-shadow:0 0 0 0 rgba(239,68,68,.45)}70%,100%{box-shadow:0 0 0 6px rgba(239,68,68,0)}}
+.kscore b{display:flex;align-items:center;gap:6px}.kscore .ring{width:30px;height:30px;transform:rotate(-90deg);flex:none}
+.kscore .ring circle{fill:none;stroke-width:4;stroke:currentColor;opacity:.18}.kscore .ring .fill{opacity:1;stroke-linecap:round;stroke-dasharray:var(--v) 100;animation:ring 1s cubic-bezier(.3,.9,.3,1) both}
+@keyframes ring{from{stroke-dasharray:0 100}}
+@media (prefers-reduced-motion:reduce){.schip.bad,.kscore .ring .fill{animation:none}}
+
+/* list section headers when sorted moving / parked / no tracker */
+.lgrp{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;margin:0;padding:8px 14px 6px;font-size:11px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#475569;background:linear-gradient(180deg,rgba(255,255,255,.97) 70%,rgba(255,255,255,0))}
+.lgrp::before{content:'';width:8px;height:8px;border-radius:50%;background:#64748b}.lgrp b{margin-left:auto;font-size:11px;padding:0 7px;border-radius:999px;background:#eef2f6;color:#475569}
+.lgrp.g0{color:#15803d}.lgrp.g0::before{background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.2);animation:schip 2s ease-out infinite}.lgrp.g0 b{background:#dcfce7;color:#15803d}
+.lgrp.g2{color:#c2410c}.lgrp.g2::before{background:#f97316}.lgrp.g2 b{background:#ffedd5;color:#c2410c}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -1741,7 +1785,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;bor
    <label><input type="checkbox" data-o="hideUnlinked"> Hide trackers not in Airtable</label>
    <label><input type="checkbox" data-o="hideNoLoc"> Hide trucks with no location</label>
    <b>Sort the list</b>
-   <select id="voSort"><option value="moving">Moving first</option><option value="number">Truck number</option><option value="driver">Driver name</option><option value="recent">Most recently active</option></select>
+   <select id="voSort"><option value="moving">Moving, parked, then no tracker</option><option value="number">Truck number</option><option value="driver">Driver name</option><option value="recent">Most recently active</option></select>
    <button class="link" id="voReset">Show everything</button>
   </div></div></div>
 <div id="err"></div>
@@ -1906,7 +1950,9 @@ const hasDriver=r=>/[a-z]/i.test(who(r)),hasLoc=r=>+pick(r,'latitude','lat')&&+p
 const hiddenBy=r=>(OPTS.hideNoDriver&&!hasDriver(r))||(OPTS.hideUnlinked&&!(link(vid(r))||{}).linked)||(OPTS.hideNoLoc&&!hasLoc(r));
 const visible=()=>all().filter(r=>!hiddenBy(r));
 const tnum=r=>{const L=link(vid(r)),n=L&&L.linked&&parseInt(L.truck.truckNo);return isNaN(n)||!n?1e9:n};
-const SORTS={moving:(a,b)=>moving(b)-moving(a)||title(a).localeCompare(title(b)),number:(a,b)=>tnum(a)-tnum(b)||title(a).localeCompare(title(b)),
+// Moving trucks first, then parked trucks whose tracker is reporting, then trucks with no tracker signal
+const tracked=r=>!!pick(r,'address','landmark'),grp=r=>moving(r)?0:tracked(r)?1:2,GRP=['Moving','Parked','Tracker unavailable'];
+const SORTS={moving:(a,b)=>grp(a)-grp(b)||(grp(a)===0?speed(b)-speed(a):0)||title(a).localeCompare(title(b)),number:(a,b)=>tnum(a)-tnum(b)||title(a).localeCompare(title(b)),
   driver:(a,b)=>(who(a)||'~').localeCompare(who(b)||'~'),recent:(a,b)=>(+b.lastContactDate||0)-(+a.lastContactDate||0)};
 function drawOpts(){document.querySelectorAll('#voPop [data-o]').forEach(c=>c.checked=!!OPTS[c.dataset.o]);$('voSort').value=OPTS.sort;
   const n=all().filter(hiddenBy).length;$('voHid').textContent=n?n+' hidden':'';$('voHid').className=n?'vohid':''}
@@ -1936,7 +1982,8 @@ function render(){
     :filt==='nodriver'&&!$('q').value?'<b>Every truck has a driver</b>Nice and tidy.'
     :'<b>No matches</b>Try a different search, or pick All trucks above.';
   const sig=rs.map(vid).join(),fresh=sig!==listSig;listSig=sig;
-  $('list').innerHTML=rs.length?rs.map((r,i)=>{const d=who(r),named=/[a-z]/i.test(d);return '<div class="card'+(sel==vid(r)?' sel':'')+(fresh?' rise':'')+'" style="--i:'+Math.min(i,14)+'" data-id="'+esc(vid(r))+'" tabindex="0" role="button">'+avatar(d)+'<div class="ci"><div class="top"><b>'+tno(vid(r))+esc(shortTitle(r))+'</b>'+status(r)+'</div>'+azSub(r)+'<div class="d">'+(named?esc(d):'<span class="muted">No driver assigned</span>')+'</div><div class="a">'+(pick(r,'address','landmark')?esc(pick(r,'address','landmark')):'<span class="trk">Tracker unavailable</span>')+'</div></div></div>'}).join(''):'<div class="empty">'+emptyMsg+'</div>';
+  const gcount=[0,0,0];rs.forEach(r=>gcount[grp(r)]++);const byGrp=(OPTS.sort||'moving')==='moving';
+  $('list').innerHTML=rs.length?rs.map((r,i)=>{const d=who(r),named=/[a-z]/i.test(d),g=grp(r);return (byGrp&&(i===0||grp(rs[i-1])!==g)?'<div class="lgrp g'+g+'"><span>'+GRP[g]+'</span><b>'+gcount[g]+'</b></div>':'')+'<div class="card'+(sel==vid(r)?' sel':'')+(fresh?' rise':'')+'" style="--i:'+Math.min(i,14)+'" data-id="'+esc(vid(r))+'" tabindex="0" role="button">'+avatar(d)+'<div class="ci"><div class="top"><b>'+tno(vid(r))+esc(shortTitle(r))+'</b>'+status(r)+'</div>'+azSub(r)+'<div class="d">'+(named?esc(d)+scoreChip(d):'<span class="muted">No driver assigned</span>')+'</div><div class="a">'+(pick(r,'address','landmark')?esc(pick(r,'address','landmark')):'<span class="trk">Tracker unavailable</span>')+'</div></div></div>'}).join(''):'<div class="empty">'+emptyMsg+'</div>';
   document.querySelectorAll('.card').forEach(c=>c.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();select(c.dataset.id)}});
   document.querySelectorAll('.card').forEach(c=>c.onclick=()=>select(c.dataset.id));
   const pts=[],shown=new Set(rs.map(vid));
@@ -1970,7 +2017,7 @@ async function select(id){
   sel=id;$('right').classList.add('open');setTimeout(()=>map.invalidateSize(),0);render();const r=all().find(x=>vid(x)==id)||{};
   const mk=markers[id];if(mk)map.setView(mk.getLatLng(),Math.max(map.getZoom(),15),{animate:false});  // one jump; the step-by-step cluster zoom felt slow
   const d=who(r),named=/[a-z]/i.test(d),mmy=[r.year,r.make,r.model].filter(Boolean).join(' ');
-  $('detail').innerHTML='<div class="dh">'+avatar(d,1)+'<div><h2>'+tno(id)+esc(title(r))+'</h2>'+azSub(r)+'<p>'+(named?esc(d):'No driver assigned')+(mmy&&!title(r).includes(mmy)?' · '+esc(mmy):'')+'</p></div><div style="margin-left:auto;display:flex;align-items:center">'+status(r)+(named?'<a class="repbtn" href="/report?driver='+encodeURIComponent(d)+'" target="_blank" rel="noopener">Driver report</a>':'')+'<button class="dclose" id="dclose" aria-label="Close details">×</button></div></div>'
+  $('detail').innerHTML='<div class="dh">'+avatar(d,1)+'<div><h2>'+tno(id)+esc(title(r))+'</h2>'+azSub(r)+'<p>'+(named?esc(d):'No driver assigned')+(()=>{const az=dname(r),L=link(id),n=s=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');return L&&L.linked&&named&&/[a-z]/i.test(az)&&n(az)!==n(d)?flag('Azuga has '+az+' assigned to this truck, but Airtable says '+d+'. The site goes by Airtable; the next sync should update Azuga.'):''})()+(mmy&&!title(r).includes(mmy)?' · '+esc(mmy):'')+'</p></div><div style="margin-left:auto;display:flex;align-items:center">'+status(r)+(named?'<a class="repbtn" href="/report?driver='+encodeURIComponent(d)+'" target="_blank" rel="noopener">Driver report</a>':'')+'<button class="dclose" id="dclose" aria-label="Close details">×</button></div></div>'
    +'<div class="grid"><div class="kv"><span>Odometer</span><b>'+esc(odo(r))+'</b></div><div class="kv"><span>Speed</span><b>'+(moving(r)?Math.round(speed(r)):0)+' mph</b></div><div class="kv"><span>Group</span><b>'+esc(pick(r,'groupName')||'–')+'</b></div><div class="kv"><span>Plate</span><b>'+esc(pick(r,'licensePlate','licensePlateNo','plateNumber')||'–')+'</b></div><div class="kv kscore" id="kscore"><span>Driver score</span><b>…</b><small></small></div></div>'
    +'<div class="addr">'+ICON.pin+(pick(r,'address','landmark')?esc(pick(r,'address','landmark')):'<span class="trk">Tracker unavailable</span> <span class="muted">No location from Azuga for this truck right now.</span>')+'</div>'
    +'<div id="rampBox" class="ramp"></div>'
@@ -2002,7 +2049,7 @@ function evRow(x,i){const e=pick(x,'eventType','eventName'),md=evMedia(x),th=md.
       return '<button class="ev evb" data-i="'+i+'"'+'>'
         +(th?'<span class="evth"><img src="'+esc(th)+'" alt="" loading="lazy">'+(md.videos.length?'<i>'+ICON.play+'</i>':'')+'</span>':'<span class="evth none">'+(x.requested?'Waiting':'No media')+'</span>')
         +'<span class="evi">'+'<span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="t">'+esc(when(pick(x,'eventTime','startTime')))+(drv?' · '+esc(drv):'')+'</span>'
-        +'<span class="muted" style="font-size:12px">'+esc(pick(x,'address')||'')+'</span>'+(D.azuga?'<span class="muted" style="font-size:11px">Azuga recorded: '+esc(D.azuga)+'</span>':'')+'</span>'
+        +'<span class="muted" style="font-size:12px">'+esc(pick(x,'address')||'')+'</span>'+(D.azuga?'<span class="muted" style="font-size:11px">Azuga recorded: '+esc(D.azuga)+flag('The camera stamped this alert with '+D.azuga+', but Airtable lists '+(D.name||'someone else')+' as this truck\u2019s driver. The dashboard and score go by Airtable. If '+D.azuga+' was really driving, it belongs to them.')+'</span>':'')+'</span>'
         +'<span class="evgo">'+(md.videos.length?'Watch':md.snaps.length?'View photos':x.requested?'Waiting on camera':'')+'</span></button>'}
 // ---- Selected truck: circle graph of its camera events; clicking a slice filters the list ----
 let TRUCKV=[],camType='';
@@ -2287,25 +2334,37 @@ else requestAnimationFrame(waveTick);
 async function scoreTile(id,name){const el=$('kscore');if(!el)return;const b=el.querySelector('b'),sm=el.querySelector('small');let r;
   try{r=await get('/api/score?vehicleId='+encodeURIComponent(id)+'&name='+encodeURIComponent(name||''))}catch(e){if(sel==id){b.textContent='–';sm.textContent=/collecting/i.test(e.message)?'Collecting data…':'Score unavailable';el.title=e.message}return}
   if(sel!=id)return;
-  el.classList.add(r.score>=85?'good':r.score>=70?'ok':'bad');b.innerHTML=r.score+'<i>/100</i>';
+  el.classList.add(r.score>=85?'good':r.score>=70?'ok':'bad');b.innerHTML='<svg class="ring" viewBox="0 0 36 36" aria-hidden="true"><circle cx="18" cy="18" r="15.9" pathLength="100"/><circle class="fill" cx="18" cy="18" r="15.9" pathLength="100" style="--v:'+r.score+'"/></svg>'+r.score+'<i>/100</i>';
   const top=r.items[0],gasBad=r.gas&&r.gas.points;
-  sm.textContent='#'+r.rank+' of '+r.of+(top?' · '+top.label:gasBad?' · gas/mile':' · no events');
+  sm.textContent='#'+r.rank+' of '+r.of+(top?' · '+top.label:gasBad?' · gas/mile':' · no events');const lab=el.querySelector('span');if(lab){const old=lab.querySelector('.flag');if(old)old.remove();if(r.flags&&r.flags.length)lab.insertAdjacentHTML('beforeend',flag(r.flags))}
   const money=n=>'$'+n.toFixed(2);
   el.title=['Driver score, all time'+(r.since?' since '+new Date(r.since).toLocaleDateString():'')+(r.backfilling?' (older history still loading)':'')+': #'+r.rank+' of '+r.of+' drivers','100 = no points lost, 40 = worst in the fleet. Each event type counts up to 3 times per month of history.',''].concat(
     r.items.map(x=>x.label+' ×'+x.count+(x.count>x.cap?' (counted '+x.cap+')':'')+(x.repeat?', '+x.days+' days (repeat +'+5*x.repeat+')':'')+': -'+x.points),
     r.gas?['Gas '+money(r.gas.spend)+' for '+Math.round(r.gas.miles)+' mi = '+money(r.gas.perMile)+'/mi'+(r.gas.points?': -'+r.gas.points:' (ok)')]:[],
     r.azuga!=null?['Azuga score: '+r.azuga]:[]).join('\\n')}
+// Every driver's score, for the little chips on truck cards and in the Drivers list
+let SCORES={};const scoreChip=n=>{const v=SCORES[String(n||'').toLowerCase().replace(/[.,']/g,'').split(' ').filter(Boolean).join(' ')];return v==null?'':'<span class="schip '+(v>=85?'good':v>=70?'ok':'bad')+'" title="Driver score">'+v+'</span>'};
+async function loadScores(){try{SCORES=await get('/api/scores');if(vehicles.length||locs.length)render();if(!$('vDrv').hidden&&PEOPLE)renderDrivers()}catch(e){}}
+setTimeout(loadScores,1500);setInterval(loadScores,5*60e3);
+// Small flag for numbers that might be wrong; hover or tap shows why
+const flag=t=>t&&t.length?'<span class="flag" tabindex="0" role="img" aria-label="Possible data issue" data-tip="'+esc([].concat(t).join('\\n\\n'))+'">⚑</span>':'';
+(function(){let tip;const show=e=>{const f=e.target.closest&&e.target.closest('.flag');if(!f)return;if(!tip){tip=document.createElement('div');tip.id='fltip';document.body.appendChild(tip)}
+  tip.textContent=f.dataset.tip;tip.hidden=false;const r=f.getBoundingClientRect(),w=Math.min(280,innerWidth-16);tip.style.maxWidth=w+'px';
+  const tw=tip.offsetWidth,th=tip.offsetHeight;let x=Math.max(8,Math.min(innerWidth-tw-8,r.left+r.width/2-tw/2)),y=r.top-th-8;if(y<8)y=r.bottom+8;tip.style.left=x+'px';tip.style.top=y+'px'};
+  const hide=e=>{const f=e.target.closest&&e.target.closest('.flag');if(f&&tip)tip.hidden=true};
+  document.addEventListener('mouseover',show);document.addEventListener('focusin',show);document.addEventListener('mouseout',hide);document.addEventListener('focusout',hide)})();
 // Driver's Ramp spend (cards + reimbursements), last 30 days: gas vs everything else
 async function rampBox(id,name){const el=$('rampBox');if(!el)return;if(!name){el.hidden=true;return}
-  const head='<h4><span class="rtag">Ramp</span>'+esc(name)+' · last 30 days</h4>',usd=n=>n.toLocaleString('en-US',{style:'currency',currency:'USD'});
+  let head='<h4><span class="rtag">Ramp</span>'+esc(name)+' · last 30 days</h4>';const usd=n=>n.toLocaleString('en-US',{style:'currency',currency:'USD'});
   el.innerHTML=head+'<div class="sk" style="width:60%"></div>';let r;
   try{r=await get('/api/ramp?name='+encodeURIComponent(name)+'&vehicleId='+encodeURIComponent(id))}catch(e){if(sel==id)el.innerHTML=head+'<div class="rmuted">Ramp is not answering right now: '+esc(e.message)+'</div>';return}
   if(sel!=id)return;
-  if(!r.connected){el.innerHTML=head+'<div class="rmuted">Ramp is not connected yet.</div>'+(r.mpg?'<div class="rmile mpg"><b>'+r.mpg.mpg.toFixed(1)+' mpg</b><span>'+Math.round(r.mpg.miles).toLocaleString()+' miles in 30 days</span></div>':'');return}
-  const mpgH=(r.mpg?'<div class="rmile mpg"><b>'+r.mpg.mpg.toFixed(1)+' mpg</b><span>'+Math.round(r.mpg.miles).toLocaleString()+' miles in 30 days</span><em>'+(r.mpg.source==='azuga'?'From the truck\u2019s fuel data':'Estimate: Ramp gas at $'+r.mpg.price.toFixed(2)+'/gal')+'</em></div>':'');
+  if(r.flags&&r.flags.length)head=head.replace('</h4>',flag(r.flags)+'</h4>');
+  if(!r.connected){el.innerHTML=head+'<div class="rmuted">Ramp is not connected yet.</div>'+(r.mpg?'<div class="rmile mpg"><b>'+r.mpg.mpg.toFixed(1)+' mpg'+flag(r.mpg.flags)+'</b><span>'+Math.round(r.mpg.miles).toLocaleString()+' miles in 30 days</span></div>':'');return}
+  const mpgH=(r.mpg?'<div class="rmile mpg"><b>'+r.mpg.mpg.toFixed(1)+' mpg'+flag(r.mpg.flags)+'</b><span>'+Math.round(r.mpg.miles).toLocaleString()+' miles in 30 days</span><em>'+(r.mpg.source==='azuga'?'From the truck\u2019s fuel data':'Estimate: Ramp gas at $'+r.mpg.price.toFixed(2)+'/gal')+'</em></div>':'');
   const p=r.person;if(!p){el.innerHTML=head+'<div class="rmuted">No Ramp spend found under this name.</div>'+mpgH;return}
   el.innerHTML=head+'<div class="rgrid"><div class="rgas"><span>Gas</span><b>'+usd(p.gas)+'</b><i>'+p.gasN+(p.gasN===1?' fill-up':' fill-ups')+'</i></div><div><span>Everything else</span><b>'+usd(p.other)+'</b><i>'+p.otherN+(p.otherN===1?' purchase':' purchases')+'</i></div></div>'
-   +(r.gasPerMile?(g=>'<div class="rmile'+(g.perMile>g.max?' bad':'')+'"><b>'+usd(g.perMile)+' per mile</b><span>'+usd(p.gas)+' of gas ÷ '+Math.round(g.miles).toLocaleString()+' miles driven</span><em>'+(g.perMile>g.max?'Over the '+usd(g.max)+'/mile limit · −'+g.points+' on driver score':'Normal (limit '+usd(g.max)+'/mile)')+'</em></div>')(r.gasPerMile):'')
+   +(r.gasPerMile?(g=>'<div class="rmile'+(g.perMile>g.max?' bad':'')+'"><b>'+usd(g.perMile)+' per mile'+flag(g.flags)+'</b><span>'+usd(p.gas)+' of gas ÷ '+Math.round(g.miles).toLocaleString()+' miles driven</span><em>'+(g.perMile>g.max?'Over the '+usd(g.max)+'/mile limit · −'+g.points+' on driver score':'Normal (limit '+usd(g.max)+'/mile)')+'</em></div>')(r.gasPerMile):'')
    +mpgH
    +(p.name.toLowerCase()!==name.toLowerCase()?'<div class="rmuted">Shown as '+esc(p.name)+' in Ramp</div>':'')+(r.cardOnly?'<div class="rmuted">Card spend only. Give the Ramp app the reimbursements:read permission to include reimbursed gas.</div>':'')}
 function toast(msg,kind){let t=$('toast');if(!t){t=document.createElement('div');t.id='toast';t.setAttribute('role','status');document.body.appendChild(t)}
@@ -2384,7 +2443,7 @@ function renderDrivers(){
     .sort((a,b)=>inactive(a)-inactive(b)||a.name.localeCompare(b.name));
   [...picked].forEach(id=>{if(!all.some(d=>d.id===id))picked.delete(id)});
   $('drvRows').innerHTML=(ds.length?ds.map(d=>'<div class="rrow'+(inactive(d)?' off':'')+(picked.has(d.id)?' picked':'')+'" data-id="'+esc(d.id)+'"><input type="checkbox" class="pick" aria-label="Select '+esc(d.name)+'"'+(picked.has(d.id)?' checked':'')+'><div class="mav" style="'+pcol(d.name)+'">'+esc(initials(d.name))+'</div>'
-    +'<div class="rn"><b class="nm">'+esc(d.name)+(inactive(d)?'<span class="tag">Inactive</span>':'')+'</b><span>'+(!d.license&&!inactive(d)?'<em class="nolic">No license #</em>'+(d.policy?' · ':''):'')+esc([d.license&&((d.state?d.state+' ':'')+d.license),!inactive(d)&&d.policy].filter(Boolean).join(' · '))+(d.notes?' · '+esc(d.notes):'')+'</span></div>'
+    +'<div class="rn"><b class="nm">'+esc(d.name)+scoreChip(d.name)+(inactive(d)?'<span class="tag">Inactive</span>':'')+'</b><span>'+(!d.license&&!inactive(d)?'<em class="nolic">No license #</em>'+(d.policy?' · ':''):'')+esc([d.license&&((d.state?d.state+' ':'')+d.license),!inactive(d)&&d.policy].filter(Boolean).join(' · '))+(d.notes?' · '+esc(d.notes):'')+'</span></div>'
     +'<div class="rt'+(d.trucks.length?'':' none')+'">'+(d.trucks.length?d.trucks.map(esc).join(', '):'No truck')+'</div>'
     +'<div class="rs"><button class="link edbtn">Edit</button>'+(!PEOPLE.azugaOk||inactive(d)?'':d.inAzuga?'<span class="inaz">In Azuga</span>':'<button class="link azbtn">Add to Azuga</button>')+'</div>'
     +'</div>').join('')
