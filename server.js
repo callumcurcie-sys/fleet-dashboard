@@ -833,24 +833,25 @@ async function rampAll(path, q) {   // every page of a Ramp list
 }
 const rampSpend = () => cached('ramp', 900, async () => {
   const since = new Date(Date.now() - 30 * 864e5), by = {};
-  const add = (name, amt, gas) => { name = clean(name); if (!name || !amt) return;
-    const p = by[normName(name)] = by[normName(name)] || { name, gas: 0, other: 0, gasN: 0, otherN: 0 };
-    if (gas) { p.gas += amt; p.gasN++; } else { p.other += amt; p.otherN++; } };
+  // Strictly the last 30 days by the date of the purchase itself (Ramp's from_date is checked again here)
+  const add = (name, amt, gas, when) => { name = clean(name); const t = Date.parse(when || ''); if (!name || !amt || !(t >= +since)) return;
+    const p = by[normName(name)] = by[normName(name)] || { name, gas: 0, other: 0, gasN: 0, otherN: 0, daily: Array(30).fill(0) };
+    if (gas) { p.gas += amt; p.gasN++; p.daily[Math.min(29, Math.max(0, 29 - Math.floor((Date.now() - t) / 864e5)))] += amt; } else { p.other += amt; p.otherN++; } };
   const money = a => typeof a === 'number' ? a : Number(a && a.amount) / 100 || 0;
   for (const t of await rampAll('transactions', { from_date: since.toISOString() })) {
     if (/DECLINED|ERROR/i.test(t.state || '')) continue;
     const h = t.card_holder || {};
-    add([h.first_name, h.last_name].filter(Boolean).join(' '), money(t.amount), isGas(t));
+    add([h.first_name, h.last_name].filter(Boolean).join(' '), money(t.amount), isGas(t), t.user_transaction_time || t.settlement_date || t.created_at);
   }
   // Out-of-pocket gas is a big share, so reimbursements count too (skipped if the Ramp app can't read them)
   if (/reimbursements/.test(rampScopes)) try {
     const users = Object.fromEntries((/users/.test(rampScopes) ? await rampAll('users', {}).catch(() => []) : []).map(u => [u.id, [u.first_name, u.last_name].filter(Boolean).join(' ')]));
     for (const r of await rampAll('reimbursements', { from_date: since.toISOString() })) {
-      if (/REJECT|CANCEL|DRAFT/i.test(r.state || r.status || '') || Date.parse(r.transaction_date || r.created_at) < +since) continue;
-      add(users[r.user_id] || r.user_full_name || '', money(r.amount), GAS_WORDS.test((r.merchant || r.merchant_name || '') + ' ' + (r.memo || '')));
+      if (/REJECT|CANCEL|DRAFT/i.test(r.state || r.status || '')) continue;
+      add(users[r.user_id] || r.user_full_name || '', money(r.amount), GAS_WORDS.test((r.merchant || r.merchant_name || '') + ' ' + (r.memo || '')), r.transaction_date || r.created_at);
     }
   } catch (e) { console.error('Ramp reimbursements:', e.message); }
-  return { since: since.toISOString(), people: Object.values(by), scopes: rampScopes };
+  return { since: since.toISOString(), people: Object.values(by), scopes: rampScopes, v: 2 };
 });
 // Ramp names don't always match Airtable ("Josh" vs "Joshua", "Aidan" vs "Aiden", "Jostin Acosta" vs "Jostin Acosta Palacios"):
 // exact name first, else the one cardholder with the same (or one-letter-off) last name and a matching first name.
@@ -866,8 +867,9 @@ function rampMatch(people, name) {
 }
 async function rampFor(name) {
   if (!RAMP_CLIENT_ID || !RAMP_CLIENT_SECRET) return { connected: false };
+  const c = cache.get('ramp'); if (c && c.data && c.data.v !== 2) cache.delete('ramp');   // old saved copy: refetch
   const d = await rampSpend(), p = name ? rampMatch(d.people, name) : null;
-  return { connected: true, since: d.since, person: p, cardOnly: !/reimbursements/.test(d.scopes || '') };
+  return { connected: true, since: d.since, until: new Date().toISOString(), person: p, cardOnly: !/reimbursements/.test(d.scopes || '') };
 }
 
 // ================= Two-way sync: Azuga <-> Airtable =================
@@ -1767,6 +1769,9 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;bor
 .lgrp::before{content:'';width:8px;height:8px;border-radius:50%;background:#64748b}.lgrp b{margin-left:auto;font-size:11px;padding:0 7px;border-radius:999px;background:#eef2f6;color:#475569}
 .lgrp.g0{color:#15803d}.lgrp.g0::before{background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.2);animation:schip 2s ease-out infinite}.lgrp.g0 b{background:#dcfce7;color:#15803d}
 .lgrp.g2{color:#c2410c}.lgrp.g2::before{background:#f97316}.lgrp.g2 b{background:#ffedd5;color:#c2410c}
+
+.ramp .rdates{margin-left:auto;font-size:11.5px;font-weight:600;color:#d9f99d;background:rgba(228,242,34,.12);border:1px solid rgba(228,242,34,.3);padding:2px 9px;border-radius:999px}
+.rgrid .rgas{position:relative}.rgas .spark{position:absolute;right:12px;top:12px;width:42%;height:30px;fill:#3a3d00;opacity:.75}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -1945,6 +1950,7 @@ let filt='all';
 // View options (kept per browser). Trucks with no driver are hidden unless you ask for them.
 const OPT_DEF={hideNoDriver:true,hideUnlinked:false,hideNoLoc:false,sort:'moving'};
 let OPTS={...OPT_DEF};try{Object.assign(OPTS,JSON.parse(localStorage.getItem('fleetView')||'{}'))}catch(e){}
+if(!OPTS.sortV2){OPTS.sort='moving';OPTS.sortV2=1;try{localStorage.setItem('fleetView',JSON.stringify(OPTS))}catch(e){}}   // new default for everyone, once
 const saveOpts=()=>{try{localStorage.setItem('fleetView',JSON.stringify(OPTS))}catch(e){}};
 const hasDriver=r=>/[a-z]/i.test(who(r)),hasLoc=r=>+pick(r,'latitude','lat')&&+pick(r,'longitude','lng','lon');
 const hiddenBy=r=>(OPTS.hideNoDriver&&!hasDriver(r))||(OPTS.hideUnlinked&&!(link(vid(r))||{}).linked)||(OPTS.hideNoLoc&&!hasLoc(r));
@@ -2346,6 +2352,8 @@ async function scoreTile(id,name){const el=$('kscore');if(!el)return;const b=el.
 let SCORES={};const scoreChip=n=>{const v=SCORES[String(n||'').toLowerCase().replace(/[.,']/g,'').split(' ').filter(Boolean).join(' ')];return v==null?'':'<span class="schip '+(v>=85?'good':v>=70?'ok':'bad')+'" title="Driver score">'+v+'</span>'};
 async function loadScores(){try{SCORES=await get('/api/scores');if(vehicles.length||locs.length)render();if(!$('vDrv').hidden&&PEOPLE)renderDrivers()}catch(e){}}
 setTimeout(loadScores,1500);setInterval(loadScores,5*60e3);
+// 30 little bars, one per day, showing when gas was bought
+const spark=d=>{if(!d||!d.length)return '';const m=Math.max(...d,1);return '<svg class="spark" viewBox="0 0 90 22" preserveAspectRatio="none" aria-label="Gas by day, last 30 days">'+d.map((v,i)=>'<rect x="'+(i*3)+'" y="'+(22-Math.max(v?2:0.6,v/m*22)).toFixed(1)+'" width="2" height="'+Math.max(v?2:0.6,v/m*22).toFixed(1)+'" rx=".6"'+(v?'':' opacity=".25"')+'><title>'+(v?'$'+v.toFixed(0):'none')+'</title></rect>').join('')+'</svg>'};
 // Small flag for numbers that might be wrong; hover or tap shows why
 const flag=t=>t&&t.length?'<span class="flag" tabindex="0" role="img" aria-label="Possible data issue" data-tip="'+esc([].concat(t).join('\\n\\n'))+'">⚑</span>':'';
 (function(){let tip;const show=e=>{const f=e.target.closest&&e.target.closest('.flag');if(!f)return;if(!tip){tip=document.createElement('div');tip.id='fltip';document.body.appendChild(tip)}
@@ -2355,15 +2363,16 @@ const flag=t=>t&&t.length?'<span class="flag" tabindex="0" role="img" aria-label
   document.addEventListener('mouseover',show);document.addEventListener('focusin',show);document.addEventListener('mouseout',hide);document.addEventListener('focusout',hide)})();
 // Driver's Ramp spend (cards + reimbursements), last 30 days: gas vs everything else
 async function rampBox(id,name){const el=$('rampBox');if(!el)return;if(!name){el.hidden=true;return}
-  let head='<h4><span class="rtag">Ramp</span>'+esc(name)+' · last 30 days</h4>';const usd=n=>n.toLocaleString('en-US',{style:'currency',currency:'USD'});
+  let head='<h4><span class="rtag">Ramp</span>'+esc(name)+'</h4>';const usd=n=>n.toLocaleString('en-US',{style:'currency',currency:'USD'});
   el.innerHTML=head+'<div class="sk" style="width:60%"></div>';let r;
   try{r=await get('/api/ramp?name='+encodeURIComponent(name)+'&vehicleId='+encodeURIComponent(id))}catch(e){if(sel==id)el.innerHTML=head+'<div class="rmuted">Ramp is not answering right now: '+esc(e.message)+'</div>';return}
   if(sel!=id)return;
+  if(r.since){const f=d=>new Date(d).toLocaleDateString([], {month:'short',day:'numeric'});head=head.replace('</h4>','<span class="rdates">'+f(r.since)+' – '+f(r.until||Date.now())+'</span></h4>')}
   if(r.flags&&r.flags.length)head=head.replace('</h4>',flag(r.flags)+'</h4>');
   if(!r.connected){el.innerHTML=head+'<div class="rmuted">Ramp is not connected yet.</div>'+(r.mpg?'<div class="rmile mpg"><b>'+r.mpg.mpg.toFixed(1)+' mpg'+flag(r.mpg.flags)+'</b><span>'+Math.round(r.mpg.miles).toLocaleString()+' miles in 30 days</span></div>':'');return}
   const mpgH=(r.mpg?'<div class="rmile mpg"><b>'+r.mpg.mpg.toFixed(1)+' mpg'+flag(r.mpg.flags)+'</b><span>'+Math.round(r.mpg.miles).toLocaleString()+' miles in 30 days</span><em>'+(r.mpg.source==='azuga'?'From the truck\u2019s fuel data':'Estimate: Ramp gas at $'+r.mpg.price.toFixed(2)+'/gal')+'</em></div>':'');
   const p=r.person;if(!p){el.innerHTML=head+'<div class="rmuted">No Ramp spend found under this name.</div>'+mpgH;return}
-  el.innerHTML=head+'<div class="rgrid"><div class="rgas"><span>Gas</span><b>'+usd(p.gas)+'</b><i>'+p.gasN+(p.gasN===1?' fill-up':' fill-ups')+'</i></div><div><span>Everything else</span><b>'+usd(p.other)+'</b><i>'+p.otherN+(p.otherN===1?' purchase':' purchases')+'</i></div></div>'
+  el.innerHTML=head+'<div class="rgrid"><div class="rgas"><span>Gas</span>'+spark(p.daily)+'<b>'+usd(p.gas)+'</b><i>'+p.gasN+(p.gasN===1?' fill-up':' fill-ups')+'</i></div><div><span>Everything else</span><b>'+usd(p.other)+'</b><i>'+p.otherN+(p.otherN===1?' purchase':' purchases')+'</i></div></div>'
    +(r.gasPerMile?(g=>'<div class="rmile'+(g.perMile>g.max?' bad':'')+'"><b>'+usd(g.perMile)+' per mile'+flag(g.flags)+'</b><span>'+usd(p.gas)+' of gas ÷ '+Math.round(g.miles).toLocaleString()+' miles driven</span><em>'+(g.perMile>g.max?'Over the '+usd(g.max)+'/mile limit · −'+g.points+' on driver score':'Normal (limit '+usd(g.max)+'/mile)')+'</em></div>')(r.gasPerMile):'')
    +mpgH
    +(p.name.toLowerCase()!==name.toLowerCase()?'<div class="rmuted">Shown as '+esc(p.name)+' in Ramp</div>':'')+(r.cardOnly?'<div class="rmuted">Card spend only. Give the Ramp app the reimbursements:read permission to include reimbursed gas.</div>':'')}
