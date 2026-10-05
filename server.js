@@ -2014,21 +2014,46 @@ body[data-v=vPom] .vopt,body[data-v=vCam] .vopt{display:none}body[data-v=vPom] .
 .cgrid .evb{background:var(--card);box-shadow:inset 0 3px 0 var(--c-cams),var(--sh)!important;border-radius:14px;padding:12px;margin:0}.evtruck{color:var(--ink2);font-weight:600}.cgrid .evgo{position:static;align-self:center;white-space:nowrap}
 @media(max-width:900px){#vPom,#vCam{padding:12px 16px}.tgrid,.cgrid{grid-template-columns:1fr}}
 
-/* ===== v10: ripples where you click, bubbles rising, shimmering name ===== */
-.rip{position:fixed;z-index:9999;pointer-events:none;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;border:2px solid rgba(8,145,178,.55);animation:ripc .7s ease-out forwards}
-.rip.b{animation-delay:.12s;border-color:rgba(34,211,238,.45)}
-@keyframes ripc{from{transform:scale(.3);opacity:1}to{transform:scale(5);opacity:0}}
+/* ===== v10: bubbles rising, shimmering name ===== */
 #bubbles{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
 #bubbles i{position:absolute;bottom:-40px;border-radius:50%;background:radial-gradient(circle at 32% 30%,rgba(255,255,255,.95) 0 14%,rgba(165,243,252,.35) 40%,rgba(8,145,178,.12) 70%);box-shadow:inset 0 0 0 1px rgba(8,145,178,.25);animation:bub linear infinite}
 @keyframes bub{0%{transform:translate(0,0)}25%{transform:translate(14px,-25vh)}50%{transform:translate(-10px,-50vh)}75%{transform:translate(12px,-75vh)}100%{transform:translate(0,-110vh)}}
 .brand>div:last-child{background:linear-gradient(90deg,#fff 0%,#a5f3fc 30%,#fff 45%,#fde68a 60%,#fff 75%);background-size:300% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:namesh 7s ease-in-out infinite}
 .brand>div:last-child small{-webkit-text-fill-color:#a5f3fc;color:#a5f3fc}
 .brand>div:last-child{text-shadow:none;filter:drop-shadow(0 1px 6px rgba(0,0,0,.3))}@keyframes namesh{0%,100%{background-position:0 0}50%{background-position:100% 0}}
-@media (prefers-reduced-motion:reduce){.rip,#bubbles,.brand>div:last-child{animation:none!important}#bubbles{display:none}}
+@media (prefers-reduced-motion:reduce){#bubbles,.brand>div:last-child{animation:none!important}#bubbles{display:none}}
+
+/* Cameras tab: day groups, big photo cards */
+.cgrid{display:block}.cday{margin-bottom:22px}.cday h3{display:flex;align-items:baseline;gap:10px;margin:0 0 10px;font-size:16px;font-weight:700;color:var(--ink)}.cday h3 span{font-size:12.5px;font-weight:500;color:var(--muted)}
+.cdgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.ccard{font:inherit;text-align:left;color:inherit;border:0;padding:0;background:var(--card);border-radius:16px;overflow:hidden;cursor:pointer;box-shadow:var(--sh);transition:transform .2s cubic-bezier(.2,.8,.2,1),box-shadow .2s;animation:rise .35s ease-out both}
+.ccard:hover,.ccard:focus-visible{transform:translateY(-3px);box-shadow:0 18px 32px -18px rgba(76,29,149,.55),var(--sh)}
+.cmedia{position:relative;height:168px;display:flex;gap:2px;background:#0f172a}.cmedia figure{position:relative;flex:1;margin:0;overflow:hidden}
+.cmedia img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .4s}.ccard:hover .cmedia img{transform:scale(1.05)}
+.cmedia figcaption{position:absolute;left:6px;bottom:6px;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#fff;background:rgba(15,23,42,.6);padding:2px 7px;border-radius:6px}
+.cmedia>.pill{position:absolute;left:10px;top:10px;box-shadow:0 2px 8px rgba(0,0,0,.25)}
+.cplay{position:absolute;right:10px;top:10px;display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:700;color:#fff;background:rgba(124,58,237,.9);padding:3px 9px 3px 6px;border-radius:999px}.cplay svg{width:14px;height:14px}
+.cnone{flex:1;display:grid;place-items:center;color:#94a3b8;font-size:13px;background:repeating-linear-gradient(135deg,#1e293b 0 12px,#243247 12px 24px)}
+.cprev{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;z-index:1}
+.cbody{padding:11px 14px 13px}.cbody>div{display:flex;align-items:center;gap:6px}.cbody b{font-size:15px}.cbody em{margin-left:auto;font-style:normal;font-size:13px;font-weight:600;color:var(--ink2);font-variant-numeric:tabular-nums}
+.cbody small{display:block;margin-top:2px;color:var(--muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:900px){.cdgrid{grid-template-columns:1fr}}
+
+/* ===== v11: a sun (or moon) that travels across the header sky ===== */
+header[data-sky=night]::before{display:none}
+.sun{position:absolute;z-index:0;width:34px;height:34px;margin-left:-17px;border-radius:50%;pointer-events:none;background:radial-gradient(circle at 40% 38%,#fffbe8,#fde047 45%,#f59e0b);box-shadow:0 0 22px 8px rgba(253,224,71,.55),0 0 70px 26px rgba(253,186,116,.28);transition:left 2s,top 2s}
+.sun i{position:absolute;inset:-16px;border-radius:50%;background:repeating-conic-gradient(rgba(254,240,138,.55) 0 6deg,transparent 6deg 30deg);-webkit-mask:radial-gradient(circle,transparent 46%,#000 48%,transparent 72%);mask:radial-gradient(circle,transparent 46%,#000 48%,transparent 72%);animation:rays 24s linear infinite}
+@keyframes rays{to{transform:rotate(360deg)}}
+header[data-sky=dawn] .sun,header[data-sky=dusk] .sun{background:radial-gradient(circle at 40% 38%,#fff1e0,#fb923c 50%,#e11d48);box-shadow:0 0 26px 10px rgba(251,146,60,.55),0 0 90px 34px rgba(244,114,182,.3)}
+.sun.moon{width:26px;height:26px;margin-left:-13px;background:radial-gradient(circle at 38% 36%,#fffef5,#fef3c7 55%,#e5d9b0);box-shadow:0 0 18px 4px rgba(254,243,199,.4)}.sun.moon i{display:none}
+.sun.moon::after{content:'';position:absolute;width:7px;height:7px;left:13px;top:8px;border-radius:50%;background:rgba(180,160,110,.35);box-shadow:-6px 7px 0 -1px rgba(180,160,110,.3)}
+@media (prefers-reduced-motion:reduce){.sun i{animation:none}}
+@media(max-width:900px){.sun{display:none}}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
  <svg class="hwave" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
+ <div class="sun" aria-hidden="true"><i></i></div>
  <div id="floaty" aria-hidden="true"></div>
  <svg class="hwave front" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M3 9c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0"/><path d="M3 15c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0" opacity=".6"/></svg></div><div>Millennial Pools<small>Fleet</small></div></div>
@@ -2878,7 +2903,10 @@ let FV=null,FVat=0;
 function fleetVids(){if(FV&&Date.now()-FVat<3e5)return FV;FVat=Date.now();const p=get('/api/videos').then(list);if(!FV)FV=p;p.then(()=>{FV=p},()=>{if(FV===p)FV=null;FVat=0});return FV}  // stale copy keeps serving while it refreshes
 fleetVids();
 // sky colour by time of day (dawn, day, dusk, night)
-function sky(){const h=new Date().getHours(),hd=document.querySelector('header');if(hd)hd.dataset.sky=h>=5&&h<8?'dawn':h<17&&h>=8?'day':h>=17&&h<20?'dusk':'night'}
+function sky(){const d=new Date(),h=d.getHours(),hd=document.querySelector('header');if(!hd)return;hd.dataset.sky=h>=5&&h<8?'dawn':h<17&&h>=8?'day':h>=17&&h<20?'dusk':'night';
+  // the sun rises at 6 and sets at 20 on an arc across the sky; at night the moon takes the same path
+  const m=h*60+d.getMinutes(),day=m>=360&&m<1200,f=day?(m-360)/840:((m-1200+1440)%1440)/600,sn=hd.querySelector('.sun');
+  if(sn){sn.style.left=(6+Math.min(1,f)*80).toFixed(1)+'%';sn.style.top=(62-Math.sin(Math.min(1,f)*Math.PI)*50).toFixed(1)+'px';sn.classList.toggle('moon',!day)}}
 sky();setInterval(sky,10*60e3);
 // ---- Pools tab: every tech's POM route for the day, with progress ----
 let POMB=null,pomTimer=null;
@@ -2918,10 +2946,25 @@ function renderCamTab(){const ev=CAMALL,q=$('q').value.trim().toLowerCase(),dv=$
   $('camTypes').innerHTML='<button class="cchip'+(camTabType?'':' on')+'" data-ct="">All <b>'+byDrv.length+'</b></button>'+Object.entries(c).sort((a,b)=>b[1]-a[1]).map(([t,n])=>'<button class="cchip pill '+evClass(t)+(camTabType===t?' on':'')+'" data-ct="'+esc(t)+'">'+esc(t)+' <b>'+n+'</b></button>').join('');
   VIDS=byDrv.filter(x=>(!camTabType||evName(pick(x,'eventType','eventName'))===camTabType)&&(!q||(evDriver(x).name+' '+truckOf(x)+' '+evName(pick(x,'eventType','eventName'))+' '+(pick(x,'address')||'')).toLowerCase().includes(q)));
   $('camCount').textContent=ev.length+' events across the fleet · last 7 days';
-  $('cgrid').innerHTML=VIDS.length?VIDS.map((x,i)=>evRow(x,i,truckOf(x))).join(''):'<div class="empty">No camera events match.</div>'}
+  // grouped by day, newest first; each card shows the photos big so you can tell what it is before opening it
+  const tOf=x=>{const v=pick(x,'eventTime','startTime');return +v||Date.parse(v)||0},dayKey=t=>new Date(t).toLocaleDateString('en-CA');
+  const today=dayKey(Date.now()),yest=dayKey(Date.now()-864e5),groups=[];
+  VIDS.forEach((x,i)=>{const k=dayKey(tOf(x)),g=groups[groups.length-1];if(g&&g.k===k)g.items.push(i);else groups.push({k,items:[i]})});
+  $('cgrid').innerHTML=groups.length?groups.map(g=>'<section class="cday"><h3>'+(g.k===today?'Today':g.k===yest?'Yesterday':new Date(g.k+'T12:00').toLocaleDateString([],{weekday:'long',month:'short',day:'numeric'}))+'<span>'+g.items.length+' event'+(g.items.length>1?'s':'')+'</span></h3><div class="cdgrid">'+g.items.map(i=>camCard(VIDS[i],i,truckOf(VIDS[i]),tOf(VIDS[i]))).join('')+'</div></section>').join(''):'<div class="empty">No camera events match.</div>'}
+function camCard(x,i,truck,t){const e=pick(x,'eventType','eventName'),md=evMedia(x),D=evDriver(x);
+  const pics=md.snaps.length?md.snaps.slice(0,2):md.videos.filter(v=>v.poster).slice(0,2).map(v=>({name:v.name,url:v.poster}));
+  return '<button class="ccard" data-i="'+i+'"'+(md.videos[0]?' data-vid="'+esc(md.videos[0].url)+'"':'')+'><div class="cmedia n'+pics.length+'">'
+    +(pics.length?pics.map(p=>'<figure><img src="'+esc(p.url)+'" alt="'+esc(p.name)+' camera" loading="lazy"><figcaption>'+(/driver/i.test(p.name)?'Driver':'Road')+'</figcaption></figure>').join(''):'<div class="cnone">'+(x.requested?'Waiting on the camera to upload':'No photos for this event')+'</div>')
+    +'<span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span>'+(md.videos.length?'<span class="cplay">'+ICON.play+' Video</span>':'')+'</div>'
+    +'<div class="cbody"><div><b>'+esc(D.name||'Unknown driver')+'</b>'+(D.azuga?flag('The camera stamped this alert with '+D.azuga+', but Airtable lists '+(D.name||'someone else')+' as this truck’s driver.'):'')+'<em>'+(t?new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'')+'</em></div>'
+    +'<small>'+(truck?esc(truck)+' · ':'')+esc(pick(x,'address')||'')+'</small></div></button>'}
+// open on click; hovering a card with video plays it silently so you can see what happened
+document.addEventListener('click',e=>{const c=e.target.closest('.ccard');if(c)openMedia(+c.dataset.i)});
+document.addEventListener('mouseover',e=>{const c=e.target.closest('.ccard[data-vid]');if(!c||c.querySelector('video')||matchMedia('(prefers-reduced-motion: reduce)').matches)return;
+  const v=document.createElement('video');v.src=c.dataset.vid;v.muted=v.loop=v.playsInline=true;v.autoplay=true;v.className='cprev';c.querySelector('.cmedia').appendChild(v);
+  c.addEventListener('mouseleave',()=>v.remove(),{once:true})});
 document.addEventListener('click',e=>{const b=e.target.closest('.cchip');if(!b)return;camTabType=b.dataset.ct;renderCamTab()});
-// water ripples wherever you click, and a few bubbles drifting up behind the page
-document.addEventListener('pointerdown',e=>{if(matchMedia('(prefers-reduced-motion: reduce)').matches)return;['','b'].forEach(c=>{const r=document.createElement('i');r.className='rip '+c;r.style.left=e.clientX+'px';r.style.top=e.clientY+'px';document.body.appendChild(r);setTimeout(()=>r.remove(),900)})},{passive:true});
+// a few bubbles drifting up behind the page
 (()=>{const b=document.createElement('div');b.id='bubbles';b.setAttribute('aria-hidden','true');for(let k=0;k<14;k++){const i=document.createElement('i'),z=8+Math.random()*22;i.style.cssText='left:'+(Math.random()*100).toFixed(1)+'%;width:'+z+'px;height:'+z+'px;animation-duration:'+(14+Math.random()*16).toFixed(1)+'s;animation-delay:-'+(Math.random()*30).toFixed(1)+'s';b.appendChild(i)}document.body.appendChild(b)})();
 // sliding white pill behind the active tab
 function moveTab(){const b=document.querySelector('.tabs button.on'),i=document.querySelector('.tabind');if(b&&i){i.style.left=b.offsetLeft+'px';i.style.width=b.offsetWidth+'px'}}
