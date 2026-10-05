@@ -110,14 +110,27 @@ const routes = {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('Bad date.');
     const { start, end } = etDay(new Date(date + 'T16:00:00Z')), by = {};
     // pinned appointments come back from other days too; keep only this day's
-    (await pomDay(date)).map(pomStop).filter(s => { const t = Date.parse(s.time); return t >= +start && t <= +end; })
+    (await pomDay(date)).map(pomStop).filter(s => { const t = Date.parse(s.time); return !pomCheckup(s) && t >= +start && t <= +end; })
       .sort((a, b) => Date.parse(a.time) - Date.parse(b.time)).forEach(s => (by[s.tech] = by[s.tech] || []).push(s));
     const td = await truckDrivers().catch(() => ({})), drivers = Object.keys(td).filter(v => td[v]).map(v => ({ name: td[v], v }));
     const techs = Object.entries(by).filter(([n]) => n).map(([name, stops]) => { const m = rampMatch(drivers, name);
       return { name, truck: m ? m.v : null, driver: m ? m.name : null, total: stops.length, done: stops.filter(s => s.done).length, stops }; });
     return { connected: true, date, today: date === etDay().ymd, techs }; },   // stops with no tech are ignored
+  '/api/pom/checkups': async q => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
+    const weeks = Math.max(1, Math.min(12, +q.get('weeks') || 8)), anchor = etDay().end, list = [];
+    for (let w = 0; w < weeks; w++) {
+      const end = new Date(+anchor - w * 7 * 864e5), start = new Date(+end - 7 * 864e5 + 1);
+      const rows = await cached('pomwk:' + start.toISOString().slice(0, 10), w ? 6 * 3600 : 120, () => pomRange(start, end));
+      rows.map(pomStop).filter(s => s.tech && pomCheckup(s)).forEach(s => list.push(s));
+    }
+    const td = await truckDrivers().catch(() => ({})), drivers = Object.keys(td).filter(v => td[v]).map(v => ({ name: td[v], v })), trucks = {};
+    const at = await atData().catch(() => ({ drivers: [] })), people = at.drivers.filter(d => d.name && d.status !== 'Inactive'), roles = {}, seen = new Set();
+    [...new Set(list.map(s => s.tech))].forEach(n => { const m = rampMatch(drivers, n), p = rampMatch(people, n); trucks[n] = m ? m.v : null; roles[n] = p ? p.role : ''; if (p) seen.add(p.id); });
+    // Techs, tech assistants and auditors submit the weekly truck form; owners, district, regional and staffers don't
+    const missing = people.filter(d => CHECKUP_ROLES.includes(d.role) && !seen.has(d.id)).map(d => ({ name: d.name, role: d.role }));
+    return { connected: true, now: Date.now(), today: etDay().ymd, weeks, checkups: list.sort((a, b) => Date.parse(b.time) - Date.parse(a.time)), trucks, roles, missing }; },
   '/api/pom/stops': async () => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
-    return { connected: true, day: etDay().ymd, stops: (await pomToday()).map(pomStop).filter(s => s.tech && s.lat && s.lng) }; },
+    return { connected: true, day: etDay().ymd, stops: (await pomToday()).map(pomStop).filter(s => s.tech && !pomCheckup(s) && s.lat && s.lng) }; },
   '/api/pom/debug': async () => { const { start, end } = etDay();   // behind the dashboard login: what POM sends back, for setting this up
     try { const all = await pomToday(); return { auth: pomAuth, day: etDay().ymd, start, end, count: all.length, techs: [...new Set(all.map(a => pomStop(a).tech))], statuses: [...new Set(all.map(a => a.status + ' / ' + (a.serviceStatus && a.serviceStatus.name)))], sample: all.slice(0, 2) }; }
     catch (e) { return { error: e.message }; } },
@@ -249,7 +262,8 @@ const F = { vin: 'fldT4fSSnXnZuj2Jr', year: 'fldqjqyAK1ZJfn0oT', make: 'fldOhan3
 // Drivers. Date of birth is only ever written (new driver form), never read or shown.
 const D = { name: 'fldMrVtrXN6WDaOjj', license: 'fldcSIYqy5FCEC0Xn', state: 'fld1NdVP4v6QcckK2', pic: 'fldZeCHS22kI7Ythi',
   policy: 'fldVo5IrWedsKvumK', trucks: 'fld47HPqHRrw9GUL7', notes: 'fldSnexzpxIG22gF0', status: 'fldVuSDYSZVHk0fWN',
-  phone: 'fldNxN3OyrU3TFAjQ', azId: 'fldgBxpfEnLCwdIzS', snap: 'fldhuLqirXbDaAy89' };
+  phone: 'fldNxN3OyrU3TFAjQ', azId: 'fldgBxpfEnLCwdIzS', snap: 'fldhuLqirXbDaAy89', role: 'fld2dWRGDGFmhpbDt' };
+const ROLES = ['Tech', 'Tech assistant', 'District', 'Regional', 'Owner', 'Auditor', 'Staffer'], CHECKUP_ROLES = ['Tech', 'Tech assistant', 'Auditor'];
 const D_DOB = 'fldFMJ06wrdGolZkS';
 
 async function airtable(path, opt = {}) {
@@ -282,7 +296,7 @@ const atData = () => cached('airtable', 60, async () => {
   const att = a => (a || []).map(x => ({ name: x.filename, url: x.url, type: x.type, thumb: x.thumbnails?.small?.url }));
   const drivers = drv.map(r => ({ id: r.id, name: clean(r.fields[D.name]), license: clean(r.fields[D.license]), state: clean(r.fields[D.state]),
     policy: clean(r.fields[D.policy]?.name ?? r.fields[D.policy]), notes: clean(r.fields[D.notes]), truckIds: r.fields[D.trucks] || [], pic: att(r.fields[D.pic]),
-    status: clean(r.fields[D.status]?.name ?? r.fields[D.status]) || 'Active',
+    status: clean(r.fields[D.status]?.name ?? r.fields[D.status]) || 'Active', role: clean(r.fields[D.role]?.name ?? r.fields[D.role]),
     phone: clean(r.fields[D.phone]), azId: clean(r.fields[D.azId]), snap: parseSnap(r.fields[D.snap]) }));
   const byId = Object.fromEntries(drivers.map(d => [d.id, d]));
   return {
@@ -401,7 +415,7 @@ async function people() {
   return { connected: true, azugaOk: !!az, dupes: dupeGroups(named), allTrucks: at.trucks.map(t => ({ id: t.id, label: truckLabel[t.id] })).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true })),
     blank: at.drivers.filter(d => !d.name).map(d => ({ id: d.id, license: d.license, policy: d.policy, trucks: d.truckIds.map(id => truckLabel[id]).filter(Boolean) })),
     drivers: named.sort((a, b) => a.name.localeCompare(b.name)).map(d => ({
-    id: d.id, name: d.name, license: d.license, state: d.state, policy: d.policy, notes: d.notes, pic: d.pic, status: d.status,
+    id: d.id, name: d.name, license: d.license, state: d.state, policy: d.policy, notes: d.notes, pic: d.pic, status: d.status, role: d.role,
     trucks: d.truckIds.map(id => truckLabel[id]).filter(Boolean), truckIds: d.truckIds, inAzuga: inAz.has(dupeName(d.name)) })) };
 }
 
@@ -542,6 +556,7 @@ async function createDriver(b) {
   const opt = { license: [D.license, 40], state: [D.state, 20], policy: [D.policy, 60], notes: [D.notes, 500] };
   for (const k in opt) if (clean(b[k])) fields[opt[k][0]] = text(b[k], opt[k][1], k);
   if (b.dob) fields[D_DOB] = b.dob;
+  if (clean(b.role)) { if (!ROLES.includes(b.role)) throw new Error('Pick a role from the list.'); fields[D.role] = b.role; }
   if (b.addToAzuga && clean(b.email) && !EMAIL_OK.test(clean(b.email))) throw new Error('That email address does not look right.');
   const photo = okPhoto(b.photo) ? b.photo : null;
   if (b.photo && !photo) throw new Error('The license photo must be a JPG, PNG or WEBP under 5 MB.');
@@ -578,6 +593,7 @@ async function updateDriver(b) {
   const opt = { license: 40, state: 20, policy: 60, notes: 500 };
   for (const k in opt) fields[D[k]] = text(b[k], opt[k], k) || null;  // blank clears it
   if (b.status === 'Active' || b.status === 'Inactive') fields[D.status] = b.status;
+  if ('role' in b) { if (b.role && !ROLES.includes(b.role)) throw new Error('Pick a role from the list.'); fields[D.role] = b.role || null; }
   if (Array.isArray(b.truckIds)) {
     const known = new Set(at.trucks.map(t => t.id)), ids = [...new Set(b.truckIds)];
     if (ids.some(id => !known.has(id))) throw new Error('One of those trucks is not in Airtable. Refresh and try again.');
@@ -922,10 +938,9 @@ function etDay(d = new Date()) {
   return { ymd, start, end: new Date(+start + 864e5 - 1) };
 }
 const pomToday = () => pomDay(etDay().ymd);
-const pomDay = ymd => cached('pom:' + ymd, ymd === etDay().ymd ? 120 : 3600, async () => {   // past days don't change much
-  const { start, end } = etDay(new Date(ymd + 'T16:00:00Z')), out = [];
-  let after = null;
-  for (let page = 0; page < 10; page++) {
+async function pomRange(start, end) {
+  const out = []; let after = null;
+  for (let page = 0; page < 15; page++) {
     const d = await pom(`query($selector: AppointmentsV2Selector, $first: Int, $after: String) { infiniteAppointmentsV2(selector: $selector, first: $first, after: $after) {
       edges { node { ${POM_STOP_FIELDS} } } pageInfo { endCursor hasNextPage } } }`,
       { selector: { startDate: start.toISOString(), endDate: end.toISOString(), includePinned: true }, first: 200, after });
@@ -935,7 +950,10 @@ const pomDay = ymd => cached('pom:' + ymd, ymd === etDay().ymd ? 120 : 3600, asy
     after = c.pageInfo.endCursor;
   }
   return out;
-});
+}
+const pomDay = ymd => cached('pom:' + ymd, ymd === etDay().ymd ? 120 : 3600, () => { const { start, end } = etDay(new Date(ymd + 'T16:00:00Z')); return pomRange(start, end); });   // past days don't change much
+// Weekly truck check-ups live in POM as appointments ("Truck Check-Up" for "Trucks Submissions"); they aren't pool visits
+const pomCheckup = s => /truck\s*(check|submission|inspection)/i.test((s.type || '') + ' ' + (s.customer || ''));
 const pomDone = a => /complet|done|finish|serviced|closed/i.test(String(a.status || '') + ' ' + (a.serviceStatus && a.serviceStatus.name || ''));
 const pomStop = a => { const c = a.customer || {}, w = a.primaryWorker || (a.workers || []).find(x => x.primary) || (a.workers || [])[0] || {};
   return { id: a.id, time: a.date, mins: a.duration, status: a.status, serviceStatus: a.serviceStatus && a.serviceStatus.name, done: pomDone(a),
@@ -944,7 +962,7 @@ const pomStop = a => { const c = a.customer || {}, w = a.primaryWorker || (a.wor
     lat: +c.latitude || null, lng: +c.longitude || null }; };
 // Tech names in POM may be spelled a little differently from Airtable (DiMaio / Dimeo): same matching rules as Ramp
 async function pomStopsFor(name, ymd) {
-  const stops = (await (ymd ? pomDay(ymd) : pomToday())).map(pomStop), techs = [...new Set(stops.map(s => s.tech).filter(Boolean))].map(n => ({ name: n }));
+  const stops = (await (ymd ? pomDay(ymd) : pomToday())).map(pomStop).filter(s => !pomCheckup(s)), techs = [...new Set(stops.map(s => s.tech).filter(Boolean))].map(n => ({ name: n }));
   const m = rampMatch(techs, name) || techs.find(t => { const a = dupeName(t.name).split(' '), b = dupeName(name).split(' ');
     return a[0] && b[0] && a[0].slice(0, 3) === b[0].slice(0, 3) && near(a[a.length - 1], b[b.length - 1]); });
   return { tech: m ? m.name : null, stops: m ? stops.filter(s => s.tech === m.name).sort((x, y) => Date.parse(x.time) - Date.parse(y.time)) : [] };
@@ -2061,21 +2079,77 @@ header[data-sky=dawn] .sun,header[data-sky=dusk] .sun{background:radial-gradient
 
 .cstrip{-webkit-mask:linear-gradient(90deg,#000 calc(100% - 60px),transparent);mask:linear-gradient(90deg,#000 calc(100% - 60px),transparent);padding-right:40px}
 /* ===== v13: speed streaks behind moving trucks on the map ===== */
-.pin.mv::before{content:'';position:absolute;right:calc(100% + 3px);top:50%;width:26px;height:12px;margin-top:-6px;pointer-events:none;
-  background:linear-gradient(90deg,transparent,#22c55e) 0 1px/100% 2px no-repeat,linear-gradient(90deg,transparent,#4ade80) 6px 5px/80% 2px no-repeat,linear-gradient(90deg,transparent,#22c55e) 2px 9px/90% 2px no-repeat;
+.pin.mv::before{content:'';position:absolute;right:calc(100% + 3px);top:50%;width:38px;height:16px;margin-top:-8px;pointer-events:none;
+  background:linear-gradient(90deg,transparent,#16a34a) 0 1px/100% 3px no-repeat,linear-gradient(90deg,transparent,#4ade80) 8px 7px/80% 3px no-repeat,linear-gradient(90deg,transparent,#16a34a) 3px 13px/90% 3px no-repeat;
   border-radius:2px;animation:streak .6s linear infinite}
 @keyframes streak{0%{transform:translateX(6px);opacity:.2}50%{opacity:1}100%{transform:translateX(-6px);opacity:.2}}
 @media (prefers-reduced-motion:reduce){.pin.mv::before{animation:none}}
+
+/* Truck check-ups tab */
+#vChk{padding:14px 24px 24px;max-width:1240px;margin:0 auto;animation:fadein .3s ease-out}body[data-v=vChk] .vopt{display:none}body[data-v=vChk] .bar{max-width:1240px;margin:0 auto}
+.chs{background:linear-gradient(110deg,#7c2d12,#c2410c 55%,#f59e0b)}.chs .pbring b{font-size:13px}
+.chk{overflow-x:auto;padding:4px 0;box-shadow:inset 0 3px 0 #f59e0b,var(--sh)}.chk table{width:100%;border-collapse:collapse}
+.chk th{font-size:11.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;padding:12px 8px;text-align:center;border-bottom:1px solid var(--line);white-space:nowrap}.chk th:first-child{text-align:left;padding-left:18px}
+.chk th.now{color:#c2410c}.chk td{padding:10px 8px;text-align:center;border-bottom:1px solid var(--line)}.chk td:first-child{text-align:left;padding-left:18px}
+.chk tbody tr{animation:rise .35s ease-out both;animation-delay:calc(var(--i)*40ms)}.chk tbody tr:hover{background:#fffbeb}
+.chd{display:flex;align-items:center;gap:10px}.chd b{display:block;font-size:14.5px}
+.chc{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:9px;font-weight:800;font-size:15px}
+.chc.ok{background:#dcfce7;color:#15803d}.chc.miss{background:#fee2e2;color:#dc2626}.chc.due{background:#fef3c7;color:#b45309;animation:duep 1.6s ease-in-out infinite}.chc.none{background:repeating-linear-gradient(135deg,#f1f5f9 0 4px,#fff 4px 8px);box-shadow:inset 0 0 0 1px #e2e8f0}
+@keyframes duep{50%{box-shadow:0 0 0 4px rgba(245,158,11,.25)}}
+.chr{font-size:14px}.chr.g{color:#15803d}.chr.y{color:#b45309}.chr.r{color:#dc2626}.chs2{font-size:13px;color:#15803d}
+.chleg{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);padding:10px 18px 6px;margin:0}.chleg .chc{width:22px;height:22px;font-size:12px;border-radius:6px;margin-left:8px}
+@media (prefers-reduced-motion:reduce){.chc.due{animation:none}}
+
+/* ===== v14: Drivers tab rows coloured by driver score ===== */
+.roster .rrow{position:relative;transition:transform .2s cubic-bezier(.2,.8,.2,1),box-shadow .2s,background .15s}
+.roster .rrow::before{content:'';position:absolute;left:0;top:6px;bottom:6px;width:5px;border-radius:0 5px 5px 0;background:#cbd5e1;transition:width .2s}
+.roster .rrow:has(.schip.good)::before{background:linear-gradient(#4ade80,#16a34a)}.roster .rrow:has(.schip.ok)::before{background:linear-gradient(#fcd34d,#d97706)}.roster .rrow:has(.schip.bad)::before{background:linear-gradient(#f87171,#dc2626)}
+.roster .rrow:has(.schip.good){background:linear-gradient(90deg,rgba(74,222,128,.10),transparent 40%)}.roster .rrow:has(.schip.ok){background:linear-gradient(90deg,rgba(252,211,77,.14),transparent 40%)}.roster .rrow:has(.schip.bad){background:linear-gradient(90deg,rgba(248,113,113,.14),transparent 40%)}
+.roster .rrow:hover{transform:translateY(-2px);box-shadow:0 12px 24px -16px rgba(8,74,99,.55);z-index:1}.roster .rrow:hover::before{width:8px}
+.roster .schip{font-size:13px;padding:2px 9px;box-shadow:0 0 0 2px #fff,0 2px 6px rgba(0,0,0,.12)}
+@media (prefers-reduced-motion:reduce){.roster .rrow:hover{transform:none}}
+
+/* driver roles */
+.role{display:inline-flex;align-items:center;gap:4px;margin-left:6px;font-size:11.5px;font-weight:700;padding:2px 9px;border-radius:999px;vertical-align:middle;background:#f1f5f9;color:#475569}
+.role.r0{background:#cffafe;color:#0e7490}.role.r1{background:#ccfbf1;color:#0f766e}.role.r2{background:#dbeafe;color:#1d4ed8}.role.r3{background:#ede9fe;color:#6d28d9}.role.r4{background:#fef3c7;color:#a16207}.role.r5{background:#ffedd5;color:#c2410c}.role.r6{background:#e2e8f0;color:#334155}
+.rsum{display:flex;flex-wrap:wrap;gap:6px;margin:-2px 0 12px}.rsum button{font:inherit;font-size:12.5px;font-weight:600;border:1px solid var(--line2);background:#fff;border-radius:999px;padding:5px 11px;cursor:pointer;margin:0;transition:transform .15s}
+.rsum button:hover{transform:translateY(-1px)}.rsum button b{opacity:.65;margin-left:3px}.rsum button[aria-pressed=true]{box-shadow:0 0 0 2px var(--ink);border-color:transparent}.rsum button:not(.role)[aria-pressed=true]{background:var(--deep);color:#fff}
+
+/* ===== v15: birds crossing the header sky ===== */
+.birds{position:absolute;inset:0 0 auto 0;height:90px;pointer-events:none;z-index:0;overflow:hidden}
+.birds b{position:absolute;left:-60px;top:52px;width:44px;animation:fly 38s linear infinite}
+.birds b:nth-child(2){top:64px;width:34px;animation-delay:2.2s}.birds b:nth-child(3){top:58px;width:28px;animation-delay:3.6s}
+.birds svg{width:100%;display:block;overflow:visible;fill:#f8fafc;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35))}
+.birds .wl,.birds .wr{transform-origin:20px 12px;animation:flap .45s ease-in-out infinite alternate}.birds .wr{animation-name:flapr}
+@keyframes flap{to{transform:scaleY(-.6)}}@keyframes flapr{to{transform:scaleY(-.6)}}
+@keyframes fly{0%{transform:translate(0,0)}25%{transform:translate(28vw,-8px)}50%{transform:translate(55vw,4px)}75%,100%{transform:translate(calc(100vw + 120px),-6px)}}
+header[data-sky=night] .birds{display:none}
+@media (prefers-reduced-motion:reduce){.birds{display:none}}@media(max-width:900px){.birds{display:none}}
+
+.chk .chd b .role{font-size:10.5px;padding:1px 7px}.chmiss{background:#fffbeb}.chmiss small{color:#b45309!important;font-weight:600}
+.chwarn{display:inline-block;font-size:12.5px;font-weight:600;color:#92400e;background:#fef3c7;border-radius:8px;padding:5px 10px}
+.chskip{font-size:12.5px;color:var(--muted);padding:10px 18px 0;margin:0}
+
+/* ===== v16: Edit vehicles header becomes a coloured banner ===== */
+.edhero{position:relative;overflow:hidden;margin:-4px -4px 14px;padding:16px 18px;border-radius:16px;color:#fff;background:linear-gradient(115deg,#0b4a63,#0891b2 60%,#22d3ee);box-shadow:0 14px 30px -18px rgba(8,74,99,.8)}
+.edhero.mk-ford{background:linear-gradient(115deg,#1e3a8a,#2563eb 60%,#60a5fa)}.edhero.mk-chevy{background:linear-gradient(115deg,#78350f,#d97706 60%,#fbbf24)}.edhero.mk-ram,.edhero.mk-dodge{background:linear-gradient(115deg,#7f1d1d,#dc2626 60%,#f87171)}.edhero.mk-gmc{background:linear-gradient(115deg,#450a0a,#b91c1c 60%,#ef4444)}.edhero.mk-toyota{background:linear-gradient(115deg,#3f3f46,#71717a 60%,#d4d4d8)}.edhero.mk-nissan{background:linear-gradient(115deg,#1f2937,#475569 60%,#94a3b8)}
+.edhero h2{color:#fff}.edhero .azn,.edhero .pos{color:rgba(255,255,255,.85)!important}.edhero .tno,.edhero .mk{display:none}
+.ehno{flex:none;display:grid;place-items:center;min-width:64px;height:64px;padding:0 10px;border-radius:16px;background:rgba(255,255,255,.18);font-size:26px;font-weight:800;letter-spacing:-.02em;box-shadow:inset 0 0 0 1px rgba(255,255,255,.3);animation:ehpop .5s cubic-bezier(.2,.9,.3,1.4) both}.ehno svg{width:30px;height:30px}
+.ehtruck{position:absolute;right:120px;bottom:6px;width:86px;opacity:.9;animation:ehdrive 1.1s cubic-bezier(.2,.8,.2,1) both}
+.edhero::after{content:'';position:absolute;right:-40px;top:-60px;width:220px;height:220px;border-radius:50%;background:radial-gradient(circle,rgba(255,255,255,.22),transparent 65%);pointer-events:none}
+@keyframes ehpop{from{transform:scale(.4) rotate(-12deg);opacity:0}}@keyframes ehdrive{from{transform:translateX(-420px);opacity:0}70%{opacity:1}}
+@media(max-width:900px){.ehtruck{display:none}}@media (prefers-reduced-motion:reduce){.ehno,.ehtruck{animation:none}}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
  <svg class="hwave" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
  <div class="sun" aria-hidden="true"><i></i></div>
+ <div class="birds" aria-hidden="true"><b><svg viewBox="0 0 40 20"><path class="wl" d="M20 12 Q12 2 2 6 Q12 6 20 12"/><path class="wr" d="M20 12 Q28 2 38 6 Q28 6 20 12"/><ellipse cx="20" cy="12.5" rx="3.2" ry="2"/></svg></b><b><svg viewBox="0 0 40 20"><path class="wl" d="M20 12 Q12 2 2 6 Q12 6 20 12"/><path class="wr" d="M20 12 Q28 2 38 6 Q28 6 20 12"/><ellipse cx="20" cy="12.5" rx="3.2" ry="2"/></svg></b><b><svg viewBox="0 0 40 20"><path class="wl" d="M20 12 Q12 2 2 6 Q12 6 20 12"/><path class="wr" d="M20 12 Q28 2 38 6 Q28 6 20 12"/><ellipse cx="20" cy="12.5" rx="3.2" ry="2"/></svg></b></div>
  <div id="floaty" aria-hidden="true"></div>
  <svg class="hwave front" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M3 9c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0"/><path d="M3 15c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0" opacity=".6"/></svg></div><div>Millennial Pools<small>Fleet</small></div></div>
  <div class="live" id="live"><span class="dot"></span><span id="upd">Connecting to Azuga...</span></div>
- <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Live map</button><button data-v="vEdit"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l2-5h11l3 5v4H3z"/><circle cx="7" cy="17" r="2"/><circle cx="16" cy="17" r="2"/></svg>Edit vehicles</button><button data-v="vDrv"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><circle cx="17" cy="9" r="2.4"/><path d="M15.5 14.6c2.8.2 5 2.1 5 5.4"/></svg>Drivers</button><button data-v="vPom"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M2 19.5c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M8 12V5a2 2 0 0 1 4 0M14 12V5a2 2 0 0 1 4 0M8 8h6"/></svg>Pools</button><button data-v="vCam"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3z"/></svg>Cameras</button><a class="reptab" href="/report" target="_blank" rel="noopener"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Score report</a></nav>
+ <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Live map</button><button data-v="vEdit"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l2-5h11l3 5v4H3z"/><circle cx="7" cy="17" r="2"/><circle cx="16" cy="17" r="2"/></svg>Edit vehicles</button><button data-v="vDrv"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><circle cx="17" cy="9" r="2.4"/><path d="M15.5 14.6c2.8.2 5 2.1 5 5.4"/></svg>Drivers</button><button data-v="vPom"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M2 19.5c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M8 12V5a2 2 0 0 1 4 0M14 12V5a2 2 0 0 1 4 0M8 8h6"/></svg>Pools</button><button data-v="vChk"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12l2 2 4-4M9 17h6"/></svg>Truck check-ups</button><button data-v="vCam"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3z"/></svg>Cameras</button><a class="reptab" href="/report" target="_blank" rel="noopener"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Score report</a></nav>
 </header>
 <div class="bar"><div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search trucks or drivers" aria-label="Search trucks or drivers"></div><nav class="sum" id="sum" aria-label="Filter vehicles"></nav>
  <div class="vopt"><button id="voBtn" aria-expanded="false" aria-controls="voPop"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>View<span id="voHid"></span></button>
@@ -2097,6 +2171,7 @@ header[data-sky=dawn] .sun,header[data-sky=dusk] .sun{background:radial-gradient
   <label>License number<input name="license" maxlength="40"></label>
   <label>License state<input name="state" maxlength="20" placeholder="NJ"></label>
   <label>Insurance policy<input name="policy" maxlength="60" list="policyList"></label>
+  <label>Role<select name="role"><option value="">Not set</option><option>Tech</option><option>Tech assistant</option><option>District</option><option>Regional</option><option>Owner</option><option>Auditor</option><option>Staffer</option></select></label>
   <label>Status<select name="status"><option>Active</option><option>Inactive</option></select></label>
   <label>Date of birth<input name="dob" type="date"><span class="hint">Leave blank to keep what Airtable has</span></label>
   <label class="wide">Notes<input name="notes" maxlength="500"></label>
@@ -2121,6 +2196,7 @@ header[data-sky=dawn] .sun,header[data-sky=dusk] .sun{background:radial-gradient
   <nav class="sum" id="dsum" aria-label="Filter drivers"></nav>
   <button class="btn2 pri" id="newDrvBtn">+ Add driver</button>
  </div>
+ <nav class="rsum" id="rsum" aria-label="Filter by role"></nav>
  <form id="newDrv" hidden autocomplete="off" class="panel nd">
   <h3 style="margin:0 0 6px">Add a driver</h3>
   <div class="scan">
@@ -2134,6 +2210,7 @@ header[data-sky=dawn] .sun,header[data-sky=dusk] .sun{background:radial-gradient
    <label>License number<input name="license" maxlength="40"></label>
    <label>License state<input name="state" maxlength="20" placeholder="NJ"></label>
    <label>Insurance policy<input name="policy" maxlength="60" list="policyList"></label>
+   <label>Role<select name="role"><option value="">Not set</option><option>Tech</option><option>Tech assistant</option><option>District</option><option>Regional</option><option>Owner</option><option>Auditor</option><option>Staffer</option></select></label>
    <label>Date of birth<input name="dob" type="date"><span class="hint">Saved to Airtable only, never shown here</span></label>
    <label>Notes<input name="notes" maxlength="500"></label>
   </div>
@@ -2150,6 +2227,10 @@ header[data-sky=dawn] .sun,header[data-sky=dusk] .sun{background:radial-gradient
  <div class="crewhead"><div><h2>Pool routes</h2><p id="pbCount" class="muted">Loading today&rsquo;s schedule from Pool Office Manager...</p></div><span style="flex:1"></span>
   <label class="pbdate">Day <input type="date" id="pbDate"></label></div>
  <div id="pbSum"></div><div id="pbList" class="tgrid"></div>
+</div>
+<div id="vChk" hidden>
+ <div class="crewhead"><div><h2>Truck check-ups</h2><p id="chkCount" class="muted">Loading check-ups from Pool Office Manager...</p></div></div>
+ <div id="chkSum"></div><div id="chkGrid"></div>
 </div>
 <div id="vCam" hidden>
  <div class="crewhead"><div><h2>Camera events</h2><p id="camCount" class="muted">Loading the last 7 days from Azuga...</p></div><span style="flex:1"></span>
@@ -2500,7 +2581,9 @@ async function openEd(id){
     if(type==='select')return '<label>'+label+'<select name="'+k+'" data-orig="'+esc(cur||'')+'"><option value="">–</option>'+opt.map(o=>'<option'+(o===cur?' selected':'')+'>'+o+'</option>').join('')+'</select></label>';
     if(type==='driver'){const curId=v.userId||'',wantId=atWant(L,'userId'),curG=driverList.find(d=>d.ids.includes(curId)),selId=wantId||curId;const known=!!curG;return '<label>'+label+'<select name="userId" data-orig="'+esc(curId)+'"'+(wantId?' class="dirty"':'')+'>'+(known?'':'<option value="'+esc(curId)+'" selected>'+esc(/[a-z]/i.test(dname(v))?dname(v):'No driver')+'</option>')+driverList.map(d=>{const val=d===curG?curId:d.id;return '<option value="'+esc(val)+'"'+(val===selId?' selected':'')+'>'+esc(d.name)+'</option>'}).join('')+'</select>'+(wantId?'<span class="fromAt" style="align-self:flex-start">FROM AIRTABLE</span>':'')+(driverList.length?'':'<span class="hint">Could not load the driver list from Azuga.</span>')+'</label>'}
     return '<label>'+label+(fa?'<span class="fromAt">FROM AIRTABLE</span>':'')+'<input name="'+k+'" type="'+type+'" '+(opt?'maxlength="'+opt+'"':'')+' value="'+esc(cur??'')+'" data-orig="'+esc(orig??'')+'"'+(fa?' class="dirty"':'')+(k==='odometer'?' placeholder="Now: '+esc(odo(v))+'"':'')+'>'+(k==='odometer'?'<span class="hint">Leave blank to keep the current reading</span>':'')+'</label>'};
-  $('edCard').innerHTML='<div class="edh"><div><h2>'+tno(vid(v))+esc(title(v))+'</h2>'+azSub(v)+'</div><span class="pos">'+(i+1)+' of '+rs.length+'</span></div>'
+  const eL=link(vid(v)),eNo=eL&&eL.linked&&eL.truck.truckNo?eL.truck.truckNo.split(/[ ~(]/)[0]:'',eMk=String((eL&&eL.linked&&eL.truck.make)||v.make||'').toLowerCase().split(' ')[0];
+  $('edCard').innerHTML='<div class="edh edhero mk-'+(MAKES[eMk]?MAKES[eMk][1].replace(/^mk-/,''):'other')+'"><div class="ehno">'+(eNo?'#'+esc(eNo):ICON.truck)+'</div><div><h2>'+tno(vid(v))+esc(title(v))+'</h2>'+azSub(v)+'</div><span class="pos">'+(i+1)+' of '+rs.length+'</span>'
+    +'<svg class="ehtruck" viewBox="0 0 100 50" aria-hidden="true"><path d="M6 20h46v-8h14l13 13v13H6z" fill="#fff"/><path d="M55 14.5h10l10.5 10.5H55z" fill="#bae6fd"/><rect x="6" y="27" width="73" height="4" fill="rgba(0,0,0,.18)"/><circle cx="21" cy="40" r="7" fill="#0f172a"/><circle cx="21" cy="40" r="3" fill="#cbd5e1"/><circle cx="64" cy="40" r="7" fill="#0f172a"/><circle cx="64" cy="40" r="3" fill="#cbd5e1"/><path d="M2 24h-8M0 30h-12M2 36h-8" stroke="#fff" stroke-width="2" stroke-linecap="round" opacity=".7"/></svg></div>'
 
    +(lk?'<div class="at"><h4>Linked to Airtable'+(L.truck.truckNo?' truck #'+esc(L.truck.truckNo):'')+' · matched by '+esc(L.how)+'</h4>'
       +(Object.keys(L.changes).length?'Fields marked <span class="fromAt">FROM AIRTABLE</span> have newer info in Airtable. Click Save to update Azuga.':'Azuga matches Airtable.')
@@ -2820,6 +2903,7 @@ async function addAllToAzuga(){
   if(bad.length)alertBox('Some drivers were not added:\\n'+bad.join('\\n'));
 }
 const alertBox=t=>{$('dupes').insertAdjacentHTML('afterbegin','<div class="dup"><h4>Heads up</h4>'+esc(t).replace(/\\n/g,'<br>')+'</div>')};
+const ROLES=['Tech','Tech assistant','District','Regional','Owner','Auditor','Staffer'],ROLE_K=r=>ROLES.indexOf(r);let rfilt='';
 function renderDrivers(){
   if(!PEOPLE)return;
   if(!PEOPLE.connected){$('drvRows').innerHTML='<div class="empty"><b>Airtable is not connected yet</b>Add AIRTABLE_TOKEN in Render to see your drivers here.</div>';$('newDrvBtn').disabled=true;$('drvCount').textContent='';return}
@@ -2831,11 +2915,13 @@ function renderDrivers(){
   $('dsum').querySelectorAll('button').forEach(b=>b.onclick=()=>{dfilt=b.dataset.f;renderDrivers()});
   $('policyList').innerHTML=[...new Set(all.map(d=>d.policy).filter(Boolean))].map(p=>'<option value="'+esc(p)+'">').join('');
   renderDupes();
-  const q=$('q').value.toLowerCase(),ds=all.filter(d=>DF[dfilt][1](d)&&(!q||(d.name+' '+d.trucks.join(' ')+' '+d.license).toLowerCase().includes(q)))
+  $('rsum').innerHTML='<button data-r="" aria-pressed="'+!rfilt+'">All roles</button>'+ROLES.map(r=>'<button data-r="'+r+'" class="role r'+ROLE_K(r)+'" aria-pressed="'+(rfilt===r)+'">'+r+' <b>'+all.filter(d=>d.role===r).length+'</b></button>').join('')+'<button data-r="none" aria-pressed="'+(rfilt==='none')+'">No role <b>'+all.filter(d=>!d.role).length+'</b></button>';
+  $('rsum').querySelectorAll('button').forEach(b=>b.onclick=()=>{rfilt=b.dataset.r;renderDrivers()});
+  const q=$('q').value.toLowerCase(),ds=all.filter(d=>(!rfilt||(rfilt==='none'?!d.role:d.role===rfilt))&&DF[dfilt][1](d)&&(!q||(d.name+' '+d.trucks.join(' ')+' '+d.license+' '+(d.role||'')).toLowerCase().includes(q)))
     .sort((a,b)=>inactive(a)-inactive(b)||a.name.localeCompare(b.name));
   [...picked].forEach(id=>{if(!all.some(d=>d.id===id))picked.delete(id)});
   $('drvRows').innerHTML=(ds.length?ds.map(d=>'<div class="rrow'+(inactive(d)?' off':'')+(picked.has(d.id)?' picked':'')+'" data-id="'+esc(d.id)+'"><input type="checkbox" class="pick" aria-label="Select '+esc(d.name)+'"'+(picked.has(d.id)?' checked':'')+'><div class="mav" style="'+pcol(d.name)+'">'+esc(initials(d.name))+'</div>'
-    +'<div class="rn"><b class="nm">'+esc(d.name)+scoreChip(d.name)+(inactive(d)?'<span class="tag">Inactive</span>':'')+'</b><span>'+(!d.license&&!inactive(d)?'<em class="nolic">No license #</em>'+(d.policy?' · ':''):'')+esc([d.license&&((d.state?d.state+' ':'')+d.license),!inactive(d)&&d.policy].filter(Boolean).join(' · '))+(d.notes?' · '+esc(d.notes):'')+'</span></div>'
+    +'<div class="rn"><b class="nm">'+esc(d.name)+scoreChip(d.name)+(d.role?'<span class="role r'+ROLE_K(d.role)+'">'+esc(d.role)+'</span>':'')+(inactive(d)?'<span class="tag">Inactive</span>':'')+'</b><span>'+(!d.license&&!inactive(d)?'<em class="nolic">No license #</em>'+(d.policy?' · ':''):'')+esc([d.license&&((d.state?d.state+' ':'')+d.license),!inactive(d)&&d.policy].filter(Boolean).join(' · '))+(d.notes?' · '+esc(d.notes):'')+'</span></div>'
     +'<div class="rt'+(d.trucks.length?'':' none')+'">'+(d.trucks.length?d.trucks.map(esc).join(', '):'No truck')+'</div>'
     +'<div class="rs"><button class="link edbtn">Edit</button>'+(!PEOPLE.azugaOk||inactive(d)?'':d.inAzuga?'<span class="inaz">In Azuga</span>':'<button class="link azbtn">Add to Azuga</button>')+'</div>'
     +'</div>').join('')
@@ -2891,7 +2977,7 @@ let deId=null,dePhoto=null,deSel=new Set();
 function deTrucks(){const q=$('deTq').value.trim().toLowerCase();
   $('deTl').innerHTML=(PEOPLE.allTrucks||[]).filter(t=>!q||t.label.toLowerCase().includes(q)||deSel.has(t.id)).map(t=>'<label class="'+(deSel.has(t.id)?'on':'')+'"><input type="checkbox" value="'+esc(t.id)+'"'+(deSel.has(t.id)?' checked':'')+'>'+esc(t.label)+'</label>').join('')||'<span class="muted">No trucks match.</span>'}
 function openDrv(id){const d=PEOPLE.drivers.find(x=>x.id===id);if(!d)return;deId=id;dePhoto=null;deSel=new Set(d.truckIds||[]);const f=$('drvForm');f.reset();
-  for(const k of ['name','license','state','policy','notes'])f[k].value=d[k]||'';f.status.value=d.status==='Inactive'?'Inactive':'Active';
+  for(const k of ['name','license','state','policy','notes','role'])f[k].value=d[k]||'';f.status.value=d.status==='Inactive'?'Inactive':'Active';
   $('deTitle').textContent='Edit '+d.name;$('deDz').hidden=true;$('deDzYes').textContent='Delete for good';$('deTq').value='';deTrucks();$('dePrev').hidden=true;$('deMsg').textContent='';$('deSave').disabled=false;
   $('dePic').innerHTML=d.pic&&d.pic.length?'<a class="btn" target="_blank" rel="noopener" href="'+esc(d.pic[0].url)+'">'+ICON.file+'Current license photo</a>':'<span class="muted">No license photo yet</span>';
   $('drvEd').showModal()}
@@ -2955,6 +3041,37 @@ function renderPom(){const r=POMB;if(!r)return;
       +(nx?'<div class="tnext"><span>Next</span><b>'+esc(nx.customer||'Pool')+'</b><small>'+esc(nx.address)+(nx.time?' · '+hm(nx.time):'')+'</small></div>':'<div class="tnext fin"><span>All done</span><b>Route finished</b></div>')
       +'<details><summary>All '+t.total+' stops</summary><ol class="tstops">'+t.stops.map(stopLi).join('')+'</ol></details></div>'}).join(''):'<div class="empty">'+(q?'No techs match your search.':'No pools scheduled for this day.')+'</div>')}
 document.addEventListener('click',e=>{const b=e.target.closest('.tchip');if(!b)return;document.querySelector('.tabs button[data-v=vMap]').click();select(b.dataset.truck)});
+// ---- Truck check-ups tab: the weekly POM truck form, per driver, week by week ----
+let CHK=null;
+async function loadChk(){if(!CHK)$('chkGrid').innerHTML='<div class="panel" style="padding:16px"><div class="sk" style="width:60%"></div><div class="sk" style="width:80%"></div></div>';
+  try{CHK=await get('/api/pom/checkups?weeks=8');renderChk()}catch(e){$('chkGrid').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
+function renderChk(){const r=CHK;if(!r)return;
+  if(!r.connected){$('chkCount').textContent='Pool Office Manager is not connected (add POM_API_KEY in Render).';$('chkSum').innerHTML=$('chkGrid').innerHTML='';return}
+  const ymd=t=>new Date(t).toLocaleDateString('en-CA',{timeZone:'America/New_York'}),now=r.now;
+  const days=[...new Set(r.checkups.map(s=>ymd(s.time)))].sort().reverse();   // one column per check-up day, newest first
+  const RL=['Tech','Tech assistant','District','Regional','Owner','Auditor','Staffer'],NEED=['Tech','Tech assistant','Auditor'],role=n=>(r.roles||{})[n]||'',need=n=>!role(n)||NEED.includes(role(n));   // no role set yet: still expected
+  const q=$('q').value.trim().toLowerCase(),every=[...new Set(r.checkups.map(s=>s.tech))].filter(n=>!q||n.toLowerCase().includes(q)),techs=every.filter(need),skip=every.filter(n=>!need(n));
+  const cell=(n,d)=>r.checkups.find(s=>s.tech===n&&ymd(s.time)===d);
+  const state=s=>!s?'none':s.done?'ok':Date.parse(s.time)>now?'due':'miss';
+  const rows=techs.map(n=>{const cs=days.map(d=>cell(n,d)),st=cs.map(state),given=st.filter(x=>x==='ok'||x==='miss'),ok=st.filter(x=>x==='ok').length;
+    let streak=0;for(const x of st){if(x==='due'||x==='none')continue;if(x==='ok')streak++;else break}
+    return {n,cs,st,ok,rate:given.length?Math.round(ok/given.length*100):null,streak,missed:given.length-ok}}).sort((a,b)=>b.missed-a.missed||a.n.localeCompare(b.n));
+  const cur=days[0],curSt=techs.map(n=>state(cell(n,cur))),curOk=curSt.filter(x=>x==='ok').length,curDue=curSt.filter(x=>x==='due').length;
+  const lbl=d=>new Date(d+'T12:00').toLocaleDateString([],{month:'short',day:'numeric'}),wk=d=>new Date(d+'T12:00').toLocaleDateString([],{weekday:'short'});
+  const curT=r.checkups.find(s=>ymd(s.time)===cur);
+  $('chkCount').textContent=techs.length+' drivers · weekly form in Pool Office Manager · last '+days.length+' weeks';
+  $('chkSum').innerHTML=cur?'<div class="pbs chs"><div class="pbring" style="--v:'+(techs.length?Math.round(curOk/techs.length*100):0)+'"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9" pathLength="100"/><circle class="fill" cx="18" cy="18" r="15.9" pathLength="100"/></svg><b>'+curOk+'/'+techs.length+'</b></div>'
+    +'<div><b>'+wk(cur)+' '+lbl(cur)+'</b><span>this week’s check-up'+(curDue&&curT?' · due '+new Date(curT.time).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'')+'</span></div>'
+    +'<div><b>'+curOk+'</b><span>submitted</span></div>'+(curDue?'<div><b>'+curDue+'</b><span>still due</span></div>':'<div><b>'+(techs.length-curOk)+'</b><span>missed</span></div>')
+    +'<div><b>'+rows.reduce((a,x)=>a+x.missed,0)+'</b><span>missed in '+days.length+' weeks</span></div></div>':'';
+  const icon={ok:'✓',miss:'✕',due:'•',none:''},word={ok:'Submitted',miss:'Missed',due:'Due',none:'Not assigned'};
+  $('chkGrid').innerHTML=rows.length?'<div class="chk panel"><table><thead><tr><th>Driver</th>'+days.map((d,i)=>'<th class="'+(i?'':'now')+'">'+wk(d)+'<br>'+lbl(d)+'</th>').join('')+'<th>On time</th><th>Streak</th></tr></thead><tbody>'
+    +rows.map((x,ri)=>{const tr=r.trucks[x.n];return '<tr style="--i:'+ri+'"><td><div class="chd">'+avatar(x.n)+'<div><b>'+esc(x.n)+(role(x.n)?'<span class="role r'+RL.indexOf(role(x.n))+'">'+esc(role(x.n))+'</span>':'<span class="role" title="Set a role on the Drivers tab">No role</span>')+'</b>'+(tr?'<button class="tchip" data-truck="'+esc(tr)+'">'+tno(tr)+'Show on map</button>':'<small class="muted">No truck matched</small>')+'</div></div></td>'
+      +x.st.map((st,i)=>{const s=x.cs[i];return '<td><span class="chc '+st+'" title="'+word[st]+(s?' · '+esc(new Date(s.time).toLocaleString([],{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})):'')+'">'+icon[st]+'</span></td>'}).join('')
+      +'<td><b class="chr '+(x.rate===null?'':x.rate>=80?'g':x.rate>=50?'y':'r')+'">'+(x.rate===null?'–':x.rate+'%')+'</b></td><td>'+(x.streak?'<b class="chs2">'+x.streak+' wk'+(x.streak>1?'s':'')+'</b>':'<span class="muted">–</span>')+'</td></tr>'}).join('')
+    +(r.missing||[]).filter(m=>!q||m.name.toLowerCase().includes(q)).map(m=>'<tr class="chmiss"><td><div class="chd">'+avatar(m.name)+'<div><b>'+esc(m.name)+'<span class="role r'+RL.indexOf(m.role)+'">'+esc(m.role)+'</span></b><small>No check-up set up in POM</small></div></div></td><td colspan="'+days.length+'"><span class="chwarn">⚠ '+esc(m.role)+'s should get the weekly truck check-up. Add it for them in Pool Office Manager.</span></td><td>–</td><td>–</td></tr>').join('')
+    +'</tbody></table>'+(skip.length?'<p class="chskip">Not required: '+skip.map(n=>esc(n)+' ('+esc(role(n))+')').join(', ')+'. Owners, district, regional and staffers don\u2019t submit check-ups, so they aren\u2019t counted.</p>':'')+'<p class="chleg"><span class="chc ok">✓</span> Submitted <span class="chc miss">✕</span> Missed <span class="chc due">•</span> Still due <span class="chc none"></span> Not assigned that week</p></div>'
+    :'<div class="empty">'+(q?'No drivers match your search.':'No truck check-ups found in Pool Office Manager.')+'</div>'}
 // ---- Cameras tab: every camera event in the fleet, filter by type and driver ----
 let CAMALL=[],camTabType='';
 async function loadCamTab(){if(!CAMALL.length)$('cgrid').innerHTML='<div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div>';
@@ -2999,10 +3116,10 @@ function moveTab(){const b=document.querySelector('.tabs button.on'),i=document.
 addEventListener('resize',moveTab);(document.fonts&&document.fonts.ready||Promise.resolve()).then(moveTab);setTimeout(moveTab,50);
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));moveTab();
-  ['vMap','vEdit','vDrv','vPom','vCam'].forEach(v=>$(v).hidden=b.dataset.v!==v);if(b.dataset.v==='vPom')loadPomBoard();if(b.dataset.v==='vCam')loadCamTab();if(b.dataset.v==='vMap'&&sel&&TRUCKV.length)drawCams();document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
+  ['vMap','vEdit','vDrv','vPom','vCam','vChk'].forEach(v=>$(v).hidden=b.dataset.v!==v);if(b.dataset.v==='vChk')loadChk();if(b.dataset.v==='vPom')loadPomBoard();if(b.dataset.v==='vCam')loadCamTab();if(b.dataset.v==='vMap'&&sel&&TRUCKV.length)drawCams();document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
   if(b.dataset.v!=='vMap')loadSync();if(b.dataset.v==='vEdit')renderEdit();else if(b.dataset.v==='vDrv'){if(!PEOPLE)loadPeople();else renderDrivers()}else map.invalidateSize();
 });
-$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();if(!$('vPom').hidden)renderPom();if(!$('vCam').hidden)renderCamTab();};
+$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();if(!$('vPom').hidden)renderPom();if(!$('vCam').hidden)renderCamTab();if(!$('vChk').hidden)renderChk();};
 window.addEventListener('beforeunload',e=>{if(dirtyCount())e.preventDefault()});
 refresh();setInterval(refresh,30000);
 </script></body></html>`;
