@@ -105,6 +105,17 @@ const routes = {
     return { connected: true, ...(await visitsFor(q.get('name') || '', date)) }; },
   '/api/pom/route': async q => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
     const name = q.get('name') || ''; return { connected: true, day: etDay().ymd, ...(name ? await pomStopsFor(name) : {}) }; },
+  '/api/pom/board': async q => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
+    const date = q.get('date') || etDay().ymd;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('Bad date.');
+    const { start, end } = etDay(new Date(date + 'T16:00:00Z')), by = {};
+    // pinned appointments come back from other days too; keep only this day's
+    (await pomDay(date)).map(pomStop).filter(s => { const t = Date.parse(s.time); return t >= +start && t <= +end; })
+      .sort((a, b) => Date.parse(a.time) - Date.parse(b.time)).forEach(s => (by[s.tech] = by[s.tech] || []).push(s));
+    const td = await truckDrivers().catch(() => ({})), drivers = Object.keys(td).filter(v => td[v]).map(v => ({ name: td[v], v }));
+    const techs = Object.entries(by).filter(([n]) => n).map(([name, stops]) => { const m = rampMatch(drivers, name);
+      return { name, truck: m ? m.v : null, driver: m ? m.name : null, total: stops.length, done: stops.filter(s => s.done).length, stops }; });
+    return { connected: true, date, today: date === etDay().ymd, techs, unassigned: by[''] || [] }; },
   '/api/pom/stops': async () => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
     return { connected: true, day: etDay().ymd, stops: (await pomToday()).map(pomStop).filter(s => s.lat && s.lng) }; },
   '/api/pom/debug': async () => { const { start, end } = etDay();   // behind the dashboard login: what POM sends back, for setting this up
@@ -1973,6 +1984,35 @@ header::after{content:'';position:absolute;left:0;right:0;bottom:0;height:6px;z-
 @media(max-width:900px){header{padding-bottom:60px}}
 button:not(:disabled):active,.repbtn:active{transform:scale(.97)}
 @media (prefers-reduced-motion:reduce){body::before,.pill.go,#donut svg{animation:none!important}.card:hover{transform:none}}
+
+/* ===== Pools + Cameras tabs ===== */
+#vPom,#vCam{padding:14px 24px 24px;max-width:1240px;margin:0 auto;animation:fadein .3s ease-out}
+body[data-v=vPom] .vopt,body[data-v=vCam] .vopt{display:none}body[data-v=vPom] .bar,body[data-v=vCam] .bar{max-width:1240px;margin:0 auto}
+.pbdate{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;color:var(--ink2)}.pbdate input,#camDrv{font:inherit;padding:7px 10px;border:1px solid var(--line2);border-radius:10px;background:#fff}
+.pbs{display:flex;align-items:center;gap:28px;flex-wrap:wrap;background:linear-gradient(110deg,#0a4660,#0e7490 60%,#14b8a6);color:#fff;border-radius:18px;padding:16px 24px;margin-bottom:14px;box-shadow:0 14px 30px -18px rgba(8,74,99,.8)}
+.pbs>div{display:flex;flex-direction:column}.pbs b{font-size:26px;line-height:1.1;font-variant-numeric:tabular-nums}.pbs span{font-size:12.5px;opacity:.85}
+.pbring{position:relative;width:64px;height:64px}.pbring svg{width:64px;height:64px;transform:rotate(-90deg)}.pbring circle{fill:none;stroke:rgba(255,255,255,.22);stroke-width:3.4}.pbring .fill{stroke:#a3e635;stroke-linecap:round;stroke-dasharray:var(--v) 100;animation:ringin 1s cubic-bezier(.2,.8,.2,1)}
+@keyframes ringin{from{stroke-dasharray:0 100}}.pbring b{position:absolute;inset:0;display:grid;place-items:center;font-size:15px}
+.tgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.tcard{background:var(--card);border-radius:16px;padding:14px 16px;box-shadow:inset 0 3px 0 var(--c-list),var(--sh);animation:rise .4s cubic-bezier(.2,.8,.2,1) both;animation-delay:calc(var(--i,0)*35ms);transition:transform .2s,box-shadow .2s}
+.tcard:hover{transform:translateY(-2px)}.tcard.fin{box-shadow:inset 0 3px 0 #22c55e,var(--sh)}.tcard.un{box-shadow:inset 0 3px 0 #f59e0b,var(--sh)}
+.tcard .th{display:flex;align-items:center;gap:10px}.tcard .th>div:nth-child(2){flex:1;min-width:0}.tcard .th b{display:block;font-size:15px}
+.tchip{font:inherit;font-size:12px;font-weight:600;color:var(--poolInk);background:var(--shallow);border:0;border-radius:999px;padding:2px 9px 2px 3px;margin-top:3px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}.tchip:hover{background:var(--shallow2)}
+.tpct{font-size:20px;font-weight:800;color:var(--poolInk);font-variant-numeric:tabular-nums}.tcard.fin .tpct{color:#16a34a;font-size:15px}
+.pbar{height:8px;border-radius:99px;background:#e2f3f6;margin:12px 0 8px;overflow:hidden}.pbar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,#22d3ee,#0891b2);animation:barin .9s cubic-bezier(.2,.8,.2,1) both}.tcard.fin .pbar i{background:linear-gradient(90deg,#86efac,#16a34a)}
+@keyframes barin{from{width:0}}
+.tmeta{font-size:12.5px;color:var(--muted)}.tmeta b{color:var(--ink)}
+.tnext{margin-top:10px;padding:9px 12px;border-radius:12px;background:#f0fdff;border:1px solid #cffafe}.tnext span{display:block;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#0891b2}.tnext b{display:block;font-size:14px}.tnext small{color:var(--muted)}
+.tnext.fin{background:#f0fdf4;border-color:#bbf7d0}.tnext.fin span{color:#16a34a}
+.tcard details{margin-top:8px}.tcard summary{cursor:pointer;font-size:12.5px;font-weight:600;color:var(--poolInk)}
+.tstops{list-style:none;margin:8px 0 0;padding:0;max-height:260px;overflow:auto}.tstops li{display:flex;gap:9px;align-items:flex-start;padding:6px 0;border-top:1px solid var(--line);font-size:13px}
+.tstops i{flex:none;width:18px;height:18px;border-radius:50%;border:2px solid #cbd5e1;display:grid;place-items:center;font-size:11px;font-style:normal;color:#fff;margin-top:1px}.tstops li.done i{background:#22c55e;border-color:#22c55e}
+.tstops span{flex:1;min-width:0}.tstops b{display:block;font-weight:600}.tstops small{color:var(--muted)}.tstops em{font-style:normal;font-size:12px;color:var(--muted);white-space:nowrap}.tstops li.done b{color:var(--muted)}
+.ctypes{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}.cchip{font:inherit;font-size:13px;font-weight:600;border:1px solid var(--line2);background:#fff;border-radius:999px;padding:6px 12px;cursor:pointer;transition:transform .15s,box-shadow .15s}
+.cchip:hover{transform:translateY(-1px)}.cchip b{margin-left:4px;opacity:.7}.cchip.on{box-shadow:0 0 0 2px var(--ink);border-color:transparent}.cchip:not(.pill).on{background:var(--deep);color:#fff}
+.cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
+.cgrid .evb{background:var(--card);box-shadow:inset 0 3px 0 var(--c-cams),var(--sh)!important;border-radius:14px;padding:12px;margin:0}.evtruck{color:var(--ink2);font-weight:600}.cgrid .evgo{position:static;align-self:center;white-space:nowrap}
+@media(max-width:900px){#vPom,#vCam{padding:12px 16px}.tgrid,.cgrid{grid-template-columns:1fr}}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -1981,7 +2021,7 @@ button:not(:disabled):active,.repbtn:active{transform:scale(.97)}
  <svg class="hwave front" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M3 9c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0"/><path d="M3 15c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0" opacity=".6"/></svg></div><div>Millennial Pools<small>Fleet</small></div></div>
  <div class="live" id="live"><span class="dot"></span><span id="upd">Connecting to Azuga...</span></div>
- <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on">Live map</button><button data-v="vEdit">Edit vehicles</button><button data-v="vDrv">Drivers</button><a class="reptab" href="/report" target="_blank" rel="noopener">Score report</a></nav>
+ <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on">Live map</button><button data-v="vEdit">Edit vehicles</button><button data-v="vDrv">Drivers</button><button data-v="vPom">Pools</button><button data-v="vCam">Cameras</button><a class="reptab" href="/report" target="_blank" rel="noopener">Score report</a></nav>
 </header>
 <div class="bar"><div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search trucks or drivers" aria-label="Search trucks or drivers"></div><nav class="sum" id="sum" aria-label="Filter vehicles"></nav>
  <div class="vopt"><button id="voBtn" aria-expanded="false" aria-controls="voPop"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>View<span id="voHid"></span></button>
@@ -2051,6 +2091,16 @@ button:not(:disabled):active,.repbtn:active{transform:scale(.97)}
  <div class="syncp" id="syncD"></div>
  <div id="dupes"></div>
  <div class="panel roster" id="drvRows"><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div></div>
+</div>
+<div id="vPom" hidden>
+ <div class="crewhead"><div><h2>Pool routes</h2><p id="pbCount" class="muted">Loading today&rsquo;s schedule from Pool Office Manager...</p></div><span style="flex:1"></span>
+  <label class="pbdate">Day <input type="date" id="pbDate"></label></div>
+ <div id="pbSum"></div><div id="pbList" class="tgrid"></div>
+</div>
+<div id="vCam" hidden>
+ <div class="crewhead"><div><h2>Camera events</h2><p id="camCount" class="muted">Loading the last 7 days from Azuga...</p></div><span style="flex:1"></span>
+  <select id="camDrv" aria-label="Filter by driver"><option value="">All drivers</option></select></div>
+ <div id="camTypes" class="ctypes"></div><div id="cgrid" class="cgrid"></div>
 </div>
 <div id="vEdit" hidden><div class="ed">
  <aside class="panel edl"><div class="edf"><label><input type="checkbox" id="needs"> Only show trucks that need attention</label><div id="syncBar" style="margin-top:10px"></div><div class="syncp sm" id="syncE"></div></div><div id="edList"></div></aside>
@@ -2254,12 +2304,12 @@ let VIDS=[];
 function evDriver(x){const az=[x.firstName,x.lastName].filter(Boolean).join(' ').replace(/[ .]+$/,'')||pick(x,'driverName')||'';
   const r=all().find(v=>vid(v)==(x.vehicleId||sel)),cur=r?who(r):'',real=/[a-z]/i.test(cur)?cur:/[a-z]/i.test(az)?az:'';
   const n=s=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');return {name:real,azuga:/[a-z]/i.test(az)&&n(az)!==n(real)?az:''}}
-function evRow(x,i){const e=pick(x,'eventType','eventName'),md=evMedia(x),th=md.videos[0]&&md.videos[0].poster||md.snaps[0]&&md.snaps[0].url;
+function evRow(x,i,truck){const e=pick(x,'eventType','eventName'),md=evMedia(x),th=md.videos[0]&&md.videos[0].poster||md.snaps[0]&&md.snaps[0].url;
       const D=evDriver(x),drv=D.name;
       return '<button class="ev evb" data-i="'+i+'"'+'>'
         +(th?'<span class="evth"><img src="'+esc(th)+'" alt="" loading="lazy">'+(md.videos.length?'<i>'+ICON.play+'</i>':'')+'</span>':'<span class="evth none">'+(x.requested?'Waiting':'No media')+'</span>')
         +'<span class="evi">'+'<span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="t">'+esc(when(pick(x,'eventTime','startTime')))+(drv?' · '+esc(drv):'')+(D.azuga?flag('The camera stamped this alert with '+D.azuga+', but Airtable lists '+(D.name||'someone else')+' as this truck\u2019s driver. The dashboard and score go by Airtable. If '+D.azuga+' was really driving, it belongs to them.'):'')+'</span>'
-        +'<span class="muted" style="font-size:12px">'+esc(pick(x,'address')||'')+'</span>'+'</span>'
+        +'<span class="muted" style="font-size:12px">'+(truck?'<b class="evtruck">'+esc(truck)+'</b> · ':'')+esc(pick(x,'address')||'')+'</span>'+'</span>'
         +'<span class="evgo">'+(md.videos.length?'Watch':md.snaps.length?'View photos':x.requested?'Waiting on camera':'')+'</span></button>'}
 // ---- Selected truck: circle graph of its camera events; clicking a slice filters the list ----
 let TRUCKV=[],camType='';
@@ -2818,15 +2868,56 @@ fleetVids();
 // sky colour by time of day (dawn, day, dusk, night)
 function sky(){const h=new Date().getHours(),hd=document.querySelector('header');if(hd)hd.dataset.sky=h>=5&&h<8?'dawn':h<17&&h>=8?'day':h>=17&&h<20?'dusk':'night'}
 sky();setInterval(sky,10*60e3);
+// ---- Pools tab: every tech's POM route for the day, with progress ----
+let POMB=null,pomTimer=null;
+const hm=t=>t?new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'';
+async function loadPomBoard(){const d=$('pbDate');if(!d.value){d.value=new Date().toLocaleDateString('en-CA');d.max=d.value}
+  clearTimeout(pomTimer);if(!POMB)$('pbList').innerHTML='<div class="tcard"><div class="sk" style="width:60%"></div><div class="sk" style="width:80%"></div></div>'.repeat(3);
+  try{POMB=await get('/api/pom/board?date='+d.value);renderPom()}catch(e){$('pbList').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}
+  if(POMB&&POMB.today)pomTimer=setTimeout(()=>{if(!$('vPom').hidden)loadPomBoard()},120e3)}
+$('pbDate').onchange=()=>{POMB=null;loadPomBoard()};
+function stopLi(s){return '<li class="'+(s.done?'done':'')+'"><i>'+(s.done?'✓':'')+'</i><span><b>'+esc(s.customer||'Pool')+'</b><small>'+esc(s.address)+'</small></span><em>'+hm(s.time)+'</em></li>'}
+function renderPom(){const r=POMB;if(!r)return;
+  if(!r.connected){$('pbCount').textContent='Pool Office Manager is not connected (add POM_API_KEY in Render).';$('pbSum').innerHTML=$('pbList').innerHTML='';return}
+  const q=$('q').value.trim().toLowerCase(),hit=t=>!q||t.name.toLowerCase().includes(q)||t.stops.some(s=>(s.customer+' '+s.address).toLowerCase().includes(q));
+  const T=r.techs.filter(hit).sort((a,b)=>(a.done===a.total)-(b.done===b.total)||a.done/a.total-b.done/b.total||a.name.localeCompare(b.name));
+  const tot=r.techs.reduce((a,t)=>a+t.total,0)+r.unassigned.length,done=r.techs.reduce((a,t)=>a+t.done,0)+r.unassigned.filter(s=>s.done).length,pct=tot?Math.round(done/tot*100):0;
+  $('pbCount').textContent=r.techs.length+' techs · '+tot+' pools scheduled'+(r.today?' · updates every 2 minutes':'');
+  $('pbSum').innerHTML='<div class="pbs"><div class="pbring" style="--v:'+pct+'"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9" pathLength="100"/><circle class="fill" cx="18" cy="18" r="15.9" pathLength="100"/></svg><b>'+pct+'%</b></div>'
+    +'<div><b>'+done+'</b><span>done</span></div><div><b>'+(tot-done)+'</b><span>to go</span></div><div><b>'+r.techs.filter(t=>t.done<t.total).length+'</b><span>techs still on route</span></div><div><b>'+r.techs.filter(t=>t.total&&t.done===t.total).length+'</b><span>finished</span></div></div>';
+  $('pbList').innerHTML=(T.length?T.map((t,i)=>{const p=Math.round(t.done/t.total*100),nx=t.stops.find(s=>!s.done),last=[...t.stops].reverse().find(s=>s.done),fin=t.done===t.total;
+    return '<div class="tcard'+(fin?' fin':'')+'" style="--i:'+Math.min(i,12)+'"><div class="th">'+avatar(t.driver||t.name)+'<div><b>'+esc(t.name)+'</b>'
+      +(t.truck?'<button class="tchip" data-truck="'+esc(t.truck)+'">'+tno(t.truck)+'Show on map</button>':'<small class="muted">No truck matched in Airtable</small>')+'</div><span class="tpct">'+(fin?'Done':p+'%')+'</span></div>'
+      +'<div class="pbar"><i style="width:'+p+'%"></i></div><div class="tmeta"><b>'+t.done+' of '+t.total+'</b> pools done'+(last?' · last at '+esc(last.customer||'a pool'):'')+'</div>'
+      +(nx?'<div class="tnext"><span>Next</span><b>'+esc(nx.customer||'Pool')+'</b><small>'+esc(nx.address)+(nx.time?' · '+hm(nx.time):'')+'</small></div>':'<div class="tnext fin"><span>All done</span><b>Route finished</b></div>')
+      +'<details><summary>All '+t.total+' stops</summary><ol class="tstops">'+t.stops.map(stopLi).join('')+'</ol></details></div>'}).join(''):'<div class="empty">'+(q?'No techs match your search.':'No pools scheduled for this day.')+'</div>')
+    +(r.unassigned.length&&!q?'<div class="tcard un"><div class="th"><div class="av none">?</div><div><b>Not assigned to a tech</b><small class="muted">'+r.unassigned.length+' pools</small></div></div><ol class="tstops">'+r.unassigned.map(stopLi).join('')+'</ol></div>':'')}
+document.addEventListener('click',e=>{const b=e.target.closest('.tchip');if(!b)return;document.querySelector('.tabs button[data-v=vMap]').click();select(b.dataset.truck)});
+// ---- Cameras tab: every camera event in the fleet, filter by type and driver ----
+let CAMALL=[],camTabType='';
+async function loadCamTab(){if(!CAMALL.length)$('cgrid').innerHTML='<div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div>';
+  try{CAMALL=await fleetVids();renderCamTab()}catch(e){$('cgrid').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
+$('camDrv').onchange=()=>renderCamTab();
+function renderCamTab(){const ev=CAMALL,q=$('q').value.trim().toLowerCase(),dv=$('camDrv').value;
+  const truckOf=x=>{const r=all().find(v=>vid(v)==x.vehicleId);return r?title(r):''};
+  const drivers=[...new Set(ev.map(x=>evDriver(x).name).filter(Boolean))].sort();
+  $('camDrv').innerHTML='<option value="">All drivers</option>'+drivers.map(d=>'<option'+(d===dv?' selected':'')+'>'+esc(d)+'</option>').join('');
+  const byDrv=ev.filter(x=>!dv||evDriver(x).name===dv),c={};byDrv.forEach(x=>{const t=evName(pick(x,'eventType','eventName'));c[t]=(c[t]||0)+1});
+  if(camTabType&&!c[camTabType])camTabType='';
+  $('camTypes').innerHTML='<button class="cchip'+(camTabType?'':' on')+'" data-ct="">All <b>'+byDrv.length+'</b></button>'+Object.entries(c).sort((a,b)=>b[1]-a[1]).map(([t,n])=>'<button class="cchip pill '+evClass(t)+(camTabType===t?' on':'')+'" data-ct="'+esc(t)+'">'+esc(t)+' <b>'+n+'</b></button>').join('');
+  VIDS=byDrv.filter(x=>(!camTabType||evName(pick(x,'eventType','eventName'))===camTabType)&&(!q||(evDriver(x).name+' '+truckOf(x)+' '+evName(pick(x,'eventType','eventName'))+' '+(pick(x,'address')||'')).toLowerCase().includes(q)));
+  $('camCount').textContent=ev.length+' events across the fleet · last 7 days';
+  $('cgrid').innerHTML=VIDS.length?VIDS.map((x,i)=>evRow(x,i,truckOf(x))).join(''):'<div class="empty">No camera events match.</div>'}
+document.addEventListener('click',e=>{const b=e.target.closest('.cchip');if(!b)return;camTabType=b.dataset.ct;renderCamTab()});
 // sliding white pill behind the active tab
 function moveTab(){const b=document.querySelector('.tabs button.on'),i=document.querySelector('.tabind');if(b&&i){i.style.left=b.offsetLeft+'px';i.style.width=b.offsetWidth+'px'}}
 addEventListener('resize',moveTab);(document.fonts&&document.fonts.ready||Promise.resolve()).then(moveTab);setTimeout(moveTab,50);
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));moveTab();
-  ['vMap','vEdit','vDrv'].forEach(v=>$(v).hidden=b.dataset.v!==v);document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
+  ['vMap','vEdit','vDrv','vPom','vCam'].forEach(v=>$(v).hidden=b.dataset.v!==v);if(b.dataset.v==='vPom')loadPomBoard();if(b.dataset.v==='vCam')loadCamTab();if(b.dataset.v==='vMap'&&sel&&TRUCKV.length)drawCams();document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
   if(b.dataset.v!=='vMap')loadSync();if(b.dataset.v==='vEdit')renderEdit();else if(b.dataset.v==='vDrv'){if(!PEOPLE)loadPeople();else renderDrivers()}else map.invalidateSize();
 });
-$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();};
+$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();if(!$('vPom').hidden)renderPom();if(!$('vCam').hidden)renderCamTab();};
 window.addEventListener('beforeunload',e=>{if(dirtyCount())e.preventDefault()});
 refresh();setInterval(refresh,30000);
 </script></body></html>`;
