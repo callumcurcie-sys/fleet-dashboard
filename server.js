@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['scores', 'ramp']);
+const KEEP = new Set(['scores', 'ramp', 'trips']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -86,6 +86,7 @@ const routes = {
     if (r.person && r.person.gas > 0) { const az = await azugaScore(q.get('vehicleId') || '', q.get('name') || '').catch(e => { r.milesError = e.message; return null; });
       if (!az && !r.milesError) r.milesError = 'Azuga has no miles for this driver in the last 30 days.';
       if (az && az.miles > 50) r.gasPerMile = { miles: az.miles, perMile: r.person.gas / az.miles, max: GAS_PER_MILE_MAX, points: GAS_POINTS }; }
+    r.mpg = await mpgFor(q.get('name') || '', r.person).catch(() => null);
     return r; },
   '/api/score/status': () => ({ jobs: WARM, events: Object.keys(EVA.ev).length, weeksBackfilled: EVA.weeks, miles: !!(cache.get('scores') || {}).data }),
   '/api/score': q => scoreFor(q.get('vehicleId') || '', q.get('name') || ''),
@@ -579,8 +580,8 @@ async function syncOne(id) {
 
 // ---- Last good copies, saved in Airtable's "Dashboard cache" table ----
 const SNAP_TABLE = 'tblP2fdHIgRfQ5ALr', SNAP = { key: 'fldeMXs698nXAekLG', data: 'fldTJNze6zLAMfX9C', saved: 'fldSbBLNW7Wx0PZeK' };
-function saveSnap(key, d) {
-  const json = JSON.stringify(d);
+function saveSnap(key, d, raw) {
+  const json = raw ? d : JSON.stringify(d);
   if (!AIRTABLE_TOKEN) return;
   if (json.length > 95000) return console.error('Not saving', key, '- too big for Airtable (' + json.length + ' chars)');   // long text holds 100k
   airtable(SNAP_TABLE, { method: 'PATCH', body: JSON.stringify({ performUpsert: { fieldsToMergeOn: [SNAP.key] }, typecast: true,
@@ -588,12 +589,17 @@ function saveSnap(key, d) {
     .catch(e => console.error('Saving', key, 'failed:', e.message));
 }
 async function loadSnaps() {
+  const chunks = {};
   for (const r of await atAll(SNAP_TABLE, Object.values(SNAP))) {
     const key = r.fields[SNAP.key], c = cache.get(key) || {};
-    if (key === 'events') { try { const a = JSON.parse(r.fields[SNAP.data]); addEvents(Object.values(a.ev || {})); EVA.weeks = [...new Set(EVA.weeks.concat(a.weeks || []))]; } catch {} continue; }
+    if (key === 'events' || /^events#/.test(key)) { chunks[key] = r.fields[SNAP.data] || ''; continue; }
     if (!KEEP.has(key) || c.data !== undefined) continue;
     try { c.data = JSON.parse(r.fields[SNAP.data]); c.t = Date.parse(r.fields[SNAP.saved]) || 0; cache.set(key, c); } catch {}
   }
+  try {
+    const n = +chunks['events#n'] || 0, json = n ? Array.from({ length: n }, (_, i) => chunks['events#' + i] || '').join('') : chunks.events;
+    if (json) { const a = unpackEvents(json); addEvents(a.list); EVA.weeks = [...new Set(EVA.weeks.concat(a.weeks))]; EVA.empty = Math.max(EVA.empty, a.empty); evaDirty = false; }
+  } catch (e) { console.error('Saved camera history unreadable:', e.message); }
 }
 if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) loadSnaps().then(() => console.log('Loaded last saved scores / Ramp spend')).catch(e => console.error('Loading saved copies failed:', e.message));
 
@@ -645,10 +651,10 @@ const eventKind = code => { const t = String(code || '').replace(/^CAM_/, '').re
 // every time the map fetches the fleet's last 7 days we add them in, and a slow backfill fetches the older weeks once.
 // The archive is saved in "Dashboard cache" so it survives restarts.
 const evTime = x => x.t || +(x.eventTime || x.startTime) || Date.parse(x.eventTime || x.startTime) || 0;
-const EVA = { ev: {}, weeks: [] };   // ev: key -> trimmed event; weeks: older weeks already backfilled (1 = 7-14 days ago ...)
+const EVA = { ev: {}, weeks: [], empty: 0 };   // ev: key -> trimmed event; weeks: older weeks backfilled (1 = 7-14 days ago ...); empty: run of empty weeks
 let evaDirty = false;
 function addEvents(list) {
-  const old = Date.now() - 31 * 864e5; let changed = false;
+  const old = Date.now() - 2 * 365 * 864e5; let changed = false;   // all time (anything older than 2 years is dropped)
   for (const x of list) {
     const t = evTime(x); if (!t || t < old || x.requested) continue;
     const k = [x.vehicleId, t, x.eventType].join('|');
@@ -658,34 +664,69 @@ function addEvents(list) {
   if (changed) { evaDirty = true; cache.delete('fleetLost'); }
 }
 const events30 = async () => Object.values(EVA.ev);
-setInterval(() => { if (evaDirty) { evaDirty = false; saveSnap('events', EVA); } }, 5 * 60e3);   // save at most every 5 min
+// Saved compactly and split over several Airtable cells (each holds 100k characters)
+function packEvents() {
+  const vs = [], ty = [], nm = [], ix = (a, v) => { let i = a.indexOf(v); if (i < 0) { a.push(v); i = a.length - 1; } return i; };
+  const e = Object.values(EVA.ev).map(x => [ix(vs, x.vehicleId), Math.round(x.t / 1000), ix(ty, x.eventType), ix(nm, [x.firstName || '', x.lastName || '', x.driverName || ''].join('|'))]);
+  return JSON.stringify({ vs, ty, nm, e, weeks: EVA.weeks, empty: EVA.empty });
+}
+function unpackEvents(json) {
+  const a = JSON.parse(json);
+  if (a.ev) return { list: Object.values(a.ev), weeks: a.weeks || [], empty: 0 };   // older format
+  return { weeks: a.weeks || [], empty: a.empty || 0, list: a.e.map(([v, t, y, n]) => { const [f, l, d] = (a.nm[n] || '||').split('|');
+    return { vehicleId: a.vs[v], eventTime: t * 1000, eventType: a.ty[y], firstName: f, lastName: l, driverName: d }; }) };
+}
+function saveEvents() {
+  const json = packEvents(), parts = [];
+  for (let i = 0; i < json.length; i += 90000) parts.push(json.slice(i, i + 90000));
+  parts.forEach((p, i) => saveSnap('events#' + i, p, true));
+  saveSnap('events#n', String(parts.length), true);
+}
+setInterval(() => { if (evaDirty) { evaDirty = false; saveEvents(); } }, 5 * 60e3);   // save at most every 5 min
+const backfillDone = () => EVA.empty >= 3 || EVA.weeks.length >= 52;
 async function backfillWeek() {   // one older week per run, gently
-  const w = [1, 2, 3, 4].find(n => !EVA.weeks.includes(n)); if (!w) return;
+  if (backfillDone()) return;
+  let w = 1; while (EVA.weeks.includes(w)) w++;
+  let got = 0;
   for (let page = 1; page <= 10; page++) {
-    const p = list(await azuga('/eventVideos.json?videoType=eventVideo', { startTime: fmt(daysAgo(Math.min(31, 7 * (w + 1)))), endTime: fmt(daysAgo(7 * w)), limit: 100, page }));
-    addEvents(p); if (p.length < 100) break; await sleep(20000);
+    const p = list(await azuga('/eventVideos.json?videoType=eventVideo', { startTime: fmt(daysAgo(7 * (w + 1))), endTime: fmt(daysAgo(7 * w)), limit: 100, page }));
+    addEvents(p); got += p.length; if (p.length < 100) break; await sleep(20000);
   }
-  EVA.weeks.push(w); evaDirty = true;
+  EVA.weeks.push(w); EVA.empty = got ? 0 : EVA.empty + 1; evaDirty = true;
 }
 const WARM = {};   // background job results, shown at /api/score/status
+const HISTORY = { since: Date.now(), months: 1 };   // how far back the camera history goes
 const CAP_EVENTS = 3;   // each kind of event counts at most 3 times (phone use: max -18), so one bad habit can't zero the score
 // Points lost by every driver in the fleet (camera events, last 30 days), for capping and ranking
+// Who an alert counts against: the truck's driver as Airtable has it (what the dashboard shows), else Azuga's
+// assigned driver, else the name the camera stamped. The camera stamp is often wrong (a camera can be registered
+// to someone else's login), so it is only the last resort.
+const truckDrivers = () => cached('truckDrivers', 300, async () => {
+  const [vs, at] = await Promise.all([routes['/api/vehicles']().then(list).catch(() => []), AIRTABLE_TOKEN ? atLinks().catch(() => ({ links: {} })) : { links: {} }]);
+  const m = {};
+  vs.forEach(v => { const L = at.links && at.links[v.trackeeId];
+    m[v.trackeeId] = (L && L.linked && L.truck.driver && L.truck.driver.name) || v.userName || [v.userFirstName, v.userLastName].filter(Boolean).join(' '); });
+  return m;
+});
+const camName = x => [x.firstName, x.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, '') || x.driverName || '';
+const eventOwner = (x, td) => clean(td[x.vehicleId]) || camName(x);
 const fleetLost = () => cached('fleetLost', 300, async () => {
-  const [evs, vs] = await Promise.all([events30(), routes['/api/vehicles']().then(list).catch(() => [])]);
-  const cur = {}; vs.forEach(v => { cur[v.trackeeId] = v.userName || [v.userFirstName, v.userLastName].filter(Boolean).join(' '); });
-  const rec = x => [x.firstName, x.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, '') || x.driverName || '';
+  const [evs, td] = await Promise.all([events30(), truckDrivers()]);
   const ppl = {};
   for (const x of evs) {
-    const who = rec(x) || cur[x.vehicleId] || '', key = dupeName(who), k = eventKind(x.eventType);   // no driver recorded: the truck's current driver
+    const who = eventOwner(x, td), key = dupeName(who), k = eventKind(x.eventType);
     if (!key || !k.pts) continue;
     const pr = ppl[key] = ppl[key] || { name: who, by: {} };
     const b = pr.by[k.label] = pr.by[k.label] || { label: k.label, count: 0, each: k.pts, days: new Set() };
     const t = x.t || evTime(x);
     b.count++; if (t) b.days.add(new Date(t).toLocaleDateString('en-US', { timeZone: 'America/New_York' }));
   }
+  // All time: each kind of alert counts up to 3 times per month of history, and each 3 days it happened on is a repeat (+5), up to once a month
+  const oldest = evs.reduce((m, x) => Math.min(m, x.t || evTime(x) || Date.now()), Date.now()), months = Math.max(1, Math.ceil((Date.now() - oldest) / (30 * 864e5)));
+  HISTORY.since = oldest; HISTORY.months = months;
   for (const pr of Object.values(ppl)) {
-    pr.items = Object.values(pr.by).map(b => { const it = { label: b.label, count: b.count, each: b.each, days: b.days.size, points: b.each * Math.min(b.count, CAP_EVENTS) };
-      if (it.days >= REPEAT_DAYS) { it.points += REPEAT_POINTS; it.repeat = true; } return it; }).sort((a, b) => b.points - a.points);
+    pr.items = Object.values(pr.by).map(b => { const it = { label: b.label, count: b.count, each: b.each, days: b.days.size, cap: CAP_EVENTS * months, points: b.each * Math.min(b.count, CAP_EVENTS * months) };
+      const reps = Math.min(months, Math.floor(it.days / REPEAT_DAYS)); if (reps) { it.points += REPEAT_POINTS * reps; it.repeat = reps; } return it; }).sort((a, b) => b.points - a.points);
     pr.lost = pr.items.reduce((t, b) => t + b.points, 0); delete pr.by;
   }
   return ppl;
@@ -707,8 +748,36 @@ async function scoreFor(vehicleId, name) {
   const all = Object.values(ppl).map(p => p.lost), worst = Math.max(lost, ...all, 1);
   const score = Math.round(100 - 60 * lost / worst);
   const rank = 1 + all.filter(x => x < me.lost).length;
-  return { found: true, score, rank, of: all.length + (ppl[dupeName(name)] ? 0 : 1), items: me.items, lost, gas, azuga: az && az.score, miles: az && az.miles, azugaError };
+  return { found: true, since: HISTORY.since, months: HISTORY.months, backfilling: !backfillDone(), score, rank, of: all.length + (ppl[dupeName(name)] ? 0 : 1), items: me.items, lost, gas, azuga: az && az.score, miles: az && az.miles, azugaError };
 }
+// ---------------- Miles per gallon from Azuga trip reports (last 30 days) ----------------
+// Each trip reports its distance (km) and the fuel the engine used. When a truck doesn't report fuel,
+// MPG is estimated from the driver's Ramp gas spending at GAS_PRICE dollars a gallon (default $3.20).
+const GAS_PRICE = +process.env.GAS_PRICE || 3.2;
+const tripTotals = () => cached('trips', 3600, async () => {
+  const by = {};
+  for (let page = 0; page < 40; page++) {
+    const rows = list(await azuga('https://services.azuga.com/reports/v3/reports/trip?appId=FLEET', { startDate: azIso(daysAgo(30)), endDate: azIso(new Date()), browserTimezone: 'US/Eastern', index: page, size: 500 }));
+    for (const r of rows) { const v = by[r.vehicleId] = by[r.vehicleId] || { km: 0, fuel: 0, trips: 0 }; v.km += +r.tripDistance || 0; v.fuel += +r.fuelConsumed || 0; v.trips++; }
+    if (rows.length < 500) break; await sleep(20000);
+  }
+  return by;
+});
+async function mpgFor(name, rampPerson) {
+  const trips = (cache.get('trips') || {}).data;   // filled by the background job; clicks never wait on Azuga for this
+  if (!trips || !name) return null;
+  const td = await truckDrivers(), mine = Object.keys(trips).filter(v => dupeName(td[v] || '') === dupeName(name));
+  const km = mine.reduce((t, v) => t + trips[v].km, 0), fuel = mine.reduce((t, v) => t + trips[v].fuel, 0), miles = km * 0.621371;
+  if (miles < 20) return null;
+  const ok = m => m >= 4 && m <= 60;
+  if (fuel > 0) {   // Azuga's fuel figure: gallons, or litres on some devices
+    if (ok(miles / fuel)) return { mpg: miles / fuel, miles, gallons: fuel, source: 'azuga' };
+    if (ok(miles / (fuel / 3.78541))) return { mpg: miles / (fuel / 3.78541), miles, gallons: fuel / 3.78541, source: 'azuga' };
+  }
+  if (rampPerson && rampPerson.gas > 0) { const g = rampPerson.gas / GAS_PRICE, m = miles / g; if (ok(m)) return { mpg: m, miles, gallons: g, source: 'ramp', price: GAS_PRICE }; }
+  return null;
+}
+
 // ---------------- Ramp: each driver's card spend over the last 30 days ----------------
 // Needs RAMP_CLIENT_ID / RAMP_CLIENT_SECRET (a Ramp developer app with transactions:read, reimbursements:read, users:read) in Render.
 const { RAMP_CLIENT_ID, RAMP_CLIENT_SECRET } = process.env;
@@ -960,10 +1029,10 @@ const autoSync = () => reconcile().catch(e => { if (!/already running/.test(e.me
 if (process.argv[2] !== 'test') {
   const job = (name, fn) => { const run = () => fn().then(() => { WARM[name] = { ok: new Date().toISOString() }; setTimeout(run, 31 * 60e3); },
     e => { WARM[name] = { error: e.message, at: new Date().toISOString() }; console.error('Score warm-up', name + ':', e.message); setTimeout(run, 3 * 60e3); }); return run; };
-  setTimeout(job('miles', scoreRows), 90e3);
+  setTimeout(job('miles', scoreRows), 90e3); setTimeout(job('trips', tripTotals), 6 * 60e3);
   const week = () => routes['/api/videos'](new URLSearchParams()).then(() => setTimeout(week, 10 * 60e3), () => setTimeout(week, 3 * 60e3));
   setTimeout(week, 45e3);
-  const back = () => backfillWeek().then(() => { WARM.backfill = { ok: new Date().toISOString(), weeks: EVA.weeks }; if (EVA.weeks.length < 4) setTimeout(back, 5 * 60e3); },
+  const back = () => backfillWeek().then(() => { WARM.backfill = { ok: new Date().toISOString(), weeksBack: EVA.weeks.length, done: backfillDone() }; if (!backfillDone()) setTimeout(back, 2 * 60e3); },
     e => { WARM.backfill = { error: e.message, at: new Date().toISOString() }; setTimeout(back, 5 * 60e3); });
   setTimeout(back, 4 * 60e3);
 }
@@ -1023,7 +1092,7 @@ function describe(r, name, of) {
   const label = r.score >= 85 ? 'a good score' : r.score >= 70 ? 'a score that needs attention' : 'a poor score';
   const out = [first + ' scored ' + r.score + '/100, ' + label + (of > 1 ? ' (#' + r.rank + ' of ' + of + ' drivers).' : '.')];
   const items = r.items || [];
-  if (!items.length && !(r.gas && r.gas.points)) { out.push('No safety alerts from the truck camera in the last 30 days.'); return out.join(' '); }
+  if (!items.length && !(r.gas && r.gas.points)) { out.push('No safety alerts from the truck camera so far.'); return out.join(' '); }
   const [top, ...rest] = items;
   if (top) out.push('Most points were lost to ' + (WHY[top.label] || top.label.toLowerCase()) + ': ' + plural(top.count, 'alert') +
     (top.days > 1 ? ' on ' + top.days + ' different days' : '') + (top.repeat ? ', which makes it a repeat habit' : '') + '.');
@@ -1032,16 +1101,29 @@ function describe(r, name, of) {
   if (r.gas && r.gas.points) out.push('Gas spending was ' + usd(r.gas.perMile) + ' per mile (' + usd(r.gas.spend) + ' for ' + Math.round(r.gas.miles) + ' miles), above the ' + usd(GAS_PER_MILE_MAX) + ' limit; worth checking the fuel receipts.');
   return out.join(' ');
 }
+// Clip and photo links for one camera alert (same fields the dashboard uses)
+function camMedia(x) {
+  const videos = (x.videoLinks || []).flat().filter(v => v && v.videoLink).map(v => ({ name: v.videoName || (v.videoIndex === 2 ? 'Driver facing' : 'Road facing'), url: v.videoLink, poster: v.thumbnailLink || '' }));
+  const snaps = (x.snapshotLinks || []).flat().filter(p => p && p.snapshotLink).map(p => ({ name: p.snapshotName || (p.snapshotIndex === 2 ? 'Driver facing' : 'Road facing'), url: p.snapshotLink }));
+  snaps.sort((a, b) => /road/i.test(b.name) - /road/i.test(a.name));
+  return videos.length || snaps.length ? { videos, snaps } : null;
+}
 // One driver's full picture
 async function driverReport(name) {
   const r = await scoreFor('', name);
   const ppl = await people().catch(() => null), d = ppl && ppl.drivers ? ppl.drivers.find(x => dupeName(x.name) === dupeName(name)) : null;
   const ramp = await rampFor(name).catch(() => null);
-  const evs = (await events30()).filter(x => dupeName([x.firstName, x.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, '') || x.driverName || '') === dupeName(name))
+  const td = await truckDrivers();
+  const evs = (await events30()).filter(x => dupeName(eventOwner(x, td)) === dupeName(name))
     .sort((a, b) => b.t - a.t).slice(0, 15);
   const fleet = await fleetReport().catch(() => null), me = fleet && fleet.find(x => dupeName(x.name) === dupeName(name));   // rank against the same list as the fleet report
   if (me) r.rank = me.r.rank;
-  return { name: d ? d.name : name, trucks: d ? d.trucks : [], score: r, why: describe(r, d ? d.name : name, me ? fleet.length : r.of), ramp: ramp && ramp.person, events: evs.map(x => ({ t: x.t, kind: eventKind(x.eventType).label || 'Camera notice' })) };
+  const recent = list(await routes['/api/videos'](new URLSearchParams()).catch(() => [])), byKey = {};
+  recent.forEach(x => { byKey[[x.vehicleId, evTime(x), x.eventType].join('|')] = x; });
+  const mpg = await mpgFor(name, ramp && ramp.person).catch(() => null);
+  return { mpg, name: d ? d.name : name, trucks: d ? d.trucks : [], score: r, why: describe(r, d ? d.name : name, me ? fleet.length : r.of), ramp: ramp && ramp.person,
+    events: evs.map(x => { const full = byKey[[x.vehicleId, x.t, x.eventType].join('|')];
+      return { t: x.t, kind: eventKind(x.eventType).label || 'Camera notice', media: full ? camMedia(full) : null, where: full ? clean(full.address || full.location || '') : '' }; }) };
 }
 // Everyone: active Airtable drivers plus anyone with camera alerts
 async function fleetReport() {
@@ -1050,7 +1132,8 @@ async function fleetReport() {
   (ppl.drivers || []).filter(d => d.status !== 'Inactive').forEach(d => names.set(dupeName(d.name), d));
   Object.values(lost).forEach(p => { if (!names.has(dupeName(p.name))) names.set(dupeName(p.name), { name: p.name, trucks: [] }); });
   const rows = [];
-  for (const d of names.values()) { const r = await scoreFor('', d.name).catch(() => null); if (r) rows.push({ name: d.name, trucks: d.trucks || [], r }); }
+  for (const d of names.values()) { const r = await scoreFor('', d.name).catch(() => null);
+    if (r) { const rp = await rampFor(d.name).catch(() => null); rows.push({ name: d.name, trucks: d.trucks || [], r, mpg: await mpgFor(d.name, rp && rp.person).catch(() => null) }); } }
   rows.sort((a, b) => a.r.score - b.r.score || a.name.localeCompare(b.name));
   rows.forEach(x => { x.r.rank = 1 + rows.filter(y => y.r.score > x.r.score).length; x.why = describe(x.r, x.name, rows.length); });
   return rows;
@@ -1063,6 +1146,8 @@ const REPORT_CSS = `*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-u
 .pill{display:inline-block;font-weight:700;font-size:13px;padding:3px 10px;border-radius:999px;min-width:46px;text-align:center}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:9px 8px;border-bottom:1px solid #e2e8f0;vertical-align:top}th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#64748b}
 .why{color:#334155}.muted{color:#64748b;font-size:13px}.head{display:flex;gap:18px;align-items:center;flex-wrap:wrap}.head h2{margin:0;font-size:24px}
+.caps{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}.caps figure{margin:0;background:#f1f5f9;border-radius:12px;overflow:hidden}
+.caps video,.caps img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#0f172a}.caps figcaption{padding:8px 10px;font-size:13px;display:grid;gap:2px}.caps figcaption span{color:#64748b;font-size:12px}
 .ramp{background:#121212;color:#f4f4ef;border-radius:14px;padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px}.ramp div{background:#1d1d1d;border-radius:10px;padding:10px 12px}.ramp .g{background:#e4f222;color:#111}.ramp b{display:block;font-size:22px}
 .share{display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:#ecfeff;border:1px solid #a5f3fc;border-radius:12px;padding:12px;margin-bottom:16px}.share input{flex:1;min-width:220px;font:inherit;font-size:13px;padding:8px;border:1px solid #cbd5e1;border-radius:8px}
 button{font:inherit;font-weight:600;border:0;border-radius:8px;padding:8px 14px;background:#0e7490;color:#fff;cursor:pointer}button.alt{background:#e2e8f0;color:#0f172a}a{color:#0e7490}
@@ -1071,29 +1156,43 @@ const asOf = () => new Date().toLocaleString('en-US', { timeZone: 'America/New_Y
 function pageShell(title, body, shareUrl) {
   const share = shareUrl ? `<div class="share"><b>Share this report</b><input id="sl" readonly value="${H(shareUrl)}"><button onclick="navigator.clipboard.writeText(document.getElementById('sl').value);this.textContent='Copied'">Copy link</button><button class="alt" onclick="print()">Print / PDF</button><span class="muted">Anyone with the link can view it for ${SHARE_DAYS} days. No login needed.</span></div>` : '';
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${H(title)}</title><style>${REPORT_CSS}</style></head><body><div class="wrap">
-<div class="top"><div class="logo">MP</div><div><h1>${H(title)}</h1><p>Millennial Pools fleet · last 30 days · as of ${H(asOf())}</p></div></div>${share}${body}
-<p class="muted">Score: starts at 100 and loses points for truck camera alerts (each kind counted up to 3 times, +5 if it happens on 3 or more days) and for gas over ${usd(GAS_PER_MILE_MAX)} a mile. 100 = no points lost, 40 = worst in the fleet.</p></div></body></html>`;
+<div class="top"><div class="logo">MP</div><div><h1>${H(title)}</h1><p>Millennial Pools fleet · score covers all camera history${HISTORY.since < Date.now() - 864e5 ? ' since ' + H(new Date(HISTORY.since).toLocaleDateString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium' })) : ''} · spend and mpg: last 30 days · as of ${H(asOf())}</p></div></div>${share}${body}
+<p class="muted">Score: starts at 100 and loses points for truck camera alerts over all time (each kind counted up to 3 times per month of history, +5 for every 3 days it happens on) and for gas over ${usd(GAS_PER_MILE_MAX)} a mile. 100 = no points lost, 40 = worst in the fleet.</p></div></body></html>`;
 }
-function driverHtml(d, shareUrl) {
+const mpgLine = m => m ? `<p><b style="font-size:20px">${m.mpg.toFixed(1)} mpg</b> <span class="muted">over ${Math.round(m.miles).toLocaleString()} miles in the last 30 days · ${m.source === 'azuga' ? 'from the truck’s fuel data' : 'estimated from Ramp gas at ' + usd(m.price) + '/gal'}</span></p>` : '';
+function capsHtml(events, via) {
+  const caps = events.filter(e => e.media).slice(0, 12);
+  if (!caps.length) return '';
+  const when = t => new Date(t).toLocaleString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium', timeStyle: 'short' });
+  return `<div class="card"><h3 style="margin-top:0">Camera captures</h3><div class="caps">${caps.map(e => {
+    const v = e.media.videos[0], shots = e.media.snaps;
+    const main = v ? `<video controls preload="none" playsinline ${v.poster ? `poster="${H(via(v.poster))}"` : ''} src="${H(via(v.url))}"></video>`
+      : `<a href="${H(via(shots[0].url))}" target="_blank" rel="noopener"><img loading="lazy" alt="${H(e.kind)} photo" src="${H(via(shots[0].url))}"></a>`;
+    const more = (v ? shots : shots.slice(1)).slice(0, 3).map(p => `<a href="${H(via(p.url))}" target="_blank" rel="noopener">${H(p.name)}</a>`).join(' · ');
+    return `<figure>${main}<figcaption><b>${H(e.kind)}</b><span>${H(when(e.t))}${e.where ? ' · ' + H(e.where) : ''}</span>${more ? `<span>${more}</span>` : ''}</figcaption></figure>`; }).join('')}</div>
+<p class="muted">Clips and photos stay available from Azuga for about a week.</p></div>`;
+}
+function driverHtml(d, shareUrl, via) {
   const r = d.score, sc = `<span class="score ${grade(r.score)}">${r.score}<i>/100</i></span>`;
-  const rows = (r.items || []).map(x => `<tr><td>${H(x.label)}</td><td>${x.count}${x.count > 3 ? ' <span class="muted">(3 counted)</span>' : ''}</td><td>${x.days}</td><td>−${x.points}${x.repeat ? ' <span class="muted">incl. repeat</span>' : ''}</td></tr>`).join('')
+  const rows = (r.items || []).map(x => `<tr><td>${H(x.label)}</td><td>${x.count}${x.count > x.cap ? ` <span class="muted">(${x.cap} counted)</span>` : ''}</td><td>${x.days}</td><td>−${x.points}${x.repeat ? ' <span class="muted">incl. repeat</span>' : ''}</td></tr>`).join('')
     + (r.gas && r.gas.points ? `<tr><td>Gas per mile</td><td>${usd(r.gas.perMile)}/mi</td><td>–</td><td>−${r.gas.points}</td></tr>` : '');
-  const g = d.ramp ? `<div class="card"><h3 style="margin-top:0">Ramp spend</h3><div class="ramp"><div class="g">Gas<b>${usd(d.ramp.gas)}</b>${plural(d.ramp.gasN, 'fill-up')}</div><div>Everything else<b>${usd(d.ramp.other)}</b>${plural(d.ramp.otherN, 'purchase')}</div></div>${r.gas ? `<p class="muted">${usd(r.gas.perMile)} per mile over ${Math.round(r.gas.miles)} miles driven.</p>` : ''}</div>` : '';
+  const g = d.ramp ? `<div class="card"><h3 style="margin-top:0">Ramp spend</h3><div class="ramp"><div class="g">Gas<b>${usd(d.ramp.gas)}</b>${plural(d.ramp.gasN, 'fill-up')}</div><div>Everything else<b>${usd(d.ramp.other)}</b>${plural(d.ramp.otherN, 'purchase')}</div></div>${r.gas ? `<p class="muted">${usd(r.gas.perMile)} per mile over ${Math.round(r.gas.miles)} miles driven.</p>` : ''}${mpgLine(d.mpg)}</div>` : (d.mpg ? `<div class="card">${mpgLine(d.mpg)}</div>` : '');
   const ev = d.events.length ? `<div class="card"><h3 style="margin-top:0">Recent camera alerts</h3><table><tr><th>When</th><th>Alert</th></tr>${d.events.map(e => `<tr><td>${H(new Date(e.t).toLocaleString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium', timeStyle: 'short' }))}</td><td>${H(e.kind)}</td></tr>`).join('')}</table></div>` : '';
   return pageShell(d.name + ' · driver report', `<div class="card"><div class="head">${sc}<div><h2>${H(d.name)}</h2><div class="muted">${H((d.trucks || []).join(', ') || 'No truck assigned')}${r.azuga != null ? ' · Azuga score ' + r.azuga : ''}</div></div></div>
-<p class="why">${H(d.why)}</p>${rows ? `<table><tr><th>What</th><th>Count</th><th>Days</th><th>Points</th></tr>${rows}</table>` : ''}</div>${g}${ev}`, shareUrl);
+<p class="why">${H(d.why)}</p>${rows ? `<table><tr><th>What</th><th>Count</th><th>Days</th><th>Points</th></tr>${rows}</table>` : ''}</div>${capsHtml(d.events, via)}${g}${ev}`, shareUrl);
 }
 function fleetHtml(rows, shareUrl, link) {
   const avg = rows.length ? Math.round(rows.reduce((t, x) => t + x.r.score, 0) / rows.length) : 0, low = rows.filter(x => x.r.score < 70).length;
   const body = `<div class="card"><div class="head"><span class="score ${grade(avg)}">${avg}<i>avg</i></span><div><h2>${rows.length} drivers</h2><div class="muted">${low} below 70 · lowest first</div></div></div></div>
-<div class="card"><table><tr><th>Score</th><th>Driver</th><th>Why</th></tr>${rows.map(x => `<tr><td><span class="pill ${grade(x.r.score)}">${x.r.score}</span></td><td><b>${link ? `<a href="${H(link(x.name))}">${H(x.name)}</a>` : H(x.name)}</b><div class="muted">${H((x.trucks || []).join(', '))}</div></td><td class="why">${H(x.why)}</td></tr>`).join('')}</table></div>`;
+<div class="card"><table><tr><th>Score</th><th>Driver</th><th>Why</th></tr>${rows.map(x => `<tr><td><span class="pill ${grade(x.r.score)}">${x.r.score}</span></td><td><b>${link ? `<a href="${H(link(x.name))}">${H(x.name)}</a>` : H(x.name)}</b><div class="muted">${H((x.trucks || []).join(', '))}</div>${x.mpg ? `<div class="muted"><b>${x.mpg.mpg.toFixed(1)} mpg</b>${x.mpg.source === 'ramp' ? ' (est.)' : ''}</div>` : ''}</td><td class="why">${H(x.why)}</td></tr>`).join('')}</table></div>`;
   return pageShell('Driver score report', body, shareUrl);
 }
-async function serveReport(res, kind, name, base, publicView) {
+async function serveReport(res, kind, name, base, publicView, tok) {
   const send = h => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }); res.end(h); };
   try {
     const share = o => base + '/r/' + signShare(o);
-    if (kind === 'driver') return send(driverHtml(await driverReport(name), publicView ? null : share({ k: 'd', n: name })));
+    const via = u => publicView ? '/r/' + tok + '/m?u=' + encodeURIComponent(u) : '/api/media?u=' + encodeURIComponent(u);
+    if (kind === 'driver') return send(driverHtml(await driverReport(name), publicView ? null : share({ k: 'd', n: name }), via));
     const rows = await fleetReport();
     return send(fleetHtml(rows, publicView ? null : share({ k: 'f' }), n => publicView ? share({ k: 'd', n }) : '/report?driver=' + encodeURIComponent(n)));
   } catch (e) { res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(pageShell('Report not ready', `<div class="card">${H(e.message)}</div>`)); }
@@ -1118,9 +1217,10 @@ async function media(u, req, res) {
 http.createServer(async (req, res) => {
   const base = (req.headers['x-forwarded-proto'] || 'http') + '://' + (req.headers.host || 'localhost');
   if (req.url.startsWith('/r/')) {   // shared report: no login, but only with a valid signed link
-    const o = readShare(req.url.slice(3).split('?')[0]);
+    const [tok, sub] = req.url.slice(3).split('?')[0].split('/'), o = readShare(tok);
     if (!o) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('This report link is invalid or has expired. Ask for a new one.'); }
-    return serveReport(res, o.k === 'd' ? 'driver' : 'fleet', o.n, base, true);
+    if (sub === 'm') return media(new URL(req.url, 'http://x').searchParams.get('u'), req, res);   // camera clip/photo for this shared report (Azuga's bucket only)
+    return serveReport(res, o.k === 'd' ? 'driver' : 'fleet', o.n, base, true, tok);
   }
   // Browser's built-in login box. Any username works; password must match.
   const given = Buffer.from((req.headers.authorization || '').split(' ')[1] || '', 'base64').toString().split(':').slice(1).join(':');
@@ -1497,6 +1597,7 @@ header>.brand,header>.live,header>.tabs{position:relative;z-index:3}
 .rgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.rgrid>div{background:#1d1d1d;border-radius:10px;padding:10px 12px}.rgrid span{display:block;font-size:12px;color:#a3a39b}
 .rgrid b{display:block;font-size:22px;line-height:1.25;color:#fff;font-variant-numeric:tabular-nums}.rgrid .rgas{background:#e4f222;color:#111}.rgrid .rgas span,.rgrid .rgas i{color:#3a3d00}.rgrid .rgas b{color:#111}
 .rgrid i{font-style:normal;font-size:12px;color:#a3a39b}.ramp .rmile{margin-top:10px;padding:9px 12px;border-radius:10px;background:#1d1d1d;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}.ramp .rmile b{color:#e4f222;font-size:16px}.ramp .rmile span{color:#d6d6cf;font-size:12.5px}.ramp .rmile em{font-style:normal;font-size:12px;color:#86efac;margin-left:auto}.ramp .rmile.bad em{color:#fca5a5}.ramp .rmile.bad b{color:#fca5a5}
+.ramp .rmile.mpg b{color:#7dd3fc}.ramp .rmile.mpg em{color:#a3a39b}
 .ramp .rmuted{font-size:12.5px;color:#a3a39b;margin-top:6px}.ramp .sk{background:#2a2a2a}
 .fl.flip .bob{transform:scaleX(-1)}.fl.flip .nf{transform:scaleX(-1);transform-box:fill-box;transform-origin:center}
 .fl::after{content:'';position:absolute;left:6%;right:6%;bottom:16%;height:8px;border-radius:50%;border:2px solid rgba(207,250,254,.7);animation:ripple2 2.8s ease-out infinite;z-index:-1}
@@ -2190,8 +2291,8 @@ async function scoreTile(id,name){const el=$('kscore');if(!el)return;const b=el.
   const top=r.items[0],gasBad=r.gas&&r.gas.points;
   sm.textContent='#'+r.rank+' of '+r.of+(top?' · '+top.label:gasBad?' · gas/mile':' · no events');
   const money=n=>'$'+n.toFixed(2);
-  el.title=['Driver score, last 30 days: #'+r.rank+' of '+r.of+' drivers','100 = no points lost, 40 = worst in the fleet. Each event type counts at most 3 times.',''].concat(
-    r.items.map(x=>x.label+' ×'+x.count+(x.count>3?' (counted 3)':'')+(x.repeat?', '+x.days+' days (repeat +5)':'')+': -'+x.points),
+  el.title=['Driver score, all time'+(r.since?' since '+new Date(r.since).toLocaleDateString():'')+(r.backfilling?' (older history still loading)':'')+': #'+r.rank+' of '+r.of+' drivers','100 = no points lost, 40 = worst in the fleet. Each event type counts up to 3 times per month of history.',''].concat(
+    r.items.map(x=>x.label+' ×'+x.count+(x.count>x.cap?' (counted '+x.cap+')':'')+(x.repeat?', '+x.days+' days (repeat +'+5*x.repeat+')':'')+': -'+x.points),
     r.gas?['Gas '+money(r.gas.spend)+' for '+Math.round(r.gas.miles)+' mi = '+money(r.gas.perMile)+'/mi'+(r.gas.points?': -'+r.gas.points:' (ok)')]:[],
     r.azuga!=null?['Azuga score: '+r.azuga]:[]).join('\\n')}
 // Driver's Ramp spend (cards + reimbursements), last 30 days: gas vs everything else
@@ -2200,10 +2301,12 @@ async function rampBox(id,name){const el=$('rampBox');if(!el)return;if(!name){el
   el.innerHTML=head+'<div class="sk" style="width:60%"></div>';let r;
   try{r=await get('/api/ramp?name='+encodeURIComponent(name)+'&vehicleId='+encodeURIComponent(id))}catch(e){if(sel==id)el.innerHTML=head+'<div class="rmuted">Ramp is not answering right now: '+esc(e.message)+'</div>';return}
   if(sel!=id)return;
-  if(!r.connected){el.innerHTML=head+'<div class="rmuted">Ramp is not connected yet.</div>';return}
-  const p=r.person;if(!p){el.innerHTML=head+'<div class="rmuted">No Ramp spend found under this name.</div>';return}
+  if(!r.connected){el.innerHTML=head+'<div class="rmuted">Ramp is not connected yet.</div>'+(r.mpg?'<div class="rmile mpg"><b>'+r.mpg.mpg.toFixed(1)+' mpg</b><span>'+Math.round(r.mpg.miles).toLocaleString()+' miles in 30 days</span></div>':'');return}
+  const mpgH=(r.mpg?'<div class="rmile mpg"><b>'+r.mpg.mpg.toFixed(1)+' mpg</b><span>'+Math.round(r.mpg.miles).toLocaleString()+' miles in 30 days</span><em>'+(r.mpg.source==='azuga'?'From the truck\u2019s fuel data':'Estimate: Ramp gas at $'+r.mpg.price.toFixed(2)+'/gal')+'</em></div>':'');
+  const p=r.person;if(!p){el.innerHTML=head+'<div class="rmuted">No Ramp spend found under this name.</div>'+mpgH;return}
   el.innerHTML=head+'<div class="rgrid"><div class="rgas"><span>Gas</span><b>'+usd(p.gas)+'</b><i>'+p.gasN+(p.gasN===1?' fill-up':' fill-ups')+'</i></div><div><span>Everything else</span><b>'+usd(p.other)+'</b><i>'+p.otherN+(p.otherN===1?' purchase':' purchases')+'</i></div></div>'
    +(r.gasPerMile?(g=>'<div class="rmile'+(g.perMile>g.max?' bad':'')+'"><b>'+usd(g.perMile)+' per mile</b><span>'+usd(p.gas)+' of gas ÷ '+Math.round(g.miles).toLocaleString()+' miles driven</span><em>'+(g.perMile>g.max?'Over the '+usd(g.max)+'/mile limit · −'+g.points+' on driver score':'Normal (limit '+usd(g.max)+'/mile)')+'</em></div>')(r.gasPerMile):'')
+   +mpgH
    +(p.name.toLowerCase()!==name.toLowerCase()?'<div class="rmuted">Shown as '+esc(p.name)+' in Ramp</div>':'')+(r.cardOnly?'<div class="rmuted">Card spend only. Give the Ramp app the reimbursements:read permission to include reimbursed gas.</div>':'')}
 function toast(msg,kind){let t=$('toast');if(!t){t=document.createElement('div');t.id='toast';t.setAttribute('role','status');document.body.appendChild(t)}
   t.className='toast '+(kind||'');t.textContent=msg;t.hidden=false;clearTimeout(t._h);t._h=setTimeout(()=>t.hidden=true,7000)}
