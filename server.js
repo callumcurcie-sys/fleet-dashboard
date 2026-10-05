@@ -1945,6 +1945,34 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;bor
 .ptl span{position:absolute;top:18px;font-size:10.5px;color:#64748b}.ptl span:last-child{right:0}
 .plist .pvisit{color:#0369a1!important;font-weight:600}.plist .pvisit.none{color:#94a3b8!important;font-weight:500}
 .plist .pfar{display:inline-block;margin-left:4px;padding:0 6px;border-radius:9px;background:#fff7ed;color:#c2410c;font-size:11px;font-weight:600}.plist .vmins{display:block;font-size:13px;color:#0c4a6e}.plist .vmins.short{color:#dc2626}.plist .vmins.long{color:#c2410c}
+
+/* ===== v9: brighter pool, colour per panel, text that fits, more motion ===== */
+:root{--c-list:#0891b2;--c-donut:#f97316;--c-cams:#8b5cf6;--c-detail:#ec4899}
+body::before{content:'';position:fixed;inset:-5%;z-index:-1;pointer-events:none;background:radial-gradient(38vw 38vw at 8% 92%,rgba(34,211,238,.22),transparent 62%),radial-gradient(34vw 34vw at 96% 72%,rgba(244,114,182,.14),transparent 62%),radial-gradient(30vw 30vw at 55% 8%,rgba(163,230,53,.12),transparent 62%);animation:wash 26s ease-in-out infinite alternate}
+@keyframes wash{to{transform:translate(-3%,-2%) scale(1.06)}}
+header{padding-bottom:80px}
+#floaty,.hwave{height:84px}.hwave{fill:rgba(34,211,238,.5)}.hwave.front{fill:rgba(125,240,255,.42)}
+.caus{height:44px;opacity:.5}
+header::after{content:'';position:absolute;left:0;right:0;bottom:0;height:6px;z-index:3;background:repeating-linear-gradient(90deg,#f6efe2 0 46px,#ebe0cc 46px 48px);box-shadow:0 -2px 6px rgba(3,30,45,.25)}
+.fl .bob{filter:saturate(1.18) contrast(1.04)}.fl.lane0{z-index:1;opacity:.93}.fl.lane1{z-index:2}
+#list{--c:var(--c-list)}#donut{--c:var(--c-donut)}#cams{--c:var(--c-cams)}#detail{--c:var(--c-detail)}
+#list,.pane,#detail{box-shadow:inset 0 3px 0 var(--c),var(--sh)}
+.ph h3::before{background:var(--c,var(--pool))!important;box-shadow:0 0 0 3px color-mix(in srgb,var(--c,var(--pool)) 22%,transparent)!important}
+.ph{flex-wrap:wrap;align-items:center;row-gap:2px}.ph h3{white-space:nowrap}.ph>span{font-size:12px;min-width:0}
+.ci .top b{white-space:normal;text-overflow:clip;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.25}
+.card{transition:transform .2s cubic-bezier(.2,.8,.2,1),box-shadow .2s,background .15s}.card:hover{transform:translateY(-2px);box-shadow:0 10px 22px -14px rgba(8,145,178,.65)}
+#donut svg{flex:0 0 128px;width:128px;animation:dspin .9s cubic-bezier(.2,.8,.2,1) both}@keyframes dspin{from{transform:rotate(-120deg) scale(.6);opacity:0}}
+#donut .leg span{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.2}
+.kv span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.kv b{white-space:nowrap;font-size:clamp(15px,1.3vw,20px)}
+.pill.go{background-image:linear-gradient(110deg,transparent 35%,rgba(255,255,255,.75) 50%,transparent 65%);background-size:260% 100%;animation:shim 2.8s linear infinite}
+@keyframes shim{from{background-position:130% 0}to{background-position:-130% 0}}
+.evgo{font-size:12px;padding:4px 10px;border-radius:999px;background:#ede9fe;color:#6d28d9;transition:background .15s,color .15s}.evb:hover .evgo{background:#8b5cf6;color:#fff;text-decoration:none!important}
+.evb{position:relative}.evgo{position:absolute;right:8px;top:10px}
+.grid:has(.kscore){grid-template-columns:1fr 1fr .8fr .8fr 1.35fr}.kscore span{padding-right:18px}
+.panel.edl,.panel.roster{box-shadow:inset 0 3px 0 var(--c-list),var(--sh)}.panel.edc{box-shadow:inset 0 3px 0 var(--c-detail),var(--sh)}
+@media(max-width:900px){header{padding-bottom:60px}}
+button:not(:disabled):active,.repbtn:active{transform:scale(.97)}
+@media (prefers-reduced-motion:reduce){body::before,.pill.go,#donut svg{animation:none!important}.card:hover{transform:none}}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -2162,7 +2190,7 @@ function render(){
     :'<b>No matches</b>Try a different search, or pick All trucks above.';
   const sig=rs.map(vid).join(),fresh=sig!==listSig;listSig=sig;
   const gcount=[0,0,0];rs.forEach(r=>gcount[grp(r)]++);const byGrp=(OPTS.sort||'moving')==='moving';
-  $('list').innerHTML=rs.length?rs.map((r,i)=>{const d=who(r),named=/[a-z]/i.test(d),g=grp(r);return (byGrp&&(i===0||grp(rs[i-1])!==g)?'<div class="lgrp g'+g+'"><span>'+GRP[g]+'</span><b>'+gcount[g]+'</b></div>':'')+'<div class="card'+(sel==vid(r)?' sel':'')+(fresh?' rise':'')+'" style="--i:'+Math.min(i,14)+'" data-id="'+esc(vid(r))+'" tabindex="0" role="button">'+avatar(d)+'<div class="ci"><div class="top"><b>'+tno(vid(r))+esc(shortTitle(r))+'</b>'+status(r)+'</div>'+azSub(r)+'<div class="d">'+(named?esc(d)+scoreChip(d):'<span class="muted">No driver assigned</span>')+'</div><div class="a">'+(pick(r,'address','landmark')?esc(pick(r,'address','landmark')):'<span class="trk">Tracker unavailable</span>')+'</div></div></div>'}).join(''):'<div class="empty">'+emptyMsg+'</div>';
+  $('list').innerHTML=rs.length?rs.map((r,i)=>{const d=who(r),named=/[a-z]/i.test(d),g=grp(r);return (byGrp&&(i===0||grp(rs[i-1])!==g)?'<div class="lgrp g'+g+'"><span>'+GRP[g]+'</span><b>'+gcount[g]+'</b></div>':'')+'<div class="card'+(sel==vid(r)?' sel':'')+(fresh?' rise':'')+'" style="--i:'+Math.min(i,14)+'" data-id="'+esc(vid(r))+'" tabindex="0" role="button">'+avatar(d)+'<div class="ci"><div class="top"><b>'+tno(vid(r))+esc(shortTitle(r))+'</b>'+status(r)+'</div><div class="d">'+(named?esc(d)+scoreChip(d):'<span class="muted">No driver assigned</span>')+'</div><div class="a">'+(pick(r,'address','landmark')?esc(pick(r,'address','landmark')):'<span class="trk">Tracker unavailable</span>')+'</div></div></div>'}).join(''):'<div class="empty">'+emptyMsg+'</div>';
   document.querySelectorAll('.card').forEach(c=>c.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();select(c.dataset.id)}});
   document.querySelectorAll('.card').forEach(c=>c.onclick=()=>select(c.dataset.id));
   const pts=[],shown=new Set(rs.map(vid));
@@ -2230,8 +2258,8 @@ function evRow(x,i){const e=pick(x,'eventType','eventName'),md=evMedia(x),th=md.
       const D=evDriver(x),drv=D.name;
       return '<button class="ev evb" data-i="'+i+'"'+'>'
         +(th?'<span class="evth"><img src="'+esc(th)+'" alt="" loading="lazy">'+(md.videos.length?'<i>'+ICON.play+'</i>':'')+'</span>':'<span class="evth none">'+(x.requested?'Waiting':'No media')+'</span>')
-        +'<span class="evi">'+'<span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="t">'+esc(when(pick(x,'eventTime','startTime')))+(drv?' · '+esc(drv):'')+'</span>'
-        +'<span class="muted" style="font-size:12px">'+esc(pick(x,'address')||'')+'</span>'+(D.azuga?'<span class="muted" style="font-size:11px">Azuga recorded: '+esc(D.azuga)+flag('The camera stamped this alert with '+D.azuga+', but Airtable lists '+(D.name||'someone else')+' as this truck\u2019s driver. The dashboard and score go by Airtable. If '+D.azuga+' was really driving, it belongs to them.')+'</span>':'')+'</span>'
+        +'<span class="evi">'+'<span class="pill '+evClass(e)+'">'+esc(evName(e))+'</span><span class="t">'+esc(when(pick(x,'eventTime','startTime')))+(drv?' · '+esc(drv):'')+(D.azuga?flag('The camera stamped this alert with '+D.azuga+', but Airtable lists '+(D.name||'someone else')+' as this truck\u2019s driver. The dashboard and score go by Airtable. If '+D.azuga+' was really driving, it belongs to them.'):'')+'</span>'
+        +'<span class="muted" style="font-size:12px">'+esc(pick(x,'address')||'')+'</span>'+'</span>'
         +'<span class="evgo">'+(md.videos.length?'Watch':md.snaps.length?'View photos':x.requested?'Waiting on camera':'')+'</span></button>'}
 // ---- Selected truck: circle graph of its camera events; clicking a slice filters the list ----
 let TRUCKV=[],camType='';
@@ -2472,6 +2500,19 @@ const FLOATS={
   +'<ellipse cx="9" cy="22" rx="4" ry="6" fill="#bbf7d0" stroke="#0b2533" stroke-opacity=".5" stroke-width="1.3"/><ellipse cx="9" cy="22" rx="1.6" ry="2.6" fill="#15803d"/>'
   +'<path d="M24 14C55 8 100 8 128 13" stroke="#fff" stroke-width="2.4" opacity=".55" fill="none" stroke-linecap="round"/>'
   +'<path d="M38 12v9M58 10v9M78 10v9M98 10v9M118 11v9" stroke="#16a34a" stroke-width="1" opacity=".5"/></svg>'},
+ duck:{h:44,sink:.3,svg:'<svg viewBox="0 0 80 66"><defs><radialGradient id="dkB" cx=".4" cy=".35" r=".8"><stop offset="0" stop-color="#fff59d"/><stop offset=".55" stop-color="#facc15"/><stop offset="1" stop-color="#d99a06"/></radialGradient></defs>'
+  +'<path d="M8 40c0-12 14-18 30-16c4-12 22-14 28-3c4 7 0 14-6 17c8 1 12 6 10 14c-3 9-16 12-32 12C18 64 8 54 8 40z" fill="url(#dkB)" stroke="#0b2533" stroke-opacity=".5" stroke-width="1.3"/>'
+  +'<path d="M8 40c-3-4-3-10 1-12c1 5 4 8 8 9z" fill="#facc15" stroke="#0b2533" stroke-opacity=".5" stroke-width="1.3"/>'
+  +'<path d="M66 30c6-1 11 1 12 4c-3 3-8 4-13 2z" fill="#fb923c" stroke="#0b2533" stroke-opacity=".5" stroke-width="1.3"/><path d="M66 33.5c4 .3 8 .1 11.5-.3" stroke="#c2410c" stroke-width="1" fill="none"/>'
+  +'<circle cx="58" cy="25" r="3.2" fill="#111827"/><circle cx="59.1" cy="23.9" r="1.1" fill="#fff"/><path d="M53 19q5-4 10-1" stroke="#b45309" stroke-width="1.2" fill="none" stroke-linecap="round" opacity=".6"/>'
+  +'<path d="M24 42q10 10 24 2q-4 9-14 9q-8 0-10-11z" fill="#eab308" stroke="#a16207" stroke-opacity=".6" stroke-width="1"/>'
+  +'<path d="M16 34q8-8 18-8" stroke="#fff" stroke-width="3" opacity=".75" fill="none" stroke-linecap="round"/><ellipse cx="40" cy="58" rx="22" ry="3" fill="#fff" opacity=".18"/></svg>'},
+ tube:{h:30,sink:.42,svg:'<svg viewBox="0 0 96 46"><defs><linearGradient id="tbS" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".55"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#0b2533" stop-opacity=".3"/></linearGradient></defs>'
+  +'<ellipse cx="48" cy="24" rx="44" ry="19" fill="#fff" stroke="#0b2533" stroke-opacity=".5" stroke-width="1.3"/>'
+  +'<ellipse cx="48" cy="24" rx="33" ry="13.5" fill="none" stroke="#ef4444" stroke-width="11" stroke-dasharray="17.5 17.5"/>'
+  +'<ellipse cx="48" cy="24" rx="44" ry="19" fill="url(#tbS)"/>'
+  +'<ellipse cx="48" cy="21" rx="19" ry="6.5" fill="#0e7490" stroke="#0b2533" stroke-opacity=".45" stroke-width="1.2"/><ellipse cx="48" cy="22.5" rx="15" ry="4" fill="#22d3ee" opacity=".55"/>'
+  +'<path d="M12 18q14-12 40-12" stroke="#fff" stroke-width="3" opacity=".85" fill="none" stroke-linecap="round"/></svg>'},
  donut:{h:38,sink:.42,svg:'<svg viewBox="0 0 80 50"><defs><linearGradient id="dnG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fbcfe8"/><stop offset="1" stop-color="#ec4899"/></linearGradient><linearGradient id="dnB" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fcd9a8"/><stop offset="1" stop-color="#d9893c"/></linearGradient></defs>'
   +'<ellipse cx="40" cy="28" rx="36" ry="17" fill="url(#dnB)" stroke="#0b2533" stroke-opacity=".5" stroke-width="1.3"/><path d="M5 24c4-12 66-12 70 0c2 7-6 6-9 9c-5 4-10-1-14 3c-6 4-12-2-17 2c-5 3-10-3-15 0c-5 2-12-3-14-4c-2-2-2-6-1-10z" fill="url(#dnG)"/>'
   +'<ellipse cx="40" cy="25" rx="12" ry="5" fill="#0e7490" opacity=".7"/><ellipse cx="40" cy="24" rx="12" ry="5" fill="none" stroke="#9d174d" stroke-opacity=".35"/>'
@@ -2479,16 +2520,18 @@ const FLOATS={
   +'<path d="M12 21c8-7 22-9 30-9" stroke="#fff" stroke-width="2" opacity=".6" fill="none" stroke-linecap="round"/></svg>'}};
 // The water is drawn every frame from two moving sine waves, so a floater can sit exactly on the surface
 // at its spot and tilt with the slope. One floater at a time, from either side of the pool.
-const WV={H:58,W:0,t:0,last:0,fl:null,next:performance.now()+2500,lastKey:''};
-const backY=(x,t)=>WV.H*0.46+5.5*Math.sin(x/42-t*0.9)+2.6*Math.sin(x/17.5+t*1.35);
-const frontY=(x,t)=>WV.H*0.6+3.6*Math.sin(x/33+t*1.1)+1.8*Math.sin(x/14-t*1.7);
+const WV={H:84,W:0,t:0,last:0,fls:[null,null],next:[performance.now()+1500,performance.now()+7000],lastKey:''};
+const backY=(x,t)=>WV.H*0.5+5.5*Math.sin(x/42-t*0.9)+2.6*Math.sin(x/17.5+t*1.35);
+const frontY=(x,t)=>WV.H*0.62+3.6*Math.sin(x/33+t*1.1)+1.8*Math.sin(x/14-t*1.7);
+// far lane rides the back wave (smaller, slower); near lane rides the front wave (bigger, in front)
+const LANES=[{y:backY,s:.85,v:1},{y:frontY,s:1.15,v:1.25}];
 function wavePath(fn,t){let d='M0 '+WV.H;for(let x=0;x<=WV.W+12;x+=12)d+=' L'+x+' '+fn(x,t).toFixed(1);return d+' L'+(WV.W+12)+' '+WV.H+' Z'}
 function sizeWaves(){const h=document.querySelector('header');WV.W=h?h.clientWidth:1200;document.querySelectorAll('.hwave').forEach(s=>s.setAttribute('viewBox','0 0 '+WV.W+' '+WV.H))}
-function spawnFloat(now){const box=$('floaty');if(!box)return;const keys=Object.keys(FLOATS).filter(k=>k!==WV.lastKey),k=keys[Math.floor(Math.random()*keys.length)];WV.lastKey=k;
-  const F=FLOATS[k],dir=Math.random()<.5?1:-1,el=document.createElement('div');el.className='fl'+(dir<0?' flip':'');el.style.height=F.h+'px';el.title='Splash!';
-  el.innerHTML='<div class="fsh"></div><div class="bob">'+F.svg+'</div><div class="frf" aria-hidden="true">'+F.svg.split('id="').join('id="r').split('url(#').join('url(#r')+'</div>';box.appendChild(el);
-  const w=el.offsetWidth||80;WV.fl={el,k,dir,w,h:F.h,x:dir>0?-w-10:WV.W+10,speed:WV.W/(26+Math.random()*12),roll:Math.random()*6,sink:F.h*(F.sink||0.3),hop:0,rip:0,spin:F.spin?el.querySelectorAll('.bspin'):null,dist:0};
-  el.onclick=()=>{const f=WV.fl;if(!f||f.el!==el)return;f.hop=1;f.speed*=1.6;splash(f.x+f.w/2,backY(f.x+f.w/2,WV.t),9)}}
+function spawnFloat(now,li){const box=$('floaty');if(!box)return;const busy=WV.fls.filter(Boolean).map(f=>f.k),keys=Object.keys(FLOATS).filter(k=>k!==WV.lastKey&&!busy.includes(k)),k=keys[Math.floor(Math.random()*keys.length)];WV.lastKey=k;
+  const L=LANES[li],other=WV.fls[1-li],F=FLOATS[k],h=Math.round(F.h*L.s),dir=other?other.dir:(Math.random()<.5?1:-1),el=document.createElement('div');el.className='fl lane'+li+(dir<0?' flip':'');el.style.height=h+'px';el.title='Splash!';
+  el.innerHTML='<div class="fsh"></div><div class="bob">'+F.svg+'</div><div class="frf" aria-hidden="true">'+F.svg.split('id="').join('id="r'+li).split('url(#').join('url(#r'+li)+'</div>';box.appendChild(el);
+  const w=el.offsetWidth||80,f={el,k,dir,w,h,li,x:dir>0?-w-10:WV.W+10,speed:WV.W/(30+Math.random()*12)*L.v,roll:Math.random()*6,sink:h*(F.sink||0.3),hop:0,rip:0,spin:F.spin?el.querySelectorAll('.bspin'):null,dist:0};WV.fls[li]=f;
+  el.onclick=()=>{if(WV.fls[li]!==f)return;f.hop=1;f.speed*=1.6;splash(f.x+f.w/2,L.y(f.x+f.w/2,WV.t),9)}}
 // water effects: rings behind the floater, sun glints on the surface, droplets when it's poked
 function fx(cls,x,y,life,style){const box=$('floaty');if(!box||box.childElementCount>40)return;const e=document.createElement('i');e.className=cls;e.style.left=x.toFixed(1)+'px';e.style.top=y.toFixed(1)+'px';if(style)e.style.cssText+=style;box.appendChild(e);setTimeout(()=>e.remove(),life)}
 function splash(x,y,n){for(let i=0;i<n;i++)fx('drop',x+(Math.random()-.5)*20,y,800,'--dx:'+((Math.random()-.5)*46).toFixed(0)+'px;--up:'+(10+Math.random()*16).toFixed(0)+'px;animation-delay:'+(i*12)+'ms');fx('rp big',x,y+2,1700)}
@@ -2496,18 +2539,22 @@ let glintAt=0;
 function waveTick(now){const dt=Math.min(.05,(now-(WV.last||now))/1000);WV.last=now;WV.t+=dt;
   const ps=document.querySelectorAll('.hwave path');if(ps[0])ps[0].setAttribute('d',wavePath(backY,WV.t));if(ps[1])ps[1].setAttribute('d',wavePath(frontY,WV.t));
   if(now>glintAt&&!document.hidden){glintAt=now+260+Math.random()*420;const gx=Math.random()*WV.W;fx('gl',gx,backY(gx,WV.t)+1.5,1500)}
-  const f=WV.fl;
-  if(f){f.x+=f.dir*f.speed*dt;const cx=f.x+f.w/2,y=backY(cx,WV.t),slope=(backY(cx+6,WV.t)-backY(cx-6,WV.t))/12;
+  WV.fls.forEach((f,li)=>{const Y=LANES[li].y;
+  if(f){f.x+=f.dir*f.speed*dt;const cx=f.x+f.w/2,y=Y(cx,WV.t),slope=(Y(cx+6,WV.t)-Y(cx-6,WV.t))/12;
     if(f.hop>0){f.hop=Math.max(0,f.hop-dt*1.7);if(!f.hop){f.speed/=1.6;splash(cx,y,5)}}
     const lift=f.hop?Math.sin(f.hop*Math.PI)*16:0,bob=Math.sin(WV.t*2.2+f.roll)*1.4;
     const ang=Math.atan(slope)*57.3*0.85+Math.sin(WV.t*1.6+f.roll)*2.5+(f.hop?f.dir*Math.sin(f.hop*Math.PI*2)*8:0);
     f.el.style.transform='translate('+f.x.toFixed(1)+'px,'+(y-f.h+f.sink-lift+bob).toFixed(1)+'px) rotate('+ang.toFixed(2)+'deg)';
     f.el.style.setProperty('--lift',(lift/16).toFixed(2));
     if(f.spin){f.dist+=f.speed*dt;const a=(f.dist/(f.h*0.45)*57.3).toFixed(1);f.spin.forEach(g=>g.style.transform='rotate('+a+'deg)')}   // rolls as it goes
-    if(now>f.rip&&!f.hop){f.rip=now+380;const tx=f.dir>0?f.x+f.w*0.18:f.x+f.w*0.82;fx('rp',tx,backY(tx,WV.t)+2,1600)}
-    if(f.x<-f.w-40||f.x>WV.W+40){f.el.remove();WV.fl=null;WV.next=now+4000+Math.random()*12000}}
-  else if(now>WV.next&&!document.hidden)spawnFloat(now);
+    if(now>f.rip&&!f.hop){f.rip=now+380;const tx=f.dir>0?f.x+f.w*0.18:f.x+f.w*0.82;fx('rp',tx,Y(tx,WV.t)+2,1600)}
+    if(f.x<-f.w-40||f.x>WV.W+40){f.el.remove();WV.fls[li]=null;WV.next[li]=now+3000+Math.random()*(li?16000:9000)}}
+  else if(now>WV.next[li]&&!document.hidden)spawnFloat(now,li)});
   requestAnimationFrame(waveTick)}
+// numbers count up when a truck is opened
+let cuSel=null;new MutationObserver(()=>{if(sel===cuSel||matchMedia('(prefers-reduced-motion: reduce)').matches)return;cuSel=sel;
+  $('detail').querySelectorAll('.kv b').forEach(b=>{const m=b.textContent.match(/^([\d,]+)(.*)$/);if(!m)return;const n=+m[1].replace(/,/g,''),rest=m[2],t0=performance.now();if(!n)return;
+    const step=t=>{const k=Math.min(1,(t-t0)/800),v=Math.round(n*(1-Math.pow(1-k,3)));b.textContent=v.toLocaleString()+rest;if(k<1)requestAnimationFrame(step)};requestAnimationFrame(step)})}).observe($('detail'),{childList:true});
 sizeWaves();addEventListener('resize',sizeWaves);
 if(matchMedia('(prefers-reduced-motion: reduce)').matches){const ps=document.querySelectorAll('.hwave path');if(ps[0])ps[0].setAttribute('d',wavePath(backY,0));if(ps[1])ps[1].setAttribute('d',wavePath(frontY,0))}
 else requestAnimationFrame(waveTick);
