@@ -134,15 +134,30 @@ const routes = {
     list.forEach(s => { const day = etDay(new Date(s.time)).ymd, ai = v => v.appointmentIdentifier || {}, hit = svcs.find(v => (s.id && ai(v).id === s.id) || (s.ruleId && ai(v).recurringRuleId === s.ruleId && Date.parse(ai(v).recurringDate) === Date.parse(s.rdate || s.time)))
       || svcs.find(v => svcName(v) === s.tech && etDay(new Date(v.startTime)).ymd === day);
       if (hit) { s.service = hit.id; s.done = true; } });
-    const at = await atData().catch(() => ({ drivers: [] })), people = at.drivers.filter(d => d.name && d.status !== 'Inactive'), roles = {}, seen = new Set();
+    const at = await atData().catch(() => ({ drivers: [] })), people = at.drivers.filter(d => d.name && d.status !== 'Inactive'), roles = {}, phones = {}, seen = new Set();
     // POM and Airtable spell some names differently ("Jostin Acosto" / "Jostin Acosta Palacios", "Andrew Morgan" / "Andrew Louis Morgan Jr")
     const toks = n => dupeName(n).split(' ').filter(w => w && !/^(jr|sr|ii|iii|iv)$/.test(w));
     const sameName = (a, b) => { const x = toks(a), y = toks(b); if (!x.length || !y.length || x[0].slice(0, 3) !== y[0].slice(0, 3)) return false;
       return x.slice(1).some(w => y.slice(1).some(v => v === w || (w.length > 3 && near(w, v)))); };
-    [...new Set(list.map(s => s.tech))].forEach(n => { const m = rampMatch(drivers, n), p = rampMatch(people, n) || people.find(d => sameName(d.name, n)); trucks[n] = m ? m.v : null; roles[n] = p ? p.role : ''; if (p) seen.add(p.id); });
+    [...new Set(list.map(s => s.tech))].forEach(n => { const m = rampMatch(drivers, n), p = rampMatch(people, n) || people.find(d => sameName(d.name, n)); trucks[n] = m ? m.v : null; roles[n] = p ? p.role : ''; phones[n] = p ? p.phone : ''; if (p) seen.add(p.id); });
     // Techs, tech assistants and auditors submit the weekly truck form; owners, district, regional and staffers don't
     const missing = people.filter(d => CHECKUP_ROLES.includes(d.role) && !seen.has(d.id)).map(d => ({ name: d.name, role: d.role }));
-    return { connected: true, now: Date.now(), today: etDay().ymd, weeks, checkups: list.sort((a, b) => Date.parse(b.time) - Date.parse(a.time)), trucks, roles, missing }; },
+    return { connected: true, now: Date.now(), today: etDay().ymd, weeks, checkups: list.sort((a, b) => Date.parse(b.time) - Date.parse(a.time)), trucks, roles, phones, missing }; },
+  // Read by the iMessage script on the Mac: who hasn't done this week's check-up yet, with the text to send them
+  '/api/texts/missed-checkups': async () => {
+    const d = await routes['/api/pom/checkups'](new URLSearchParams('weeks=1'));
+    if (!d.connected) return { connected: false, texts: [] };
+    const now = Date.now(), wd = (['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].indexOf(new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' })) + 6) % 7;
+    const monday = +etDay().start - wd * 864e5, texts = [], skipped = [], seen = new Set();
+    d.checkups.filter(c => !c.done && Date.parse(c.time) >= monday && Date.parse(c.time) < now && CHECKUP_ROLES.includes(d.roles[c.tech])).forEach(c => {
+      if (seen.has(c.tech)) return; seen.add(c.tech);
+      const ph = String(d.phones[c.tech] || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+      if (ph.length !== 10) return skipped.push({ name: c.tech, why: 'No phone number in Airtable' });
+      const day = new Date(c.time).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'short', day: 'numeric' });
+      texts.push({ name: c.tech, phone: '+1' + ph, message: 'Hi ' + c.tech.split(' ')[0] + ', reminder: your weekly truck check-up for ' + day + " hasn't been submitted in POM yet. Please fill it out today. Thanks!" });
+    });
+    console.log(new Date().toISOString(), 'Missed check-up texts requested:', texts.map(t => t.name).join(', ') || 'none');
+    return { connected: true, texts, skipped }; },
   '/api/pom/probe': async () => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
     const out = {}, tryIt = async (k, q, v) => { try { out[k] = await pom(q, v); } catch (e) { out[k] = { error: e.message }; } };
     await tryIt('needs', 'mutation($data: CreateAppointmentRecurringRuleInput!) { createAppointmentRecurringRule(data: $data) { id } }', { data: {} });
@@ -287,7 +302,7 @@ const { AIRTABLE_TOKEN } = process.env;
 const AT_BASE = 'appxOcqhRSdoWgHE3', AT_TRUCKS = 'tbl3aU0dRPvn79Ba1', AT_DRIVERS = 'tbl9oEuseNwk23jdg';
 const F = { vin: 'fldT4fSSnXnZuj2Jr', year: 'fldqjqyAK1ZJfn0oT', make: 'fldOhan3is4yEhucl', model: 'fldM01jCShSILujYB',
   truckNo: 'fldYmYqWTfoYoRvjB', policy: 'fldWlS28YbpsipR7r', driver: 'fldEO66ezgMWnguAu', plate: 'fldLGLwnLOAfpw88W',
-  insCard: 'fldH0Pe6EKyQEBmMR', files: 'fldS5YJgDrLDbxSiK', regRenew: 'fldjFFBZ0UoO4SUXV', ezpass: 'fld1utE81nDdDiqgi', active: 'fldBpQ0MA5cD9YJ06', snap: 'fldOaFfl7ZzS72xLK', notes: 'fldkWorOJHdYaLCy5' };
+  insCard: 'fldH0Pe6EKyQEBmMR', files: 'fldS5YJgDrLDbxSiK', regRenew: 'fldjFFBZ0UoO4SUXV', ezpass: 'fld1utE81nDdDiqgi', active: 'fldBpQ0MA5cD9YJ06', snap: 'fldOaFfl7ZzS72xLK', notes: 'fldkWorOJHdYaLCy5', oilDate: 'fldGdTd6Vk2w7lyrn', oilMiles: 'fldKXcXo3MPHkkfC4' };
 // Drivers. Date of birth is only ever written (new driver form), never read or shown.
 const D = { name: 'fldMrVtrXN6WDaOjj', license: 'fldcSIYqy5FCEC0Xn', state: 'fld1NdVP4v6QcckK2', pic: 'fldZeCHS22kI7Ythi',
   policy: 'fldVo5IrWedsKvumK', trucks: 'fld47HPqHRrw9GUL7', notes: 'fldSnexzpxIG22gF0', status: 'fldVuSDYSZVHk0fWN',
@@ -335,7 +350,7 @@ const atData = () => cached('airtable', 60, async () => {
       truckNo: clean(f[F.truckNo]), policy: clean(f[F.policy]?.name ?? f[F.policy]), plate: clean(f[F.plate]),
       regRenew: clean(f[F.regRenew]), ezpass: clean(f[F.ezpass]), active: !!f[F.active],
       driver: (f[F.driver] || []).map(id => byId[id]).filter(Boolean)[0] || null, snap: parseSnap(f[F.snap]),
-      insCard: att(f[F.insCard]), files: att(f[F.files]), notes: String(f[F.notes] || ''),
+      insCard: att(f[F.insCard]), files: att(f[F.files]), notes: String(f[F.notes] || ''), oilDate: f[F.oilDate] || '', oilMiles: f[F.oilMiles] || null,
     }; }),
   };
 });
@@ -618,10 +633,43 @@ async function addTruckNote(b) {
   if (!txt) throw new Error('Write a note first.');
   const src = clean(b.source).replace(/\s+/g, ' ').slice(0, 120);
   const day = new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium' });
-  const notes = (day + ' · ' + (src ? src + ': ' : '') + txt + (t.notes ? '\n' + t.notes : '')).slice(0, 90000);
-  await airtable(AT_TRUCKS, { method: 'PATCH', body: JSON.stringify({ records: [{ id: t.id, fields: { [F.notes]: notes } }] }) });
+  const when = l => { const m = /^([A-Z][a-z]{2} \d{1,2}, \d{4}) · /.exec(l); return m ? Date.parse(m[1]) : 0 };
+  const notes = [day + ' · ' + (src ? src + ': ' : '') + txt].concat(t.notes ? t.notes.split('\n') : [])
+    .map((l, i) => [l, i]).sort((a, b) => when(b[0]) - when(a[0]) || a[1] - b[1]).map(x => x[0]).join('\n').slice(0, 90000);
+  const fields = { [F.notes]: notes };
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }), oil = oilFrom(txt, today);
+  if (oil && (!t.oilDate || oil.date >= t.oilDate)) { fields[F.oilDate] = oil.date; if (oil.miles) fields[F.oilMiles] = oil.miles; }
+  await airtable(AT_TRUCKS, { method: 'PATCH', body: JSON.stringify({ records: [{ id: t.id, fields }] }) });
   cache.delete('airtable');
-  console.log(new Date().toISOString(), 'Truck note added', t.truckNo || t.id);
+  console.log(new Date().toISOString(), 'Truck note added', t.truckNo || t.id, fields[F.oilDate] ? 'oil change ' + fields[F.oilDate] : '');
+  return { ok: true, notes, oil: fields[F.oilDate] ? oil : null };
+}
+// "Oil changed 10/3 at 184,300 mi" -> { date: '2026-10-03', miles: 184300 }. No date in the text = the day the note was written.
+const MON = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+function oilFrom(txt, today) {
+  if (!/\boil\b/i.test(txt) || !/chang|service|swap|\bdone\b|replac/i.test(txt) || /\b(due|needs?|overdue|soon|light)\b/i.test(txt)) return null;
+  const ymd = (y, m, d) => { if (m < 1 || m > 12 || d < 1 || d > 31) return null; const Y = y == null ? +today.slice(0, 4) : y < 100 ? 2000 + y : y;
+    let v = Y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0'); if (y == null && v > today) v = (Y - 1) + v.slice(4); return v };
+  let date = null, m;
+  if ((m = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/.exec(txt))) date = ymd(m[3] == null ? null : +m[3], +m[1], +m[2]);
+  else if ((m = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? (\d{1,2})(?:st|nd|rd|th)?(?:,? (\d{4}))?\b/i.exec(txt))) date = ymd(m[3] == null ? null : +m[3], MON.indexOf(m[1].toLowerCase()) + 1, +m[2]);
+  else if (/\byesterday\b/i.test(txt)) date = new Date(Date.parse(today) - 864e5).toISOString().slice(0, 10);
+  if (!date || date > today) date = today;
+  const rest = txt.replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, ' ').replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? \d{1,2}(?:,? \d{4})?/gi, ' ');
+  const mm = /(\bat\s*)?\b(\d{1,3}(?:,\d{3})+|\d{3,7}(?:\.\d)?)\s*(k\b|mi\b|miles\b)?/i.exec(rest);
+  let miles = null;
+  if (mm && (mm[1] || mm[3])) miles = Math.round(/^k/i.test(mm[3] || '') ? parseFloat(mm[2].replace(/,/g, '')) * 1000 : +mm[2].replace(/,/g, ''));
+  if (miles != null && (miles < 1000 || miles > 2e6)) miles = null;
+  return { date, miles };
+}
+async function deleteTruckNote(b) {
+  const at = await atData(), t = at.trucks.find(x => x.id === String(b.truckId || ''));
+  if (!t) throw new Error('That truck is not in Airtable. Refresh and try again.');
+  const lines = t.notes.split('\n'), i = lines.indexOf(String(b.line || ''));
+  if (i < 0) throw new Error('That note was already changed or removed. Refresh to see the latest.');
+  lines.splice(i, 1); const notes = lines.join('\n');
+  await airtable(AT_TRUCKS, { method: 'PATCH', body: JSON.stringify({ records: [{ id: t.id, fields: { [F.notes]: notes || null } }] }) });
+  cache.delete('airtable'); console.log(new Date().toISOString(), 'Truck note deleted', t.truckNo || t.id);
   return { ok: true, notes };
 }
 async function updateDriver(b) {
@@ -1539,14 +1587,26 @@ function truckNotesCard(trucks, truck, who, v, when) {
 <textarea id="vnText" rows="3" maxlength="500" placeholder="e.g. Rear brakes replaced, oil changed at 184,300 mi" style="display:block;width:100%;box-sizing:border-box;font:inherit;padding:10px 12px;border:1px solid #cbd5e1;border-radius:12px">${H(pre)}</textarea>
 ${pre ? '<p class="muted" style="font-size:12.5px;margin:6px 0 0">Filled in from their answer about issues with the truck. Edit it before saving.</p>' : ''}
 <button id="vnSave" style="margin-top:10px;font:inherit;font-weight:700;color:#fff;background:#0891b2;border:0;border-radius:10px;padding:9px 16px;cursor:pointer">Save note to truck</button> <span id="vnMsg" class="muted"></span>
-<ul id="vnList" style="list-style:none;padding:0;margin:14px 0 0">${old.map(n => '<li style="padding:8px 0;border-top:1px solid #e2e8f0">' + H(n) + '</li>').join('')}</ul></div>
-<script>
+<ul id="vnList" class="vnl" style="margin-top:14px"></ul></div>
+<style>.vnl{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.vnl li{position:relative;background:#fff;border:1px solid #e2e8f0;border-left:4px solid #22d3ee;border-radius:12px;padding:9px 40px 9px 12px;font-size:13.5px;line-height:1.4;animation:vnin .3s ease-out both}
+.vnl li.chk{border-left-color:#f59e0b}.vnl li.oil{border-left-color:#16a34a}.vnl li.oil .vnd{color:#15803d;background:#dcfce7}.vnl .vnd{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.03em;color:#0e7490;background:#cffafe;border-radius:6px;padding:1px 7px;margin-right:6px}
+.vnl li.chk .vnd{color:#b45309;background:#fef3c7}.vnl .vns{font-size:11.5px;font-weight:600;color:#64748b}.vnl .vnt{display:block;margin-top:3px;color:#0f172a}
+.vnl .vnx{position:absolute;right:8px;top:8px;border:0;background:none;color:#94a3b8;font:inherit;font-size:16px;font-weight:700;line-height:1;width:24px;height:24px;border-radius:7px;cursor:pointer;transition:background .15s,color .15s}
+.vnl .vnx:hover{background:#fee2e2;color:#dc2626}.vnl .vnx.sure{width:auto;padding:0 8px;font-size:12px;background:#dc2626;color:#fff}
+@keyframes vnin{from{opacity:0;transform:translateY(4px)}}</style>
+<script>function vnLi(line,tid){const m=/^([A-Z][a-z]{2} \\d{1,2}, \\d{4}) · (?:(From [^:]+): )?([\\s\\S]*)$/.exec(line),e=s=>String(s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
+  return '<li class="'+(/\\boil\\b/i.test(line)&&/chang|service|swap|replac/i.test(line)?'oil':m&&m[2]?'chk':'')+'">'+(m?'<span class="vnd">'+e(m[1])+'</span>'+(m[2]?'<span class="vns">'+e(m[2])+'</span>':'')+'<span class="vnt">'+e(m[3])+'</span>':'<span class="vnt">'+e(line)+'</span>')
+    +'<button class="vnx" title="Delete this note" aria-label="Delete this note" data-vndel="'+e(tid)+'" data-line="'+e(line)+'">×</button></li>'}
+
 const trucks=${JSON.stringify(Object.fromEntries(trucks.map(t => [t.id, t.notes || ''])))};
-const list=()=>{const n=(trucks[vnTruck.value]||'').split('\\n').filter(Boolean),e=document.createElement('div');vnList.innerHTML=n.map(x=>{e.textContent=x;return '<li style="padding:8px 0;border-top:1px solid #e2e8f0">'+e.innerHTML+'</li>'}).join('')};
-vnTruck.onchange=list;
+const list=()=>{vnList.innerHTML=(trucks[vnTruck.value]||'').split('\\n').filter(Boolean).map(x=>vnLi(x,vnTruck.value)).join('')};
+vnTruck.onchange=list;list();
+vnList.onclick=async e=>{const b=e.target.closest('[data-vndel]');if(!b)return;if(!b.classList.contains('sure')){b.classList.add('sure');b.textContent='Delete?';setTimeout(()=>{if(b.isConnected){b.classList.remove('sure');b.textContent='×'}},3000);return}
+  b.disabled=true;try{const r=await fetch('/api/truck/note-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({truckId:b.dataset.vndel,line:b.dataset.line})}),j=await r.json();if(!r.ok)throw new Error(j.error||'Could not delete');trucks[b.dataset.vndel]=j.notes;list();vnMsg.textContent='Note deleted'}catch(err){vnMsg.textContent=err.message;b.disabled=false}};
 vnSave.onclick=async()=>{if(!vnTruck.value){vnMsg.textContent='Pick the truck first.';return}vnSave.disabled=true;vnMsg.textContent='Saving...';
   try{const r=await fetch('/api/truck/note',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({truckId:vnTruck.value,text:vnText.value,source:${JSON.stringify('From ' + src)}})}),j=await r.json();
-    if(!r.ok)throw new Error(j.error||'Could not save');trucks[vnTruck.value]=j.notes;list();vnText.value='';vnMsg.textContent='Saved to the truck ✓'}
+    if(!r.ok)throw new Error(j.error||'Could not save');trucks[vnTruck.value]=j.notes;list();vnText.value='';vnMsg.textContent=j.oil?'Saved ✓ Oil change logged for '+j.oil.date+(j.oil.miles?' at '+j.oil.miles.toLocaleString()+' mi':''):'Saved to the truck ✓'}
   catch(e){vnMsg.textContent=e.message}vnSave.disabled=false};
 </script>`;
 }
@@ -1625,7 +1685,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/truck/note': addTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/truck/note': addTruckNote, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   if (POSTS[url.pathname]) {
@@ -1911,7 +1971,9 @@ dialog[open]{animation:pop .22s cubic-bezier(.2,.9,.3,1.2)}
 .office.empty{height:24px;width:24px;padding:0;justify-content:center;opacity:.85}.office.empty svg{width:13px;height:13px}
 .tm:hover .office{transform:translate(-50%,-50%) scale(1.06)}
 .toast{position:fixed;right:20px;bottom:20px;z-index:9999;max-width:380px;background:var(--deep);color:#fff;padding:12px 16px;border-radius:12px;box-shadow:0 10px 30px rgba(10,44,64,.35);font-size:13px;animation:tin .2s ease-out}
-.toast.bad{background:var(--bad)}@keyframes tin{from{opacity:0;transform:translateY(8px)}}@media (prefers-reduced-motion:reduce){.toast{animation:none}}
+.toast.bad{background:var(--bad)}@keyframes tin{from{opacity:0;transform:translateY(8px)}}@media (prefers-reduced-motion:reduce){.toast{animation:none}
+.toast{overflow:hidden;animation:tpop .35s cubic-bezier(.2,1.4,.4,1)}.toast::after{content:'';position:absolute;left:0;bottom:0;height:3px;width:100%;background:linear-gradient(90deg,#22d3ee,#a3e635);transform-origin:left;animation:tbar 4s linear forwards}.toast.bad::after{background:#fecaca}
+@keyframes tpop{from{opacity:0;transform:translateY(14px) scale(.92)}}@keyframes tbar{to{transform:scaleX(0)}}}
 .syncp{margin:0 0 12px}.syncp:empty{display:none}.syncp.sm{margin:10px 0 0;font-size:12px}
 .sbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--card);border-radius:10px;box-shadow:var(--sh);padding:9px 14px;font-size:13px}
 .sbar .sd{width:8px;height:8px;border-radius:50%;background:var(--goDot)}.sbar.bad .sd{background:var(--warnDot)}.sbar .sp{flex:1}
@@ -2009,6 +2071,8 @@ header>.brand,header>.live,header>.tabs{position:relative;z-index:3}
 .logo{background:linear-gradient(135deg,#22d3ee,#0891b2 60%,#0e7490)}
 .tabs{background:rgba(255,255,255,.1)}.tabs button:hover:not(.on){background:rgba(255,255,255,.12)}
 .tabs button.on{background:#fff;color:#0b4a63;box-shadow:0 4px 14px -6px rgba(0,0,0,.4)}
+.tabs button{position:relative}.tabs button.on::after{content:'';position:absolute;left:16%;right:16%;bottom:4px;height:3px;border-radius:3px;background:linear-gradient(90deg,#22d3ee,#a78bfa,#f472b6,#facc15,#22d3ee);background-size:300% 100%;animation:tabflow 2.5s linear infinite}
+@keyframes tabflow{to{background-position:300% 0}}
 .live .dot{background:#4ade80}
 /* filter chips light up in their own colour */
 .sum button[data-f=all][aria-pressed=true]{background:#0b4a63;border-color:#0b4a63;color:#fff}.sum button[data-f=all][aria-pressed=true] b{color:#fff}
@@ -2378,9 +2442,18 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 @keyframes wavey{to{background-position:40px 0}}@media (prefers-reduced-motion:reduce){.crewhead h2::after{animation:none}}
 
 /* vehicle notes */
+.tcard{transition:transform .2s cubic-bezier(.2,1.4,.4,1),box-shadow .2s}.tcard:hover{transform:translateY(-4px) rotate(-.4deg);box-shadow:0 14px 30px -12px rgba(14,116,144,.55),0 0 0 2px rgba(34,211,238,.35)}
+.oilc{margin-left:auto;font-size:12px;font-weight:700;color:#15803d;background:#dcfce7;border-radius:999px;padding:3px 10px}
+.vnl{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.vnl li{position:relative;background:#fff;border:1px solid #e2e8f0;border-left:4px solid #22d3ee;border-radius:12px;padding:9px 40px 9px 12px;font-size:13.5px;line-height:1.4;animation:vnin .3s ease-out both}
+.vnl li.chk{border-left-color:#f59e0b}.vnl li.oil{border-left-color:#16a34a}.vnl li.oil .vnd{color:#15803d;background:#dcfce7}.vnl .vnd{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.03em;color:#0e7490;background:#cffafe;border-radius:6px;padding:1px 7px;margin-right:6px}
+.vnl li.chk .vnd{color:#b45309;background:#fef3c7}.vnl .vns{font-size:11.5px;font-weight:600;color:#64748b}.vnl .vnt{display:block;margin-top:3px;color:#0f172a}
+.vnl .vnx{position:absolute;right:8px;top:8px;border:0;background:none;color:#94a3b8;font:inherit;font-size:16px;font-weight:700;line-height:1;width:24px;height:24px;border-radius:7px;cursor:pointer;transition:background .15s,color .15s}
+.vnl .vnx:hover{background:#fee2e2;color:#dc2626}.vnl .vnx.sure{width:auto;padding:0 8px;font-size:12px;background:#dc2626;color:#fff}
+@keyframes vnin{from{opacity:0;transform:translateY(4px)}}
+.vnmore{margin-top:6px}.vnmore summary{cursor:pointer;font-size:12.5px;font-weight:600;color:var(--poolInk)}
 .vnotes{margin-top:12px;padding-top:10px;border-top:1px dashed rgba(14,116,144,.25)}.vnh{display:flex;align-items:baseline;gap:8px}.vnh .muted{font-size:12px}
 .vnadd{display:flex;gap:6px;margin:8px 0}.vnadd input{flex:1;min-width:0;font:inherit;font-size:13px;padding:7px 10px;border:1px solid var(--line2);border-radius:9px;background:#fff}
-.vnotes ul{list-style:none;margin:0;padding:0}.vnotes li{font-size:13px;padding:6px 0;border-top:1px solid rgba(14,116,144,.12)}
 
 /* ===== v22: frosted-glass map legend with a pulsing Moving dot ===== */
 .legend{background:rgba(255,255,255,.62)!important;backdrop-filter:blur(10px) saturate(1.4);-webkit-backdrop-filter:blur(10px) saturate(1.4);border:1px solid rgba(255,255,255,.7)!important;box-shadow:0 8px 24px -10px rgba(8,74,99,.45)!important}
@@ -2766,11 +2839,17 @@ document.addEventListener('click',async e=>{
 });
 // Vehicle notes from Airtable, newest first, with a box to add one
 function notesBox(t){const n=String(t.notes||'').split('\\n').filter(Boolean);
-  return '<div class="vnotes"><div class="vnh"><b>Vehicle notes</b><span class="muted">'+(n.length?n.length+' note'+(n.length>1?'s':''):'None yet')+'</span></div>'
+  return '<div class="vnotes"><div class="vnh"><b>Vehicle notes</b><span class="muted">'+(n.length?n.length+' note'+(n.length>1?'s':''):'None yet')+'</span>'+(t.oilDate?'<span class="oilc" title="Saved to Airtable from a note">🛢 Oil changed '+esc(new Date(t.oilDate+'T12:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}))+(t.oilMiles?' · '+Number(t.oilMiles).toLocaleString()+' mi':'')+'</span>':'')+'</div>'
     +'<div class="vnadd"><input maxlength="500" placeholder="Add a note: maintenance done, things to fix..." data-vn="'+esc(t.id)+'"><button class="btn2" data-vnsave="'+esc(t.id)+'">Add</button></div>'
-    +(n.length?'<ul>'+n.slice(0,6).map(x=>'<li>'+esc(x)+'</li>').join('')+(n.length>6?'<li class="muted">+'+(n.length-6)+' older in Airtable</li>':'')+'</ul>':'')+'</div>'}
+    +(n.length?'<ul class="vnl">'+n.slice(0,5).map(x=>vnLi(x,t.id)).join('')+'</ul>'+(n.length>5?'<details class="vnmore"><summary>Show '+(n.length-5)+' older note'+(n.length>6?'s':'')+'</summary><ul class="vnl">'+n.slice(5).map(x=>vnLi(x,t.id)).join('')+'</ul></details>':''):'')+'</div>'}
+function vnLi(line,tid){const m=/^([A-Z][a-z]{2} \\d{1,2}, \\d{4}) · (?:(From [^:]+): )?([\\s\\S]*)$/.exec(line),e=s=>String(s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
+  return '<li class="'+(/\\boil\\b/i.test(line)&&/chang|service|swap|replac/i.test(line)?'oil':m&&m[2]?'chk':'')+'">'+(m?'<span class="vnd">'+e(m[1])+'</span>'+(m[2]?'<span class="vns">'+e(m[2])+'</span>':'')+'<span class="vnt">'+e(m[3])+'</span>':'<span class="vnt">'+e(line)+'</span>')
+    +'<button class="vnx" title="Delete this note" aria-label="Delete this note" data-vndel="'+e(tid)+'" data-line="'+e(line)+'">×</button></li>'}
+document.addEventListener('click',async e=>{const b=e.target.closest('.vnotes [data-vndel]');if(!b)return;
+  if(!b.classList.contains('sure')){b.classList.add('sure');b.textContent='Delete?';setTimeout(()=>{if(b.isConnected){b.classList.remove('sure');b.textContent='×'}},3000);return}
+  b.disabled=true;try{await post('/api/truck/note-delete',{truckId:b.dataset.vndel,line:b.dataset.line});toast('Note deleted');await loadAT();if(sel)select(sel);if(!$('vEdit').hidden&&edSel)openEd(edSel)}catch(err){toast(err.message,'bad');b.disabled=false}});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-vnsave]');if(!b)return;const i=document.querySelector('[data-vn="'+b.dataset.vnsave+'"]');if(!i||!i.value.trim())return i&&i.focus();
-  b.disabled=true;try{await post('/api/truck/note',{truckId:b.dataset.vnsave,text:i.value});i.value='';toast('Note saved to the truck');await loadAT();if(sel)select(sel)}catch(err){toast(err.message,'bad')}b.disabled=false});
+  b.disabled=true;try{const r=await post('/api/truck/note',{truckId:b.dataset.vnsave,text:i.value});i.value='';toast(r&&r.oil?'Note saved · oil change logged for '+r.oil.date:'Note saved to the truck');await loadAT();if(sel)select(sel);if(!$('vEdit').hidden&&edSel)openEd(edSel)}catch(err){toast(err.message,'bad')}b.disabled=false});
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.matches('[data-vn]')){e.preventDefault();const b=document.querySelector('[data-vnsave="'+e.target.dataset.vn+'"]');if(b)b.click()}});
 function atBox(id){
   if(!AT)return '<div class="at off">Loading Airtable...</div>';
