@@ -135,7 +135,11 @@ const routes = {
       || svcs.find(v => svcName(v) === s.tech && etDay(new Date(v.startTime)).ymd === day);
       if (hit) { s.service = hit.id; s.done = true; } });
     const at = await atData().catch(() => ({ drivers: [] })), people = at.drivers.filter(d => d.name && d.status !== 'Inactive'), roles = {}, seen = new Set();
-    [...new Set(list.map(s => s.tech))].forEach(n => { const m = rampMatch(drivers, n), p = rampMatch(people, n); trucks[n] = m ? m.v : null; roles[n] = p ? p.role : ''; if (p) seen.add(p.id); });
+    // POM and Airtable spell some names differently ("Jostin Acosto" / "Jostin Acosta Palacios", "Andrew Morgan" / "Andrew Louis Morgan Jr")
+    const toks = n => dupeName(n).split(' ').filter(w => w && !/^(jr|sr|ii|iii|iv)$/.test(w));
+    const sameName = (a, b) => { const x = toks(a), y = toks(b); if (!x.length || !y.length || x[0].slice(0, 3) !== y[0].slice(0, 3)) return false;
+      return x.slice(1).some(w => y.slice(1).some(v => v === w || (w.length > 3 && near(w, v)))); };
+    [...new Set(list.map(s => s.tech))].forEach(n => { const m = rampMatch(drivers, n), p = rampMatch(people, n) || people.find(d => sameName(d.name, n)); trucks[n] = m ? m.v : null; roles[n] = p ? p.role : ''; if (p) seen.add(p.id); });
     // Techs, tech assistants and auditors submit the weekly truck form; owners, district, regional and staffers don't
     const missing = people.filter(d => CHECKUP_ROLES.includes(d.role) && !seen.has(d.id)).map(d => ({ name: d.name, role: d.role }));
     return { connected: true, now: Date.now(), today: etDay().ymd, weeks, checkups: list.sort((a, b) => Date.parse(b.time) - Date.parse(a.time)), trucks, roles, missing }; },
@@ -2383,6 +2387,11 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .legend span:first-child i{animation:legpulse 1.8s ease-out infinite}
 @keyframes legpulse{0%{box-shadow:0 0 0 0 rgba(22,163,74,.6)}100%{box-shadow:0 0 0 7px rgba(22,163,74,0)}}
 @media (prefers-reduced-motion:reduce){.legend span:first-child i{animation:none}}
+
+/* ===== v23: trophy for a finished route ===== */
+.tcard.fin{position:relative}.tcard.fin::after{content:'🏆';position:absolute;right:-8px;top:-10px;width:34px;height:34px;display:grid;place-items:center;font-size:18px;border-radius:50%;background:linear-gradient(135deg,#fef3c7,#fbbf24);box-shadow:0 6px 14px -6px rgba(180,83,9,.7),0 0 0 3px #fff;animation:trophy .7s cubic-bezier(.2,.9,.3,1.5) both;animation-delay:calc(var(--i,0)*35ms + .3s)}
+@keyframes trophy{from{transform:scale(0) rotate(-40deg)}}
+@media (prefers-reduced-motion:reduce){.tcard.fin::after{animation:none}}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
