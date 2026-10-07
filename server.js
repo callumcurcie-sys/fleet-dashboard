@@ -151,7 +151,8 @@ const routes = {
       if (ph.length !== 10 && !email) return skipped.push({ name: c.tech, why: 'No phone or email in Airtable' });
       const day = new Date(c.time).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'short', day: 'numeric' }), first = c.tech.split(' ')[0];
       texts.push({ name: c.tech, phone: ph.length === 10 ? '+1' + ph : '', email, message: 'Hi ' + first + ', reminder: your weekly truck check-up for ' + day + " hasn't been submitted in POM yet. Please fill it out today. Thanks!",
-        subject: 'Truck check-up missed: ' + day, body: 'Hi ' + first + ',\n\nYour weekly truck check-up for ' + day + " hasn't been submitted in Pool Office Manager yet. Please fill it out in the POM app today.\n\nThanks,\nMillennial Pools" });
+        subject: 'Truck check-up missed: ' + day + '. Please submit today',
+        body: 'Hi ' + first + ',\n\nYour weekly truck check-up for ' + day + " hasn't been submitted in Pool Office Manager yet. Please open the POM app and complete your Truck Check-Up as soon as possible.\n\nNot submitting your truck check-up can hurt your bonus for the week.\n\nYou'll keep getting this reminder until it's submitted.\n\nThanks,\nMillennial Pools" });
     });
     console.log(new Date().toISOString(), 'Missed check-up texts requested:', texts.map(t => t.name).join(', ') || 'none');
     return { connected: true, texts, skipped }; },
@@ -1164,6 +1165,34 @@ async function checkupPlan() {
 const POM_RULE_CREATE = 'mutation($data: CreateAppointmentV2Input!) { createAppointmentV2(data: $data) { id date recurringRuleId } }';
 const POM_NOT_BILLED = 'cm6g17pzh000d55eg870dfx5p';   // this account's "Not Billed" billing status, as the form sends it
 const POM_RULE_STOP = 'mutation($id: ID!, $from: AppointmentIdentifierInput, $all: Boolean) { stopAppointmentRecurringRule(appointmentRecurringRuleId: $id, appointmentIdentifier: $from, applyToSeries: $all) { id endDate } }';
+// One-time check-up on a given Monday (9 AM Eastern) for every Tech / Tech assistant / Auditor who doesn't already have one that day.
+// dryRun lists who would get one without touching POM.
+const etAt = (ymd, h) => { const g = new Date(ymd + 'T' + String(h).padStart(2, '0') + ':00:00Z');
+  const off = new Date(g.toLocaleString('en-US', { timeZone: 'America/New_York' })) - new Date(g.toLocaleString('en-US', { timeZone: 'UTC' })); return new Date(+g - off); };
+async function oneOffCheckups(b) {
+  const ymd = String(b.date || ''); if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) throw new Error('Pick a date.');
+  const plan = await checkupPlan(); if (!plan.connected) throw new Error('Pool Office Manager is not connected.');
+  if (!plan.customer || !plan.serviceType) throw new Error('Could not find an existing truck check-up in POM to copy the customer and service type from.');
+  const when = etAt(ymd, CHK_HOUR), at = await atData(), users = await pomUsers();
+  const day = await pomRange(new Date(+when - 12 * 36e5), new Date(+when + 12 * 36e5)), has = day.map(pomStop).filter(pomCheckup).map(x => x.tech);
+  const people = at.drivers.filter(d => d.name && d.status !== 'Inactive' && CHECKUP_ROLES.includes(d.role)), out = { date: ymd, create: [], skip: [], done: [], failed: [] };
+  for (const d of people) {
+    if (has.some(n => sameName(n, d.name) || dupeName(n) === dupeName(d.name))) { out.skip.push({ name: d.name, why: 'already has one that day' }); continue; }
+    const u = matchPerson(users, d.name); if (!u) { out.skip.push({ name: d.name, why: 'no POM user' }); continue; }
+    out.create.push({ name: d.name, workerId: u.id });
+  }
+  if (b.dryRun !== false) return out;
+  if (b.confirm !== 'CREATE') throw new Error('Confirmation missing.');
+  for (const c of out.create) {
+    try { await pom(POM_RULE_CREATE, { data: { customer: plan.customer, serviceType: plan.serviceType, color: '#87cbf7', duration: 60, primaryWorker: c.workerId, workers: [c.workerId], inventoryItems: [],
+      billingStatus: POM_NOT_BILLED, notes: '', privateNotes: '', customDescription: '', servicePrice: 0, serviceQuantity: 1, date: when.toISOString(), appointmentQueue: null, project: null, priority: 'MEDIUM', linkedServiceId: null } });
+      out.done.push(c.name); }
+    catch (e) { out.failed.push({ name: c.name, error: e.message }); if (!out.done.length) break; }   // first one fails: stop, nothing half-done
+  }
+  [...cache.keys()].filter(k => /^pomwk:|^pomahead$|^pomday/.test(k)).forEach(k => cache.delete(k));
+  console.log(new Date().toISOString(), 'One-time check-ups for', ymd, '- created:', out.done.join(', ') || 'none', out.failed.length ? '- failed: ' + out.failed.length : '');
+  return out;
+}
 async function applyCheckups(keys) {
   const plan = await checkupPlan(); if (!plan.connected) throw new Error('Pool Office Manager is not connected.');
   if (!plan.customer || !plan.serviceType) throw new Error('Could not find an existing truck check-up in POM to copy the customer and service type from.');
@@ -1234,18 +1263,36 @@ function smtpSend(to, subject, text) {
 }
 const mailState = () => (cache.get('mail') || {}).data || { auto: false, week: '', sent: [] };
 const saveMail = d => { cache.set('mail', { data: d, t: Date.now() }); saveSnap('mail', d); };
-// Monday at noon (Eastern) or later that week: email everyone who still hasn't done this week's check-up, once each
+// Reminder times (Eastern): Mon-Wed at noon, Thu-Sun at 9 AM and 3 PM. Each run emails everyone who still hasn't
+// submitted this week's check-up; it stops for a person once they submit. Only the latest due time runs, once.
+const MAIL_SLOTS = d => d >= 1 && d <= 3 ? [12] : [9, 15];
 async function autoMail() {
   const st = mailState(); if (!st.auto || !mailReady()) return;
-  const now = new Date(), et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  if (et.getDay() !== 1 || et.getHours() < 12) return;   // Mondays from noon
-  const week = etDay().ymd; if (st.week !== week) { st.week = week; st.sent = []; }
-  try { const r = await routes['/api/texts/missed-checkups']();
-    for (const t of r.texts || []) { if (!t.email || st.sent.includes(t.name)) continue;
-      try { await sendMail(t.email, t.subject, t.body); st.sent.push(t.name); console.log(new Date().toISOString(), 'Check-up email sent to', t.name); }
+  const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })), wd = et.getDay(), h = et.getHours();
+  const due = MAIL_SLOTS(wd).filter(x => x <= h).pop(); if (due == null) return;
+  const mon = new Date(et); mon.setDate(mon.getDate() - ((wd + 6) % 7)); const week = mon.toLocaleDateString('en-CA');
+  const slot = et.toLocaleDateString('en-CA') + ' ' + due;
+  if (st.week !== week) { st.week = week; st.sent = []; st.slots = {}; }
+  st.slots = st.slots || {}; if (st.slots[slot]) return;
+  try { const r = await routes['/api/texts/missed-checkups'](), done = [];
+    for (const t of r.texts || []) { if (!t.email) continue;
+      try { await sendMail(t.email, t.subject, t.body); done.push(t.name); if (!st.sent.includes(t.name)) st.sent.push(t.name); console.log(new Date().toISOString(), 'Check-up email sent to', t.name); }
       catch (e) { console.error('Check-up email to', t.name, 'failed:', e.message); } }
-    saveMail(st);
+    st.slots[slot] = done; saveMail(st);
   } catch (e) { console.error('Check-up emails:', e.message); }
+}
+// Send a round right now (button on the Check-ups tab), counted as the current reminder time
+async function mailNow() {
+  if (!mailReady()) throw new Error('Email is not set up yet.');
+  const r = await routes['/api/texts/missed-checkups'](), st = mailState(), sent = [], failed = [];
+  for (const t of r.texts || []) { if (!t.email) continue;
+    try { await sendMail(t.email, t.subject, t.body); sent.push(t.name); } catch (e) { failed.push({ name: t.name, error: e.message }); } }
+  const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })), mon = new Date(et); mon.setDate(mon.getDate() - ((et.getDay() + 6) % 7));
+  const week = mon.toLocaleDateString('en-CA'); if (st.week !== week) { st.week = week; st.sent = []; st.slots = {}; }
+  sent.forEach(n => { if (!st.sent.includes(n)) st.sent.push(n); });
+  const due = MAIL_SLOTS(et.getDay()).filter(x => x <= et.getHours()).pop(); if (due != null) { st.slots = st.slots || {}; st.slots[et.toLocaleDateString('en-CA') + ' ' + due] = sent; }
+  saveMail(st); console.log(new Date().toISOString(), 'Check-up emails sent now:', sent.join(', ') || 'none');
+  return { sent, failed, noEmail: (r.texts || []).filter(t => !t.email).map(t => t.name) };
 }
 if (process.argv[2] !== 'test') setInterval(autoMail, 10 * 60e3);
 async function mailTest() {
@@ -1255,7 +1302,7 @@ async function mailTest() {
   if (!me.email) throw new Error('Could not find an email for Callum Curcie (Drivers table in Airtable).');
   const monday = new Date(); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
   const day = monday.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'short', day: 'numeric' });
-  await sendMail(me.email, 'TEST · Truck check-up missed: ' + day, 'Hi Callum,\n\nYour weekly truck check-up for ' + day + " hasn't been submitted in Pool Office Manager yet. Please fill it out in the POM app today.\n\nThanks,\nMillennial Pools\n\n(This is a test from the fleet dashboard. The real emails go to each tech who misses their check-up.)");
+  await sendMail(me.email, 'TEST · Truck check-up missed: ' + day + '. Please submit today', 'Hi Callum,\n\nYour weekly truck check-up for ' + day + " hasn't been submitted in Pool Office Manager yet. Please open the POM app and complete your Truck Check-Up as soon as possible.\n\nNot submitting your truck check-up can hurt your bonus for the week.\n\nYou'll keep getting this reminder until it's submitted.\n\nThanks,\nMillennial Pools\n\n(This is a test from the fleet dashboard. The real emails go to each tech who misses their check-up.)");
   console.log(new Date().toISOString(), 'Test check-up email sent to Callum');
   return { ok: true, to: me.email };
 }
@@ -1866,7 +1913,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/mail/test': () => mailTest(), '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   if (POSTS[url.pathname]) {
@@ -3797,9 +3844,10 @@ $('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hi
 /*repadd*/
 // Automatic emails: setup status, a test send to Callum, and the Monday switch
 async function mailPanel(){const el=$('chkMailAuto');if(!el)return;let st;try{st=await get('/api/mail/status')}catch(e){el.innerHTML='';return}
-  el.innerHTML='<div class="cm-auto"><div><b>Automatic emails</b><span class="muted">'+(st.ready?'Sent from '+esc(st.from)+' every Monday at noon to anyone who hasn’t submitted yet.'+(st.sent&&st.sent.length?' This week: '+st.sent.map(esc).join(', ')+'.':''):'Not set up yet: add the Outlook settings in Render (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, MAIL_FROM).')+'</span></div>'
-    +'<button class="btn2" id="mailTest"'+(st.ready?'':' disabled')+'>Send test email to me</button><label class="cauto"><input type="checkbox" id="mailAuto"'+(st.auto?' checked':'')+(st.ready?'':' disabled')+'> Email automatically</label><span class="muted" id="mailMsg" style="width:100%;font-size:12.5px"></span></div>';
+  el.innerHTML='<div class="cm-auto"><div><b>Automatic emails</b><span class="muted">'+(st.ready?'Sent from '+esc(st.from)+' to anyone who hasn’t submitted: Mon–Wed at noon, Thu–Sun at 9 AM and 3 PM, until they do.'+(st.sent&&st.sent.length?' This week: '+st.sent.map(esc).join(', ')+'.':''):'Not set up yet: add the Outlook settings in Render (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, MAIL_FROM).')+'</span></div>'
+    +'<button class="btn2" id="mailTest"'+(st.ready?'':' disabled')+'>Send test email to me</button><label class="cauto"><input type="checkbox" id="mailAuto"'+(st.auto?' checked':'')+(st.ready?'':' disabled')+'> Email automatically</label><button class="btn2 pri" id="mailNow"'+(st.ready?'':' disabled')+'>Send reminders now</button><span class="muted" id="mailMsg" style="width:100%;font-size:12.5px"></span></div>';
   $('mailTest').onclick=async e=>{const b=e.currentTarget;b.disabled=true;$('mailMsg').textContent='Sending...';try{const r=await post('/api/mail/test',{});$('mailMsg').textContent='Test email sent to '+r.to+'. Check that inbox (and spam).'}catch(err){$('mailMsg').textContent=err.message}b.disabled=false};
+  $('mailNow').onclick=async e=>{if(!confirm('Email everyone who hasn\u2019t submitted this week\u2019s check-up right now?'))return;const b=e.currentTarget;b.disabled=true;$('mailMsg').textContent='Sending...';try{const r=await post('/api/mail/now',{confirm:'SEND'});$('mailMsg').textContent='Sent to '+r.sent.length+(r.sent.length?': '+r.sent.join(', '):'')+'.'+(r.failed.length?' Failed: '+r.failed.map(f=>f.name+' ('+f.error+')').join('; '):'')+(r.noEmail.length?' No email: '+r.noEmail.join(', '):'');mailPanel()}catch(err){$('mailMsg').textContent=err.message;b.disabled=false}};
   $('mailAuto').onchange=async e=>{try{const r=await post('/api/mail/auto',{on:e.target.checked});$('mailMsg').textContent=r.auto?'On: emails go out Mondays at noon.':'Off.'}catch(err){e.target.checked=!e.target.checked;$('mailMsg').textContent=err.message}}}
 
 // Email everyone who hasn't done this week's check-up, from your own email app (addresses come from POM users)
