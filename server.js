@@ -1944,7 +1944,10 @@ tbody tr:hover td{background:#fcfbf8}
 header{position:relative;overflow:hidden}
 .hwave{position:absolute;left:0;bottom:-1px;width:100%;height:58px;z-index:0;fill:rgba(20,163,199,.26);pointer-events:none}
 @keyframes wave{to{transform:translateX(-50%)}}
-.logo{animation:bob 4s ease-in-out infinite}@keyframes bob{50%{transform:translateY(-2px) rotate(-3deg)}}
+.logo{animation:bob 4s ease-in-out infinite}
+@property --la{syntax:'<angle>';inherits:false;initial-value:0deg}
+.logo{border:2px solid transparent;background:linear-gradient(var(--pool),var(--pool)) padding-box,conic-gradient(from var(--la),#22d3ee,#a78bfa,#f472b6,#facc15,#22d3ee) border-box;animation:bob 4s ease-in-out infinite,lspin 3.5s linear infinite;box-shadow:0 0 14px -2px rgba(34,211,238,.6)}
+@keyframes lspin{to{--la:360deg}}@keyframes bob{50%{transform:translateY(-2px) rotate(-3deg)}}
 .tabs button{transition:background .2s,color .2s,transform .15s}.tabs button:active{transform:scale(.95)}
 .card.rise{animation:rise .45s cubic-bezier(.2,.8,.2,1) both;animation-delay:calc(var(--i) * 35ms)}
 @keyframes rise{from{opacity:0;transform:translateY(10px)}}
@@ -2237,6 +2240,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;bor
 .ptl{position:relative;height:16px;margin:4px 0 18px;border-radius:6px;background:repeating-linear-gradient(90deg,#e0f2fe 0 10%,#f0f9ff 10% 20%)}
 .ptl i{position:absolute;top:2px;bottom:2px;border-radius:4px;background:linear-gradient(180deg,#38bdf8,#0284c7);box-shadow:0 0 0 1px #fff;cursor:help}.ptl i:hover{background:#0c4a6e}
 .ptl span{position:absolute;top:18px;font-size:10.5px;color:#64748b}.ptl span:last-child{right:0}
+.plist .psvc{display:inline-block!important;width:auto!important;margin:3px 0 2px;font-size:11px!important;font-weight:700;letter-spacing:.02em;color:hsl(var(--h) 70% 28%)!important;background:hsl(var(--h) 85% 92%);border:1px solid hsl(var(--h) 60% 80%);border-radius:999px;padding:1px 8px}
 .plist .pvisit{color:#0369a1!important;font-weight:600}.plist .pvisit.none{color:#94a3b8!important;font-weight:500}
 .plist .pfar{display:inline-block;margin-left:4px;padding:0 6px;border-radius:9px;background:#fff7ed;color:#c2410c;font-size:11px;font-weight:600}.plist .vmins{display:block;font-size:13px;color:#0c4a6e}.plist .vmins.short{color:#dc2626}.plist .vmins.long{color:#c2410c}
 
@@ -3128,7 +3132,7 @@ async function pomBox(id,name,date){const el=$('pomBox');if(!el)return;if(!name)
   el.innerHTML=head('<span class="pcount">'+done+' of '+st.length+' done</span>')+'<div class="pbar"><i style="width:'+pct+'%"></i></div>'
    +(vis.length?'<div class="psum"><b>'+Math.floor(tot/60)+'h '+(tot%60)+'m</b> at pools · '+vis.length+' of '+st.length+' visits found in the truck’s breadcrumbs</div>'+tl:(r.points?'':'<div class="muted" style="font-size:12px">No breadcrumbs from the truck '+(isToday?'yet today':'that day')+', so time on site can’t be measured.</div>'))
    +(r.tech.toLowerCase()!==name.toLowerCase()?'<div class="muted" style="font-size:12px;margin:4px 0">Shown as '+esc(r.tech)+' in Pool Office Manager</div>':'')
-   +'<ol class="plist">'+st.map((s,i)=>'<li class="'+(s.done?'done':'')+'" data-i="'+i+'"><span class="pn">'+(s.done?'✓':i+1)+'</span><div><b>'+esc(s.customer||'Customer')+'</b><span>'+esc(s.address||'No address')+'</span>'
+   +'<ol class="plist">'+st.map((s,i)=>'<li class="'+(s.done?'done':'')+'" data-i="'+i+'"><span class="pn">'+(s.done?'✓':i+1)+'</span><div><b>'+esc(s.customer||'Customer')+'</b>'+(s.type?'<span class="psvc" style="--h:'+([...s.type].reduce((h,c)=>h*31+c.charCodeAt(0)>>>0,7)%360)+'">'+esc(s.type)+'</span>':'')+'<span>'+esc(s.address||'No address')+'</span>'
      +(s.visit?'<span class="pvisit">Arrived '+t(s.visit.arrive)+' · left '+t(s.visit.leave)+(s.visit.visits>1?' · came back '+(s.visit.visits-1)+'×':'')+(s.visit.how==='wide'?' <span class="pfar">parked ~'+(s.visit.ft>=1000?(s.visit.ft/5280).toFixed(2)+' mi':s.visit.ft+' ft')+' away</span>'+flag('The truck never stopped within 500 ft of the address in Pool Office Manager, so this visit was matched from up to 0.3 mi away. The address in POM may be off, or this could be a neighbouring stop.'):s.visit.how==='addr'?' <span class="pfar">matched by street</span>'+flag('Matched by street address instead of map position: the truck stopped at '+(s.visit.parkedAt||'a nearby number on the same street')+'. '+(s.lat?'POM\\'s map pin for this pool is more than 0.3 mi away, so the pin is probably wrong.':'POM has no map pin for this pool.')):'')+'</span>':(!isToday||s.done?'<span class="pvisit none">Truck not seen at this address</span>':''))+'</div>'
      +'<em>'+(s.visit?'<strong class="vmins'+(s.visit.mins<5?' short':s.visit.mins>60?' long':'')+'">'+s.visit.mins+' min</strong>':'')+(s.done?'Done':esc(String(s.serviceStatus||s.status||'To do').toLowerCase().split('_').join(' ').replace(/^./,c=>c.toUpperCase())))+(s.time?'<small>Scheduled '+t(s.time)+'</small>':'')+'</em></li>').join('')+'</ol>';
   bind();POMDAY=isToday?null:st;
@@ -3139,7 +3143,7 @@ const poolLayer=L.layerGroup();
 const poolIcon=s=>L.divIcon({className:'poolpin'+(s.done?' done':''),html:'<span>'+(s.done?'\u2713':'')+'</span>',iconSize:[22,16],iconAnchor:[11,8]});
 async function loadPools(){try{const r=await get('/api/pom/stops');if(!r.connected)return;POMSTOPS=r.stops;showPools()}catch(e){}}
 function showPools(){if(!POMSTOPS)return;const on=map.getZoom()>=13;if(on&&!map.hasLayer(poolLayer)){poolLayer.addTo(map)}else if(!on&&map.hasLayer(poolLayer)){map.removeLayer(poolLayer);return}
-  poolLayer.clearLayers();POMSTOPS.forEach(s=>L.marker([s.lat,s.lng],{icon:poolIcon(s),keyboard:false,zIndexOffset:-500}).bindTooltip('<b>'+esc(s.customer||'Pool')+'</b><br>'+esc(s.address)+'<br>'+esc(s.tech||'')+' · '+(s.done?'Done':'Not done yet'),{direction:'top',offset:[0,-8]}).addTo(poolLayer))}
+  poolLayer.clearLayers();POMSTOPS.forEach(s=>L.marker([s.lat,s.lng],{icon:poolIcon(s),keyboard:false,zIndexOffset:-500}).bindTooltip('<b>'+esc(s.customer||'Pool')+'</b><br>'+esc(s.address)+'<br>'+(s.type?'<i>'+esc(s.type)+'</i><br>':'')+esc(s.tech||'')+' · '+(s.done?'Done':'Not done yet'),{direction:'top',offset:[0,-8]}).addTo(poolLayer))}
 map.on('zoomend',showPools);setTimeout(loadPools,2000);setInterval(loadPools,3*60e3);
 // Breadcrumb trail: colored by speed, dots where it started and where it is now, small stops where it sat 10+ minutes
 const trailLayer=L.layerGroup();
