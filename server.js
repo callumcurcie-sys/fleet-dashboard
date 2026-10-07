@@ -1271,6 +1271,7 @@ const rampRepairs = () => cached('rampRepairs', 3600, async () => {
     const carSvc = /car service|automotive|auto repair/i.test(cat) || REPAIR_MCC.has(mcc);
     if (!(amt >= 10) || !(carSvc || (REPAIR_WORDS.test(memo) && AUTO_SHOP.test(merchant)))) continue;
     if (/wash/i.test(merchant + ' ' + memo) && !/oil|repair|brake|tire|service/i.test(memo)) continue;
+    if (/anti-?\s?freeze/i.test(merchant + ' ' + memo) && !/truck|vehicle|van|car\b|ranger|maverick|colorado|silverado|canyon|frontier|f-?150/i.test(memo)) continue;   // pool antifreeze
     const h = t.card_holder || {}, who = [h.first_name, h.last_name].filter(Boolean).join(' ');
     out.push({ id: t.id, date: (t.user_transaction_time || t.settlement_date || '').slice(0, 10), amount: amt, merchant, memo, who, ...truckFor(memo, who),
       link: 'https://app.ramp.com/business-overview/transactions/' + t.id });
@@ -2506,7 +2507,7 @@ header[data-sky=night] .birds{display:none}
 .edhero.mk-ford{background:linear-gradient(115deg,#1e3a8a,#2563eb 60%,#60a5fa)}.edhero.mk-chevy{background:linear-gradient(115deg,#78350f,#d97706 60%,#fbbf24)}.edhero.mk-ram,.edhero.mk-dodge{background:linear-gradient(115deg,#7f1d1d,#dc2626 60%,#f87171)}.edhero.mk-gmc{background:linear-gradient(115deg,#450a0a,#b91c1c 60%,#ef4444)}.edhero.mk-toyota{background:linear-gradient(115deg,#3f3f46,#71717a 60%,#d4d4d8)}.edhero.mk-nissan{background:linear-gradient(115deg,#1f2937,#475569 60%,#94a3b8)}
 .edhero h2{color:#fff}.edhero .azn,.edhero .pos{color:rgba(255,255,255,.85)!important}.edhero .tno,.edhero .mk{display:none}
 .ehno{flex:none;display:grid;place-items:center;min-width:64px;height:64px;padding:0 10px;border-radius:16px;background:rgba(255,255,255,.18);font-size:26px;font-weight:800;letter-spacing:-.02em;box-shadow:inset 0 0 0 1px rgba(255,255,255,.3);animation:ehpop .5s cubic-bezier(.2,.9,.3,1.4) both}.ehno svg{width:30px;height:30px}
-.ehtruck{position:absolute;right:110px;bottom:-4px;width:170px;animation:ehdrive 1.1s cubic-bezier(.2,.8,.2,1) both}
+.ehtruck{position:absolute;right:96px;bottom:-6px;width:230px;animation:ehdrive 1.1s cubic-bezier(.2,.8,.2,1) both}
 .edhero::after{content:'';position:absolute;right:-40px;top:-60px;width:220px;height:220px;border-radius:50%;background:radial-gradient(circle,rgba(255,255,255,.22),transparent 65%);pointer-events:none}
 @keyframes ehpop{from{transform:scale(.4) rotate(-12deg);opacity:0}}@keyframes ehdrive{from{transform:translateX(-420px);opacity:0}70%{opacity:1}}
 @media(max-width:900px){.ehtruck{display:none}}@media (prefers-reduced-motion:reduce){.ehno,.ehtruck{animation:none}}
@@ -2548,6 +2549,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 @keyframes wavey{to{background-position:40px 0}}@media (prefers-reduced-motion:reduce){.crewhead h2::after{animation:none}}
 
 /* vehicle notes */
+.eli.sel{position:relative}.eli.sel::after{content:'';position:absolute;left:0;top:8px;bottom:8px;width:4px;border-radius:4px;background:linear-gradient(180deg,#22d3ee,#a78bfa,#f472b6,#22d3ee);background-size:100% 300%;animation:selflow 2.4s linear infinite}@keyframes selflow{to{background-position:0 300%}}
 .rp-ramp{font-size:10.5px;font-weight:800;color:#047857;background:#d1fae5;border-radius:6px;padding:1px 7px;text-decoration:none}.rp-ramp:hover{background:#a7f3d0}.rp-chip.unk{background:#94a3b8}
 .pbs{position:relative;overflow:hidden}.pbs::after{content:'';position:absolute;top:0;bottom:0;left:-40%;width:30%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.22),transparent);transform:skewX(-18deg);animation:pbsheen 5.5s ease-in-out infinite;pointer-events:none}@keyframes pbsheen{0%,55%{left:-40%}100%{left:130%}}
 .tabs a.reptab{background:linear-gradient(90deg,#e4f222,#fde68a,#facc15,#e4f222);background-size:300% 100%;-webkit-background-clip:text;background-clip:text;color:transparent!important;animation:goldrun 4s linear infinite}.tabs a.reptab .ti{color:#e4f222}@keyframes goldrun{to{background-position:300% 0}}
@@ -3551,24 +3553,60 @@ function truckArt(kind){
    +'<path d="M196 30 l7 -3 v7 h-7z" fill="#1e293b"/><rect x="14" y="30" width="5" height="14" rx="1.5" fill="#dc2626"/>'
    +'<rect x="8" y="62" width="14" height="7" rx="3" fill="#475569"/><rect x="226" y="62" width="14" height="7" rx="3" fill="#475569"/><rect x="'+(wh[0]+r+6)+'" y="65" width="'+(wh[1]-wh[0]-2*r-12)+'" height="4" rx="2" fill="#334155"/>'
    +wheel(wh[0],wy,r)+wheel(wh[1],wy,r)+'</svg>'}
- const {W,bed,roof,cb,ws,hood,nose,y0,wy,r,wh}=P,mid=(cb+ws[0])/2+2;
- return '<svg viewBox="0 0 '+W+' 100" xmlns="http://www.w3.org/2000/svg">'+d+'<ellipse cx="'+W/2+'" cy="92" rx="'+(W/2-14)+'" ry="3.5" fill="rgba(0,0,0,.2)"/>'
-  +'<path d="M14 '+y0+' V'+bed+' H'+cb+' V'+(roof+8)+' Q'+cb+' '+roof+' '+(cb+8)+' '+roof+' H'+ws[0]+' Q'+(ws[0]+6)+' '+roof+' '+(ws[0]+10)+' '+(roof+6)+' L'+ws[1]+' '+(hood-2)
-  +' L'+(nose-14)+' '+hood+' Q'+(nose-2)+' '+(hood+1)+' '+nose+' '+(hood+8)+' V'+y0+' Z" fill="url(#tbB)" stroke="#475569" stroke-width="1.2"/>'
-  +well(wh[0],wy,r)+well(wh[1],wy,r)
-  +'<path d="M18 '+(bed+3)+' H'+(cb-3)+'" stroke="#9aa6b5" stroke-width="1"/><path d="M'+(cb-1)+' '+(bed+1)+' V'+(y0-2)+'" stroke="#9aa6b5" stroke-width="1"/>'
-  +'<path d="M'+(cb+5)+' '+(roof+5)+' H'+(mid-3)+' V'+(hood-4)+' H'+(cb+5)+' Z" fill="url(#tbG)" stroke="#334155"/>'
-  +'<path d="M'+(mid+3)+' '+(roof+5)+' H'+(ws[0]+2)+' Q'+(ws[0]+7)+' '+(roof+5)+' '+(ws[1]-6)+' '+(hood-4)+' H'+(mid+3)+' Z" fill="url(#tbG)" stroke="#334155"/>'
-  +'<path d="M'+mid+' '+(roof+3)+' V'+(y0-3)+' M'+(ws[1]-4)+' '+(hood-2)+' V'+(y0-5)+'" stroke="#9aa6b5" stroke-width="1.1"/>'
-  +'<path d="M14 '+(hood+4)+' H'+(nose-6)+'" stroke="#fff" stroke-width="1.5" opacity=".85"/><path d="M14 '+(hood+5.6)+' H'+(nose-6)+'" stroke="#9aa6b5" stroke-width=".8"/>'
-  +'<rect x="'+(mid-16)+'" y="'+(hood+8)+'" width="8" height="2.4" rx="1.2" fill="#64748b"/><rect x="'+(ws[1]-18)+'" y="'+(hood+8)+'" width="8" height="2.4" rx="1.2" fill="#64748b"/>'
-  +'<path d="M'+(ws[1]-8)+' '+(hood-9)+' l8 -2 v7 h-8z" fill="#1e293b"/>'
-  +'<path d="M'+(nose-12)+' '+(hood+2)+' Q'+(nose-1)+' '+(hood+3)+' '+(nose)+' '+(hood+9)+' H'+(nose-12)+' Z" fill="#fef3c7" stroke="#92400e" stroke-width=".7"/>'
-  +'<rect x="'+(nose-3)+'" y="'+(hood+11)+'" width="6" height="'+(y0-hood-17)+'" rx="1.5" fill="#1f2937"/><path d="M'+(nose-3)+' '+(hood+14)+' h6 M'+(nose-3)+' '+(hood+17)+' h6" stroke="#64748b" stroke-width=".8"/>'
-  +'<rect x="14" y="'+(bed+5)+'" width="5" height="11" rx="1.5" fill="#dc2626"/><path d="M15 '+(bed+1)+' H'+(cb-4)+'" stroke="#fff" stroke-width="1.4" opacity=".8"/>'
-  +'<rect x="8" y="'+(y0-6)+'" width="14" height="7" rx="3" fill="#475569"/><rect x="'+(nose-10)+'" y="'+(y0-6)+'" width="15" height="7" rx="3" fill="#475569"/>'
-  +'<rect x="'+(wh[0]+r+6)+'" y="'+(y0-3)+'" width="'+(wh[1]-wh[0]-2*r-12)+'" height="4" rx="2" fill="#334155"/>'
-  +wheel(wh[0],wy,r)+wheel(wh[1],wy,r)+'</svg>'}
+ return pickupArt(kind)}
+function pickupArt(kind){const F=kind==='full';
+ const cowl=F?76:82,hood=F?84:88,noseTop=F?92:98;
+ const g='<defs>'
+  +'<linearGradient id="tkP" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset=".38" stop-color="#f1f4f8"/><stop offset=".54" stop-color="#dde3ea"/><stop offset=".56" stop-color="#c9d1db"/><stop offset=".8" stop-color="#b3bdc9"/><stop offset="1" stop-color="#8e99a7"/></linearGradient>'
+  +'<linearGradient id="tkS" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".45" stop-color="#fff" stop-opacity=".55"/><stop offset=".55" stop-color="#fff" stop-opacity="0"/></linearGradient>'
+  +'<linearGradient id="tkG" x1="0" y1="0" x2=".35" y2="1"><stop offset="0" stop-color="#64748b"/><stop offset=".45" stop-color="#1e293b"/><stop offset="1" stop-color="#0b1220"/></linearGradient>'
+  +'<linearGradient id="tkC" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f8fafc"/><stop offset=".5" stop-color="#94a3b8"/><stop offset="1" stop-color="#475569"/></linearGradient>'
+  +'<linearGradient id="tkL" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset=".6" stop-color="#dbeafe"/><stop offset="1" stop-color="#93c5fd"/></linearGradient>'
+  +'<linearGradient id="tkT" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7f1d1d"/><stop offset=".5" stop-color="#ef4444"/><stop offset="1" stop-color="#b91c1c"/></linearGradient>'
+  +'<radialGradient id="tkW" cx=".5" cy=".5" r=".5"><stop offset=".62" stop-color="#2b3340"/><stop offset=".9" stop-color="#151a22"/><stop offset="1" stop-color="#0a0d12"/></radialGradient>'
+  +'<radialGradient id="tkR" cx=".38" cy=".32" r=".75"><stop offset="0" stop-color="#ffffff"/><stop offset=".5" stop-color="#cbd5e1"/><stop offset="1" stop-color="#64748b"/></radialGradient>'
+  +'<filter id="tkB" x="-10%" y="-200%" width="120%" height="500%"><feGaussianBlur stdDeviation="4"/></filter></defs>';
+ const wheel=(cx,cy)=>{let sp='',lug='';for(let i=0;i<6;i++){const a=(i*60-90)*Math.PI/180,b=a+.22,c=a-.22,d=a+.13,e=a-.13,P=(r,t)=>(cx+Math.cos(t)*r).toFixed(1)+' '+(cy+Math.sin(t)*r).toFixed(1);
+    sp+='<path d="M'+P(7,e)+' L'+P(21.5,c)+' A21.5 21.5 0 0 1 '+P(21.5,b)+' L'+P(7,d)+' Z" fill="url(#tkR)" stroke="#475569" stroke-width=".6"/>';
+    const l=a+Math.PI/6;lug+='<circle cx="'+(cx+Math.cos(l)*9.5).toFixed(1)+'" cy="'+(cy+Math.sin(l)*9.5).toFixed(1)+'" r="1.5" fill="#94a3b8"/>'}
+  return '<circle cx="'+cx+'" cy="'+cy+'" r="36" fill="url(#tkW)"/><circle cx="'+cx+'" cy="'+cy+'" r="33" fill="none" stroke="#3a4352" stroke-width="1"/>'
+   +'<circle cx="'+cx+'" cy="'+cy+'" r="24.5" fill="#cbd5e1"/><circle cx="'+cx+'" cy="'+cy+'" r="23" fill="#1f2937"/><circle cx="'+cx+'" cy="'+cy+'" r="17" fill="#3f4a5a"/>'
+   +'<path d="M'+(cx-14)+' '+(cy+6)+' a15 15 0 0 1 4 -18" stroke="#b91c1c" stroke-width="5" fill="none" stroke-linecap="round" opacity=".85"/>'
+   +sp+'<circle cx="'+cx+'" cy="'+cy+'" r="12" fill="url(#tkR)" stroke="#64748b" stroke-width=".8"/>'+lug+'<circle cx="'+cx+'" cy="'+cy+'" r="4.5" fill="#334155" stroke="#e2e8f0" stroke-width="1"/>'
+   +'<path d="M'+(cx-20)+' '+(cy-12)+' A23 23 0 0 1 '+(cx+6)+' '+(cy-22)+'" stroke="#fff" stroke-width="1.6" fill="none" opacity=".55"/>'};
+ const body='M40 150 C34 150 32 146 32 140 L32 92 C32 86 36 84 42 84 L214 84 C216 64 220 50 228 44 C232 40 238 38 248 38 L330 37 C341 37 347 40 353 46 L392 '+cowl
+  +' C420 '+(cowl+1)+' 456 '+hood+' 478 '+(hood+4)+' C490 '+(hood+7)+' 497 '+(noseTop+2)+' 498 '+(noseTop+12)+' L500 140 C500 148 496 150 490 150 L450 150 A40 40 0 0 0 370 150 L168 150 A40 40 0 0 0 88 150 Z';
+ return '<svg viewBox="0 0 520 210" xmlns="http://www.w3.org/2000/svg">'+g
+  +'<ellipse cx="268" cy="192" rx="236" ry="7" fill="rgba(15,23,42,.35)" filter="url(#tkB)"/>'
+  +'<path d="M86 152 A42 42 0 0 1 170 152 Z M368 152 A42 42 0 0 1 452 152 Z" fill="#0b1220"/>'
+  +'<path d="'+body+'" fill="url(#tkP)" stroke="#5b6675" stroke-width="1.4" stroke-linejoin="round"/>'
+  // bed: rail cap, tailgate seam, inner bed shadow line
+  +'<path d="M40 84 L45 79 H211 L214 84 Z" fill="#a3adba"/><path d="M46 80.5 H210" stroke="#6b7684" stroke-width="1"/>'+'<path d="M38 84 H214" stroke="#7b8796" stroke-width="3" stroke-linecap="round"/><path d="M40 82.6 H212" stroke="#fff" stroke-width="1" opacity=".9"/>'
+  +'<path d="M46 87 V146" stroke="#8b96a4" stroke-width="1.1"/><path d="M47 87 V146" stroke="#fff" stroke-width=".8" opacity=".7"/>'
+  // glass with pillars + reflection
+  +'<path d="M228 82 C229 66 232 54 240 49 C243 47 247 46 253 46 L329 45 C336 45 341 47 345 51 L'+(F?372:378)+' '+(cowl-1)+' Z" fill="url(#tkG)" stroke="#0f172a" stroke-width="2.4" stroke-linejoin="round"/>'
+  +'<rect x="295" y="44" width="8" height="'+(cowl-42)+'" fill="#111827"/>'
+  +'<path d="M246 50 L262 50 L240 80 L232 80 Z M312 48 L330 48 L300 80 L284 80 Z" fill="#fff" opacity=".14"/>'
+  +'<path d="M232 47 C238 41 244 40 252 40 L330 39" stroke="#fff" stroke-width="1.6" fill="none" opacity=".9"/>'
+  // doors, handles, mirror
+  +'<path d="M222 86 C222 108 224 128 228 147 M299 86 V148 M'+(F?380:386)+' '+(cowl+3)+' C'+(F?386:391)+' 104 388 126 364 147" stroke="#8b96a4" stroke-width="1.3" fill="none"/>'
+  +'<rect x="262" y="95" width="16" height="4.5" rx="2.2" fill="#475569"/><rect x="262" y="95" width="16" height="1.6" rx=".8" fill="#e2e8f0"/>'
+  +'<rect x="338" y="95" width="16" height="4.5" rx="2.2" fill="#475569"/><rect x="338" y="95" width="16" height="1.6" rx=".8" fill="#e2e8f0"/>'
+  +'<path d="M'+(F?366:372)+' '+(cowl-14)+' l20 -3 c5 -.5 8 3 8 8 v5 c0 4 -3 6 -7 6 h-19 z" fill="#1f2937"/><path d="M'+(F?369:375)+' '+(cowl-13)+' l16 -2" stroke="#64748b" stroke-width="1.2"/>'
+  // body crease + sheen
+  +'<path d="M34 108 C150 108 330 109 496 113" stroke="#fff" stroke-width="2.2" fill="none" opacity=".75"/><path d="M34 110.5 C150 110.5 330 111.5 496 115.5" stroke="#8b96a4" stroke-width="1" fill="none"/>'
+  +'<path d="'+body+'" fill="url(#tkS)" opacity=".5"/>'
+  // rocker + flares
+  +'<path d="M170 140 H368 V150 H170 Z" fill="#475569" opacity=".55"/>'
+  +'<path d="M83 150 A45 45 0 0 1 173 150 M365 150 A45 45 0 0 1 455 150" stroke="#1f2937" stroke-width="7" fill="none" stroke-linecap="round"/>'
+  // lights, grille, bumpers
+  +'<path d="M32 92 H40 V120 H32 Z" fill="url(#tkT)" stroke="#450a0a" stroke-width=".8"/><path d="M33.5 95 H38.5 V104 H33.5 Z" fill="#fca5a5" opacity=".6"/>'
+  +(F?'<path d="M470 '+(hood+3)+' C484 '+(hood+5)+' 494 '+(noseTop+2)+' 497 '+(noseTop+10)+' L472 '+(noseTop+12)+' Z" fill="url(#tkL)" stroke="#94a3b8" stroke-width="1"/><path d="M488 '+(noseTop+14)+' H500 V132 H486 Z" fill="#111827"/><path d="M487 '+(noseTop+20)+' H500 M486 '+(noseTop+27)+' H500 M486 '+(noseTop+34)+' H500" stroke="#475569" stroke-width="1.6"/>'
+     :'<path d="M462 '+(hood+2)+' C478 '+(hood+4)+' 490 '+(noseTop+2)+' 495 '+(noseTop+8)+' L470 '+(noseTop+11)+' C465 '+(noseTop+7)+' 463 '+(hood+8)+' 462 '+(hood+2)+' Z" fill="url(#tkL)" stroke="#94a3b8" stroke-width="1"/><path d="M493 '+(noseTop+12)+' L499 '+(noseTop+13)+' L500 130 L490 130 Z" fill="#111827"/><path d="M492 '+(noseTop+18)+' H500 M491 '+(noseTop+24)+' H500" stroke="#475569" stroke-width="1.4"/>')
+  +'<path d="M472 130 H502 C505 130 507 134 507 141 C507 150 503 155 497 155 H454 C452 150 456 140 462 136 Z" fill="#374151"/><path d="M472 130.5 H503" stroke="#9ca3af" stroke-width="1.4"/><rect x="484" y="143" width="14" height="5" rx="2" fill="#f59e0b" opacity=".8"/>'
+  +'<path d="M22 136 H50 V156 H30 C25 156 22 152 22 147 Z" fill="url(#tkC)" stroke="#475569" stroke-width=".8"/><path d="M24 140 H50" stroke="#fff" stroke-width="1" opacity=".8"/>'
+  +wheel(128,155)+wheel(410,155)+'</svg>'}
+
 const truckKind=m=>/transit|promaster|express|savana|sprinter|econoline|e-?series|van/i.test(m)?'van':/f-?[123]50|silverado|sierra|ram|tundra|titan|super ?duty/i.test(m)?'full':'mid';
 // ---- Truck check-ups tab: the weekly POM truck form, per driver, week by week ----
 let CHK=null;
