@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto']);
+const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -144,13 +144,14 @@ const routes = {
     const d = await routes['/api/pom/checkups'](new URLSearchParams('weeks=1'));
     if (!d.connected) return { connected: false, texts: [] };
     const now = Date.now(), wd = (['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].indexOf(new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' })) + 6) % 7;
-    const monday = +etDay().start - wd * 864e5, texts = [], skipped = [], seen = new Set();
+    const monday = +etDay().start - wd * 864e5, texts = [], skipped = [], seen = new Set(), users = await pomUsers().catch(() => null);
     d.checkups.filter(c => !c.done && Date.parse(c.time) >= monday && Date.parse(c.time) < now && CHECKUP_ROLES.includes(d.roles[c.tech])).forEach(c => {
       if (seen.has(c.tech)) return; seen.add(c.tech);
-      const ph = String(d.phones[c.tech] || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
-      if (ph.length !== 10) return skipped.push({ name: c.tech, why: 'No phone number in Airtable' });
-      const day = new Date(c.time).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'short', day: 'numeric' });
-      texts.push({ name: c.tech, phone: '+1' + ph, message: 'Hi ' + c.tech.split(' ')[0] + ', reminder: your weekly truck check-up for ' + day + " hasn't been submitted in POM yet. Please fill it out today. Thanks!" });
+      const ph = String(d.phones[c.tech] || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''), u = users && matchPerson(users, c.tech), email = u && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(u.email) ? u.email : '';
+      if (ph.length !== 10 && !email) return skipped.push({ name: c.tech, why: 'No phone in Airtable and no email in POM' });
+      const day = new Date(c.time).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'short', day: 'numeric' }), first = c.tech.split(' ')[0];
+      texts.push({ name: c.tech, phone: ph.length === 10 ? '+1' + ph : '', email, message: 'Hi ' + first + ', reminder: your weekly truck check-up for ' + day + " hasn't been submitted in POM yet. Please fill it out today. Thanks!",
+        subject: 'Truck check-up missed: ' + day, body: 'Hi ' + first + ',\n\nYour weekly truck check-up for ' + day + " hasn't been submitted in Pool Office Manager yet. Please fill it out in the POM app today.\n\nThanks,\nMillennial Pools" });
     });
     console.log(new Date().toISOString(), 'Missed check-up texts requested:', texts.map(t => t.name).join(', ') || 'none');
     return { connected: true, texts, skipped }; },
@@ -169,6 +170,7 @@ const routes = {
     if (cid) await tryIt('services', `query($c: String!) { infiniteServices(selector: {filters: {customerId: {equals: $c}}}, first: 3, sort: {field: startTime, order: DESC}) { edges { node { ${POM_SVC_FIELDS} } } } }`, { c: cid });
     return out; },
   '/api/pom/checkup-plan': () => checkupPlan(),
+  '/api/mail/status': () => { const st = mailState(); return { ready: mailReady(), from: mailFrom(), auto: !!st.auto, week: st.week, sent: st.sent || [] }; },
   '/api/repairs': async () => { if (!AIRTABLE_TOKEN) return { connected: false };
     const at = await atData(), ramp = RAMP_CLIENT_ID && RAMP_CLIENT_SECRET ? await rampRepairs().catch(e => ({ error: e.message })) : null;
     return { connected: true, ramp, trucks: at.trucks.map(t => ({ id: t.id, truckNo: t.truckNo, desc: [t.year, t.make, t.model].filter(Boolean).join(' '),
@@ -1121,10 +1123,13 @@ function nextMonday9(after = new Date()) {   // the first Monday 9:00 AM New Jer
 const chkRrule = t => { const ymd = etDay(t).ymd.replace(/-/g, ''); return 'DTSTART;TZID=US/Eastern:' + ymd + 'T' + String(CHK_HOUR).padStart(2, '0') + '0000\nRRULE:FREQ=WEEKLY;WKST=MO;BYDAY=MO;BYHOUR=' + CHK_HOUR + ';BYMINUTE=0;BYSECOND=0'; };
 const ruleHour = r => { const m = /BYHOUR=(\d+)/.exec(r || ''); return m ? +m[1] : null; };
 // POM user ids (a new appointment's workers are users; the ids on existing appointments belong to the appointment's worker links)
+let pomUserEmail = true;
 const pomUsers = () => cached('pomusers', 3600, async () => { const out = []; let after = null;
-  for (let i = 0; i < 20; i++) { const d = await pom('query($a: String) { infiniteUsers(first: 50, after: $a) { edges { node { id firstName lastName isActive } } pageInfo { endCursor hasNextPage } } }', { a: after });
+  for (let i = 0; i < 20; i++) { let d;
+    try { d = await pom('query($a: String) { infiniteUsers(first: 50, after: $a) { edges { node { id firstName lastName isActive' + (pomUserEmail ? ' email' : '') + ' } } pageInfo { endCursor hasNextPage } } }', { a: after }); }
+    catch (e) { if (!pomUserEmail || !/email/i.test(e.message)) throw e; pomUserEmail = false; i--; continue; }
     const c = d.infiniteUsers || {}; (c.edges || []).forEach(e => e && e.node && out.push(e.node)); if (!c.pageInfo || !c.pageInfo.hasNextPage) break; after = c.pageInfo.endCursor; }
-  return out.filter(u => u.isActive !== false).map(u => ({ id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' ') })); });
+  return out.filter(u => u.isActive !== false).map(u => ({ id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' '), email: clean(u.email || '') })); });
 async function checkupPlan() {
   if (!clean(process.env.POM_API_KEY)) return { connected: false };
   const now = new Date(), anchor = etDay().end, appts = [];
@@ -1180,6 +1185,77 @@ async function applyCheckups(keys) {
   }
   [...cache.keys()].filter(k => /^pom/.test(k)).forEach(k => cache.delete(k));   // re-read POM next time
   return { done, failed };
+}
+// ---------------- Email: missed truck check-ups, sent from the dashboard ----------------
+// Needs SMTP_USER (the sending address) and SMTP_PASS (for Gmail / Google Workspace: an App Password) in Render.
+// SMTP_HOST defaults to smtp.gmail.com (port 465, TLS). No passwords in this file.
+const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com', SMTP_USER = clean(process.env.SMTP_USER || ''), SMTP_PASS = String(process.env.SMTP_PASS || '').replace(/\s+/g, '');
+// Outlook / Microsoft 365 (preferred, since Microsoft is turning off password SMTP): an Entra app with the Mail.Send
+// application permission. Set MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET and MAIL_FROM (e.g. contact@millennialpools.com).
+const MS = { tenant: clean(process.env.MS_TENANT_ID || ''), id: clean(process.env.MS_CLIENT_ID || ''), secret: String(process.env.MS_CLIENT_SECRET || '').trim(), from: clean(process.env.MAIL_FROM || '') };
+const msReady = () => !!(MS.tenant && MS.id && MS.secret && MS.from);
+let msTok = null, msExp = 0;
+async function graphSend(to, subject, text) {
+  if (!msTok || Date.now() > msExp) {
+    const r = await fetch('https://login.microsoftonline.com/' + encodeURIComponent(MS.tenant) + '/oauth2/v2.0/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: MS.id, client_secret: MS.secret, scope: 'https://graph.microsoft.com/.default', grant_type: 'client_credentials' }) });
+    const j = await r.json().catch(() => ({}));
+    if (!j.access_token) throw new Error('Microsoft sign-in failed: ' + (j.error_description || j.error || r.status).toString().split('\r')[0].slice(0, 200));
+    msTok = j.access_token; msExp = Date.now() + ((j.expires_in || 3600) - 300) * 1000;
+  }
+  const r = await fetch('https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(MS.from) + '/sendMail', { method: 'POST', headers: { Authorization: 'Bearer ' + msTok, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: { subject, body: { contentType: 'Text', content: text }, toRecipients: [{ emailAddress: { address: to } }] }, saveToSentItems: true }) });
+  if (r.status === 401) msTok = null;
+  if (!r.ok) { const t = await r.text(); throw new Error('Outlook would not send (' + r.status + '): ' + (/Authorization_RequestDenied|ErrorAccessDenied|403/.test(t + r.status) ? 'the app needs the Mail.Send application permission with admin consent.' : t.slice(0, 200))); }
+}
+const mailFrom = () => msReady() ? MS.from : SMTP_USER;
+const mailReady = () => msReady() || !!(SMTP_USER && SMTP_PASS);
+function sendMail(to, subject, text) { return msReady() ? graphSend(to, subject, text) : smtpSend(to, subject, text); }
+function smtpSend(to, subject, text) {
+  if (!mailReady()) return Promise.reject(new Error('Email is not set up yet: add the Outlook settings (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, MAIL_FROM) in Render.'));
+  if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(to)) return Promise.reject(new Error('Bad email address: ' + to));
+  const b64 = v => Buffer.from(v, 'utf8').toString('base64'), hdr = v => /^[\x20-\x7e]*$/.test(v) ? v : '=?UTF-8?B?' + b64(v) + '?=';
+  const msg = ['From: ' + hdr('Millennial Pools Fleet') + ' <' + SMTP_USER + '>', 'To: <' + to + '>', 'Subject: ' + hdr(subject), 'Date: ' + new Date().toUTCString(),
+    'Message-ID: <' + Date.now() + '.' + Math.random().toString(36).slice(2) + '@fleet-dashboard>', 'MIME-Version: 1.0', 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '',
+    b64(text.replace(/\r?\n/g, '\r\n')).replace(/.{76}/g, '$&\r\n')].join('\r\n');
+  const steps = [[220], ['EHLO fleet-dashboard', 250], ['AUTH LOGIN', 334], [b64(SMTP_USER), 334], [b64(SMTP_PASS), 235], ['MAIL FROM:<' + SMTP_USER + '>', 250], ['RCPT TO:<' + to + '>', 250], ['DATA', 354], [msg + '\r\n.', 250], ['QUIT', 221]];
+  return new Promise((ok, no) => {
+    const s = require('tls').connect(465, SMTP_HOST, { servername: SMTP_HOST }); let buf = '', i = 0, done = false;
+    const fail = e => { if (done) return; done = true; s.destroy(); no(e); };
+    s.setTimeout(20000, () => fail(new Error('Email server did not answer.')));
+    s.on('error', e => fail(new Error('Email server: ' + e.message)));
+    s.on('data', d => { buf += d; const lines = buf.split('\r\n'); buf = lines.pop();
+      for (const l of lines) { if (!/^\d{3} /.test(l)) continue;   // wait for the last line of a multi-line reply
+        const code = +l.slice(0, 3), want = steps[i][steps[i].length - 1];
+        if (code !== want) return fail(new Error(i === 4 ? 'The email login was refused. Check SMTP_USER and SMTP_PASS (use a Gmail App Password).' : 'Email server said: ' + l));
+        if (++i >= steps.length) { done = true; s.end(); return ok(); }
+        s.write(steps[i][0] + '\r\n'); } });
+  });
+}
+const mailState = () => (cache.get('mail') || {}).data || { auto: false, week: '', sent: [] };
+const saveMail = d => { cache.set('mail', { data: d, t: Date.now() }); saveSnap('mail', d); };
+// Monday at noon (Eastern) or later that week: email everyone who still hasn't done this week's check-up, once each
+async function autoMail() {
+  const st = mailState(); if (!st.auto || !mailReady()) return;
+  const now = new Date(), et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  if (et.getDay() !== 1 || et.getHours() < 12) return;   // Mondays from noon
+  const week = etDay().ymd; if (st.week !== week) { st.week = week; st.sent = []; }
+  try { const r = await routes['/api/texts/missed-checkups']();
+    for (const t of r.texts || []) { if (!t.email || st.sent.includes(t.name)) continue;
+      try { await sendMail(t.email, t.subject, t.body); st.sent.push(t.name); console.log(new Date().toISOString(), 'Check-up email sent to', t.name); }
+      catch (e) { console.error('Check-up email to', t.name, 'failed:', e.message); } }
+    saveMail(st);
+  } catch (e) { console.error('Check-up emails:', e.message); }
+}
+if (process.argv[2] !== 'test') setInterval(autoMail, 10 * 60e3);
+async function mailTest() {
+  const users = await pomUsers(), me = users.find(u => dupeName(u.name) === dupeName('Callum Curcie')) || matchPerson(users, 'Callum Curcie');
+  if (!me || !me.email) throw new Error('Could not find an email for Callum Curcie in POM.');
+  const monday = new Date(); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+  const day = monday.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'short', day: 'numeric' });
+  await sendMail(me.email, 'TEST · Truck check-up missed: ' + day, 'Hi Callum,\n\nYour weekly truck check-up for ' + day + " hasn't been submitted in Pool Office Manager yet. Please fill it out in the POM app today.\n\nThanks,\nMillennial Pools\n\n(This is a test from the fleet dashboard. The real emails go to each tech who misses their check-up.)");
+  console.log(new Date().toISOString(), 'Test check-up email sent to Callum');
+  return { ok: true, to: me.email };
 }
 async function autoCheckups() { if (!((cache.get('chkAuto') || {}).data || {}).on) return; try { const r = await applyCheckups('all'); if (r.done.length || r.failed.length) console.log('Check-up sync:', r.done.length, 'done,', r.failed.length, 'failed'); } catch (e) { console.error('Check-up sync failed:', e.message); } }
 if (process.argv[2] !== 'test') setInterval(autoCheckups, 60 * 60e3);
@@ -1788,7 +1864,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/repair/add': addRepair, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/mail/test': () => mailTest(), '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   if (POSTS[url.pathname]) {
@@ -2549,6 +2625,11 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 @keyframes wavey{to{background-position:40px 0}}@media (prefers-reduced-motion:reduce){.crewhead h2::after{animation:none}}
 
 /* vehicle notes */
+.panel{transition:box-shadow .25s,transform .25s}.panel:hover{box-shadow:0 18px 40px -22px rgba(14,116,144,.55)}
+.cm-auto{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:12px 16px;margin-bottom:12px}.cm-auto>div{display:flex;flex-direction:column;flex:1;min-width:240px}.cm-auto>div b{font-size:14px}.cm-auto>div .muted{font-size:12.5px}
+.btn2.pri{position:relative;overflow:hidden}.btn2.pri::after{content:'';position:absolute;top:0;bottom:0;left:-60%;width:40%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.45),transparent);transform:skewX(-20deg);transition:left .5s ease}.btn2.pri:hover::after{left:120%}
+.cm-list{list-style:none;margin:0;padding:0}.cm-list li{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid #eef2f7;flex-wrap:wrap}.cm-list li b{min-width:150px}.cm-list li .muted{flex:1;font-size:13px}.cm-list .btn2{text-decoration:none}
+.ctypes button{transition:transform .18s cubic-bezier(.2,1.4,.4,1),box-shadow .18s}.ctypes button:hover{transform:translateY(-3px) scale(1.04);box-shadow:0 8px 18px -8px rgba(14,116,144,.6)}
 .eli.sel{position:relative}.eli.sel::after{content:'';position:absolute;left:0;top:8px;bottom:8px;width:4px;border-radius:4px;background:linear-gradient(180deg,#22d3ee,#a78bfa,#f472b6,#22d3ee);background-size:100% 300%;animation:selflow 2.4s linear infinite}@keyframes selflow{to{background-position:0 300%}}
 .rp-ramp{font-size:10.5px;font-weight:800;color:#047857;background:#d1fae5;border-radius:6px;padding:1px 7px;text-decoration:none}.rp-ramp:hover{background:#a7f3d0}.rp-chip.unk{background:#94a3b8}
 .pbs{position:relative;overflow:hidden}.pbs::after{content:'';position:absolute;top:0;bottom:0;left:-40%;width:30%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.22),transparent);transform:skewX(-18deg);animation:pbsheen 5.5s ease-in-out infinite;pointer-events:none}@keyframes pbsheen{0%,55%{left:-40%}100%{left:130%}}
@@ -2696,8 +2777,8 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
  <div id="pbSum"></div><div id="pbList" class="tgrid"></div>
 </div>
 <div id="vChk" hidden>
- <div class="crewhead"><div><h2>Truck check-ups</h2><p id="chkCount" class="muted">Loading check-ups from Pool Office Manager...</p></div></div>
- <div id="chkSum"></div><div id="chkPlan"></div><div id="chkGrid"></div>
+ <div class="crewhead"><div><h2>Truck check-ups</h2><p id="chkCount" class="muted">Loading check-ups from Pool Office Manager...</p></div><span style="flex:1"></span><button class="btn2 pri" id="chkMail">✉️ Email who missed</button></div>
+ <div id="chkMailAuto"></div><div id="chkMailBox"></div><div id="chkSum"></div><div id="chkPlan"></div><div id="chkGrid"></div>
 </div>
 <div id="vRep" hidden>
  <div class="crewhead"><div><h2>Repairs</h2><p id="repCount" class="muted">Loading repairs from Airtable...</p></div><span style="flex:1"></span><button class="btn2" id="repMiss" aria-pressed="false">Missing a total</button><button class="btn2" id="repLink">🔗 Share upload link</button><button class="btn2 pri" id="repAdd">📷 Add invoice</button></div>
@@ -3705,11 +3786,31 @@ function moveTab(){const b=document.querySelector('.tabs button.on'),i=document.
 addEventListener('resize',moveTab);(document.fonts&&document.fonts.ready||Promise.resolve()).then(moveTab);setTimeout(moveTab,50);
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));moveTab();
-  ['vMap','vEdit','vDrv','vPom','vCam','vChk','vRep'].forEach(v=>$(v).hidden=b.dataset.v!==v);if(b.dataset.v==='vChk')loadChk();if(b.dataset.v==='vRep')loadRep();if(b.dataset.v==='vPom')loadPomBoard();if(b.dataset.v==='vCam')loadCamTab();if(b.dataset.v==='vMap'&&sel&&TRUCKV.length)drawCams();document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
+  ['vMap','vEdit','vDrv','vPom','vCam','vChk','vRep'].forEach(v=>$(v).hidden=b.dataset.v!==v);if(b.dataset.v==='vChk'){loadChk();mailPanel()}if(b.dataset.v==='vRep')loadRep();if(b.dataset.v==='vPom')loadPomBoard();if(b.dataset.v==='vCam')loadCamTab();if(b.dataset.v==='vMap'&&sel&&TRUCKV.length)drawCams();document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
   if(b.dataset.v!=='vMap')loadSync();if(b.dataset.v==='vEdit')renderEdit();else if(b.dataset.v==='vDrv'){if(!PEOPLE)loadPeople();else renderDrivers()}else map.invalidateSize();
 });
 $('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();if(!$('vPom').hidden)renderPom();if(!$('vCam').hidden)renderCamTab();if(!$('vChk').hidden)renderChk();if(!$('vRep').hidden)renderRep();};
 /*repadd*/
+// Automatic emails: setup status, a test send to Callum, and the Monday switch
+async function mailPanel(){const el=$('chkMailAuto');if(!el)return;let st;try{st=await get('/api/mail/status')}catch(e){el.innerHTML='';return}
+  el.innerHTML='<div class="cm-auto"><div><b>Automatic emails</b><span class="muted">'+(st.ready?'Sent from '+esc(st.from)+' every Monday at noon to anyone who hasn’t submitted yet.'+(st.sent&&st.sent.length?' This week: '+st.sent.map(esc).join(', ')+'.':''):'Not set up yet: add the Outlook settings in Render (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, MAIL_FROM).')+'</span></div>'
+    +'<button class="btn2" id="mailTest"'+(st.ready?'':' disabled')+'>Send test email to me</button><label class="cauto"><input type="checkbox" id="mailAuto"'+(st.auto?' checked':'')+(st.ready?'':' disabled')+'> Email automatically</label><span class="muted" id="mailMsg" style="width:100%;font-size:12.5px"></span></div>';
+  $('mailTest').onclick=async e=>{const b=e.currentTarget;b.disabled=true;$('mailMsg').textContent='Sending...';try{const r=await post('/api/mail/test',{});$('mailMsg').textContent='Test email sent to '+r.to+'. Check that inbox (and spam).'}catch(err){$('mailMsg').textContent=err.message}b.disabled=false};
+  $('mailAuto').onchange=async e=>{try{const r=await post('/api/mail/auto',{on:e.target.checked});$('mailMsg').textContent=r.auto?'On: emails go out Mondays at noon.':'Off.'}catch(err){e.target.checked=!e.target.checked;$('mailMsg').textContent=err.message}}}
+
+// Email everyone who hasn't done this week's check-up, from your own email app (addresses come from POM users)
+document.addEventListener('click',async e=>{if(e.target.closest('#chkMailX')){$('chkMailBox').innerHTML='';return}if(!e.target.closest('#chkMail'))return;const box=$('chkMailBox');box.innerHTML='<div class="panel rp-add"><span class="muted">Checking who still needs to submit...</span></div>';
+  try{const r=await get('/api/texts/missed-checkups');if(!r.connected){box.innerHTML='<div class="panel rp-add">Pool Office Manager is not connected.</div>';return}
+    const L=r.texts.filter(t=>t.email),no=r.texts.filter(t=>!t.email).map(t=>t.name).concat((r.skipped||[]).map(s=>s.name));
+    if(!r.texts.length&&!no.length){box.innerHTML='<div class="panel rp-add"><div class="rp-addh"><b>Everyone has done this week’s check-up 🎉</b><button class="btn2" id="chkMailX">Close</button></div></div>';return}
+    const subj=L[0]?L[0].subject:'Truck check-up missed',all='mailto:?bcc='+encodeURIComponent(L.map(t=>t.email).join(','))+'&subject='+encodeURIComponent(subj)+'&body='+encodeURIComponent('Hi,\\n\\nYour weekly truck check-up for this week hasn’t been submitted in Pool Office Manager yet. Please fill it out in the POM app today.\\n\\nThanks,\\nMillennial Pools');
+    box.innerHTML='<div class="panel rp-add"><div class="rp-addh"><b>'+r.texts.length+' still need to submit this week’s check-up</b><button class="btn2" id="chkMailX">Close</button></div>'
+      +(L.length?'<a class="btn2 pri" style="display:block;text-align:center;text-decoration:none;margin-bottom:10px" href="'+esc(all)+'">✉️ Email all '+L.length+' (each gets their own copy)</a>':'')
+      +'<ul class="cm-list">'+L.map(t=>'<li><b>'+esc(t.name)+'</b><span class="muted">'+esc(t.email)+'</span><a class="btn2" href="'+esc('mailto:'+t.email+'?subject='+encodeURIComponent(t.subject)+'&body='+encodeURIComponent(t.body))+'">Email</a></li>').join('')
+      +no.map(n=>'<li><b>'+esc(n)+'</b><span class="muted">No email in POM</span></li>').join('')+'</ul>'
+      +'<p class="muted" style="font-size:12px;margin:8px 0 0">Opens in your email app so you can check it before sending. Emails come from each person’s POM user. With the Mac set up, these also go out on their own every Monday at noon.</p></div>'}
+  catch(err){box.innerHTML='<div class="panel rp-add">'+esc(err.message)+'</div>'}});
+
 document.addEventListener('click',async e=>{if(!e.target.closest('#repLink'))return;try{const r=await post('/api/repair/link',{}),u=location.origin+r.url;
   $('repNew').innerHTML='<div class="panel rp-add"><div class="rp-addh"><b>Invoice upload link</b><button class="btn2" id="repX">Close</button></div><p class="muted" style="font-size:13px;margin:0 0 10px">Anyone with this link can take a photo and add an invoice to a truck. They can\u2019t see or change anything else. It works for 1 year.</p><div class="lnk"><input readonly value="'+esc(u)+'" id="repLinkU" style="flex:1;font:inherit;padding:10px;border:1px solid #cbd5e1;border-radius:10px;min-width:0"><button class="btn2 pri" id="repCopy">Copy</button></div>'+(navigator.share?'<button class="btn2" id="repShare" style="width:100%;margin-top:8px">Send link...</button>':'')+'</div>';
   $('repCopy').onclick=()=>{navigator.clipboard.writeText(u).then(()=>toast('Link copied'),()=>{$('repLinkU').select()})};if($('repShare'))$('repShare').onclick=()=>navigator.share({title:'Add a truck invoice',url:u}).catch(()=>{})}catch(err){toast(err.message,'bad')}});
