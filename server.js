@@ -283,7 +283,7 @@ const { AIRTABLE_TOKEN } = process.env;
 const AT_BASE = 'appxOcqhRSdoWgHE3', AT_TRUCKS = 'tbl3aU0dRPvn79Ba1', AT_DRIVERS = 'tbl9oEuseNwk23jdg';
 const F = { vin: 'fldT4fSSnXnZuj2Jr', year: 'fldqjqyAK1ZJfn0oT', make: 'fldOhan3is4yEhucl', model: 'fldM01jCShSILujYB',
   truckNo: 'fldYmYqWTfoYoRvjB', policy: 'fldWlS28YbpsipR7r', driver: 'fldEO66ezgMWnguAu', plate: 'fldLGLwnLOAfpw88W',
-  insCard: 'fldH0Pe6EKyQEBmMR', files: 'fldS5YJgDrLDbxSiK', regRenew: 'fldjFFBZ0UoO4SUXV', ezpass: 'fld1utE81nDdDiqgi', active: 'fldBpQ0MA5cD9YJ06', snap: 'fldOaFfl7ZzS72xLK' };
+  insCard: 'fldH0Pe6EKyQEBmMR', files: 'fldS5YJgDrLDbxSiK', regRenew: 'fldjFFBZ0UoO4SUXV', ezpass: 'fld1utE81nDdDiqgi', active: 'fldBpQ0MA5cD9YJ06', snap: 'fldOaFfl7ZzS72xLK', notes: 'fldkWorOJHdYaLCy5' };
 // Drivers. Date of birth is only ever written (new driver form), never read or shown.
 const D = { name: 'fldMrVtrXN6WDaOjj', license: 'fldcSIYqy5FCEC0Xn', state: 'fld1NdVP4v6QcckK2', pic: 'fldZeCHS22kI7Ythi',
   policy: 'fldVo5IrWedsKvumK', trucks: 'fld47HPqHRrw9GUL7', notes: 'fldSnexzpxIG22gF0', status: 'fldVuSDYSZVHk0fWN',
@@ -331,7 +331,7 @@ const atData = () => cached('airtable', 60, async () => {
       truckNo: clean(f[F.truckNo]), policy: clean(f[F.policy]?.name ?? f[F.policy]), plate: clean(f[F.plate]),
       regRenew: clean(f[F.regRenew]), ezpass: clean(f[F.ezpass]), active: !!f[F.active],
       driver: (f[F.driver] || []).map(id => byId[id]).filter(Boolean)[0] || null, snap: parseSnap(f[F.snap]),
-      insCard: att(f[F.insCard]), files: att(f[F.files]),
+      insCard: att(f[F.insCard]), files: att(f[F.files]), notes: String(f[F.notes] || ''),
     }; }),
   };
 });
@@ -606,6 +606,20 @@ async function uploadLicense(recId, name, photo) {
 }
 const okPhoto = p => p && /^image\/(jpeg|png|webp)$/.test(p.type) && typeof p.data === 'string' && p.data.length < 7e6;
 
+// Truck notes: one line per note, newest first, e.g. "Oct 7, 2026 · From Jack Henry's check-up (Sep 24): Rear brakes replaced"
+async function addTruckNote(b) {
+  const at = await atData(), t = at.trucks.find(x => x.id === String(b.truckId || ''));
+  if (!t) throw new Error('That truck is not in Airtable. Refresh and try again.');
+  const txt = text(b.text, 500, 'Note').replace(/\s+/g, ' ');
+  if (!txt) throw new Error('Write a note first.');
+  const src = clean(b.source).replace(/\s+/g, ' ').slice(0, 120);
+  const day = new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium' });
+  const notes = (day + ' · ' + (src ? src + ': ' : '') + txt + (t.notes ? '\n' + t.notes : '')).slice(0, 90000);
+  await airtable(AT_TRUCKS, { method: 'PATCH', body: JSON.stringify({ records: [{ id: t.id, fields: { [F.notes]: notes } }] }) });
+  cache.delete('airtable');
+  console.log(new Date().toISOString(), 'Truck note added', t.truckNo || t.id);
+  return { ok: true, notes };
+}
 async function updateDriver(b) {
   const at = await atData(), d = at.drivers.find(x => x.id === b.id);
   if (!d) throw new Error('Driver not found in Airtable. Refresh and try again.');
@@ -1506,6 +1520,32 @@ function fleetHtml(rows, shareUrl, link) {
 // Every driver's score in one small call (for the chips on truck cards and in the Drivers list)
 routes['/api/scores'] = () => cached('scoresAll', 300, async () => { if (!Object.keys(EVA.ev).length) return {};
   return Object.fromEntries((await fleetReport()).map(x => [dupeName(x.name), x.r.score])); });
+// The "Vehicle notes" box on a check-up: pick the truck, write what was done, it's added to the truck in Airtable
+function truckNotesCard(trucks, truck, who, v, when) {
+  const label = t => [t.truckNo && '#' + t.truckNo.split(/[ ~(]/)[0], t.year, t.make, t.model].filter(Boolean).join(' ') || 'Truck';
+  const issue = (v.customFields || []).map(c => ({ n: ((c.newCustomField || c.customField || {}).name || ''), v: clean(c.value) })).find(x => /issue|problem|damage|repair/i.test(x.n));
+  const pre = issue && issue.v && !/^(none|no|n\/a|na|nothing|-)$/i.test(issue.v) ? issue.v : '';
+  const day = new Date(v.endTime || v.startTime || Date.now()).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' });
+  const src = who + '’s check-up (' + day + ')';
+  const old = truck && truck.notes ? truck.notes.split('\n').filter(Boolean) : [];
+  return `<div class="card" id="vn"><h3 style="margin-top:0">Vehicle notes</h3>
+<p class="muted" style="margin-top:-4px">Saved to the truck in Airtable and shown in Edit vehicles. Use it for maintenance done, things to fix, or updates.</p>
+<label style="display:block;font-size:12px;font-weight:600;color:#64748b;margin-bottom:4px">Truck</label>
+<select id="vnTruck" style="font:inherit;padding:8px 10px;border:1px solid #cbd5e1;border-radius:10px;margin-bottom:10px;min-width:260px">${truck ? '' : '<option value="">Pick a truck</option>'}${trucks.slice().sort((a, b) => label(a).localeCompare(label(b), undefined, { numeric: true })).map(t => `<option value="${H(t.id)}"${truck && t.id === truck.id ? ' selected' : ''}>${H(label(t))}</option>`).join('')}</select>
+<textarea id="vnText" rows="3" maxlength="500" placeholder="e.g. Rear brakes replaced, oil changed at 184,300 mi" style="display:block;width:100%;box-sizing:border-box;font:inherit;padding:10px 12px;border:1px solid #cbd5e1;border-radius:12px">${H(pre)}</textarea>
+${pre ? '<p class="muted" style="font-size:12.5px;margin:6px 0 0">Filled in from their answer about issues with the truck. Edit it before saving.</p>' : ''}
+<button id="vnSave" style="margin-top:10px;font:inherit;font-weight:700;color:#fff;background:#0891b2;border:0;border-radius:10px;padding:9px 16px;cursor:pointer">Save note to truck</button> <span id="vnMsg" class="muted"></span>
+<ul id="vnList" style="list-style:none;padding:0;margin:14px 0 0">${old.map(n => '<li style="padding:8px 0;border-top:1px solid #e2e8f0">' + H(n) + '</li>').join('')}</ul></div>
+<script>
+const trucks=${JSON.stringify(Object.fromEntries(trucks.map(t => [t.id, t.notes || ''])))};
+const list=()=>{const n=(trucks[vnTruck.value]||'').split('\\n').filter(Boolean),e=document.createElement('div');vnList.innerHTML=n.map(x=>{e.textContent=x;return '<li style="padding:8px 0;border-top:1px solid #e2e8f0">'+e.innerHTML+'</li>'}).join('')};
+vnTruck.onchange=list;
+vnSave.onclick=async()=>{if(!vnTruck.value){vnMsg.textContent='Pick the truck first.';return}vnSave.disabled=true;vnMsg.textContent='Saving...';
+  try{const r=await fetch('/api/truck/note',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({truckId:vnTruck.value,text:vnText.value,source:${JSON.stringify('From ' + src)}})}),j=await r.json();
+    if(!r.ok)throw new Error(j.error||'Could not save');trucks[vnTruck.value]=j.notes;list();vnText.value='';vnMsg.textContent='Saved to the truck ✓'}
+  catch(e){vnMsg.textContent=e.message}vnSave.disabled=false};
+</script>`;
+}
 // One submitted truck check-up, laid out like the score reports (logged-in only)
 async function serveCheckup(res, id) {
   const send = (code, h) => { res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }); res.end(h); };
@@ -1534,7 +1574,8 @@ async function serveCheckup(res, id) {
     const body = `<div class="card"><div class="head"><span class="score good" style="font-size:20px">✓<i>done</i></span><div><h2>${H(who)}</h2><div class="muted">Submitted ${H(when(v.endTime || v.startTime || v.createdAt))}${truck ? ' · ' + H([truck.truckNo && '#' + truck.truckNo.split(/[ ~(]/)[0], truck.year, truck.make, truck.model].filter(Boolean).join(' ')) : ''}${v.customServiceReport && v.customServiceReport.name ? ' · ' + H(v.customServiceReport.name) : ''}</div></div></div></div>`
       + `<div class="card"><h3 style="margin-top:0">Answers</h3>${ans ? '<div class="ans">' + ans + '</div>' : '<p class="muted">No form answers on this submission.</p>'}</div>`
       + `<div class="card"><h3 style="margin-top:0">Photos</h3>${pics.length ? '<div class="pics">' + pics.map(x => `<figure><a href="${H(x.full)}" target="_blank" rel="noopener"><img src="${H(x.url)}" alt="${H(x.cap || 'Check-up photo')}" loading="lazy"></a>${x.cap ? '<figcaption>' + H(x.cap) + '</figcaption>' : ''}</figure>`).join('') + '</div>' : '<p class="muted">No photos were added.</p>'}</div>`
-      + (notes.length ? `<div class="card"><h3 style="margin-top:0">Notes</h3>${notes.map(n => '<p>' + H(n) + '</p>').join('')}</div>` : '');
+      + (notes.length ? `<div class="card"><h3 style="margin-top:0">Notes</h3>${notes.map(n => '<p>' + H(n) + '</p>').join('')}</div>` : '')
+      + truckNotesCard(at.trucks, truck, who, v, when);
     return send(200, shell('Truck check-up · ' + who, body));
   } catch (e) { return send(503, shell('Check-up', '<div class="card">Could not load this check-up from Pool Office Manager: ' + H(e.message) + '</div>')); }
 }
@@ -1580,7 +1621,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/truck/note': addTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   if (POSTS[url.pathname]) {
@@ -2331,6 +2372,17 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 /* ===== v21: wavy water underline on page titles ===== */
 .crewhead h2{position:relative;padding-bottom:9px}.crewhead h2::after{content:'';position:absolute;left:0;bottom:0;width:min(100%,180px);height:8px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 8'%3E%3Cpath d='M0 4 Q5 0 10 4 T20 4 T30 4 T40 4' fill='none' stroke='%2322d3ee' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E") 0 0/40px 8px repeat-x;animation:wavey 2.2s linear infinite;opacity:.9}
 @keyframes wavey{to{background-position:40px 0}}@media (prefers-reduced-motion:reduce){.crewhead h2::after{animation:none}}
+
+/* vehicle notes */
+.vnotes{margin-top:12px;padding-top:10px;border-top:1px dashed rgba(14,116,144,.25)}.vnh{display:flex;align-items:baseline;gap:8px}.vnh .muted{font-size:12px}
+.vnadd{display:flex;gap:6px;margin:8px 0}.vnadd input{flex:1;min-width:0;font:inherit;font-size:13px;padding:7px 10px;border:1px solid var(--line2);border-radius:9px;background:#fff}
+.vnotes ul{list-style:none;margin:0;padding:0}.vnotes li{font-size:13px;padding:6px 0;border-top:1px solid rgba(14,116,144,.12)}
+
+/* ===== v22: frosted-glass map legend with a pulsing Moving dot ===== */
+.legend{background:rgba(255,255,255,.62)!important;backdrop-filter:blur(10px) saturate(1.4);-webkit-backdrop-filter:blur(10px) saturate(1.4);border:1px solid rgba(255,255,255,.7)!important;box-shadow:0 8px 24px -10px rgba(8,74,99,.45)!important}
+.legend span:first-child i{animation:legpulse 1.8s ease-out infinite}
+@keyframes legpulse{0%{box-shadow:0 0 0 0 rgba(22,163,74,.6)}100%{box-shadow:0 0 0 7px rgba(22,163,74,0)}}
+@media (prefers-reduced-motion:reduce){.legend span:first-child i{animation:none}}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -2703,6 +2755,14 @@ document.addEventListener('click',async e=>{
   try{await post('/api/update',{trackeeId:vid(v),vin});vehicles=list(await get('/api/vehicles'));await loadAT();openEd(vid(v))}
   catch(err){m.style.color='var(--bad)';m.textContent=err.message;e.target.disabled=false}
 });
+// Vehicle notes from Airtable, newest first, with a box to add one
+function notesBox(t){const n=String(t.notes||'').split('\\n').filter(Boolean);
+  return '<div class="vnotes"><div class="vnh"><b>Vehicle notes</b><span class="muted">'+(n.length?n.length+' note'+(n.length>1?'s':''):'None yet')+'</span></div>'
+    +'<div class="vnadd"><input maxlength="500" placeholder="Add a note: maintenance done, things to fix..." data-vn="'+esc(t.id)+'"><button class="btn2" data-vnsave="'+esc(t.id)+'">Add</button></div>'
+    +(n.length?'<ul>'+n.slice(0,6).map(x=>'<li>'+esc(x)+'</li>').join('')+(n.length>6?'<li class="muted">+'+(n.length-6)+' older in Airtable</li>':'')+'</ul>':'')+'</div>'}
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-vnsave]');if(!b)return;const i=document.querySelector('[data-vn="'+b.dataset.vnsave+'"]');if(!i||!i.value.trim())return i&&i.focus();
+  b.disabled=true;try{await post('/api/truck/note',{truckId:b.dataset.vnsave,text:i.value});i.value='';toast('Note saved to the truck');await loadAT();if(sel)select(sel)}catch(err){toast(err.message,'bad')}b.disabled=false});
+document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.matches('[data-vn]')){e.preventDefault();const b=document.querySelector('[data-vnsave="'+e.target.dataset.vn+'"]');if(b)b.click()}});
 function atBox(id){
   if(!AT)return '<div class="at off">Loading Airtable...</div>';
   if(!AT.connected)return '<div class="at off">Airtable is not connected yet.</div>';
@@ -2713,7 +2773,7 @@ function atBox(id){
   return '<div class="at"><h4>Paperwork from Airtable</h4><div class="kvs">'
    +'<div><span>Driver</span>'+drvLine(t.driver)+'</div><div><span>Plate</span>'+esc(t.plate||'–')+'</div><div><span>Insurance policy</span>'+esc(t.policy||'–')+'</div>'
    +'<div><span>Reg. renewal #</span>'+esc(t.regRenew||'–')+'</div><div><span>EZ Pass</span>'+esc(t.ezpass||'–')+'</div><div><span>VIN</span>'+esc(t.vin||'–')+'</div></div>'+docBtns(t)
-   +(Object.keys(L.changes||{}).length?'<div class="note">Azuga is out of date for this truck. Open it in Edit vehicles to sync.</div>':'')+'</div>';
+   +(Object.keys(L.changes||{}).length?'<div class="note">Azuga is out of date for this truck. Open it in Edit vehicles to sync.</div>':'')+notesBox(t)+'</div>';
 }
 
 // ---- Edit tab: one truck at a time ----
@@ -2779,7 +2839,7 @@ async function openEd(id){
 
    +(lk?'<div class="at"><h4>Linked to Airtable'+(L.truck.truckNo?' truck #'+esc(L.truck.truckNo):'')+' · matched by '+esc(L.how)+'</h4>'
       +(Object.keys(L.changes).length?'Fields marked <span class="fromAt">FROM AIRTABLE</span> have newer info in Airtable. Click Save to update Azuga.':'Azuga matches Airtable.')
-      +(L.notes||[]).map(n=>'<div class="note">'+esc(n)+'</div>').join('')+'<div style="margin-top:6px"><b>Driver in Airtable:</b> '+drvLine(L.truck.driver)+'</div>'+docBtns(L.truck)+'</div>'
+      +(L.notes||[]).map(n=>'<div class="note">'+esc(n)+'</div>').join('')+'<div style="margin-top:6px"><b>Driver in Airtable:</b> '+drvLine(L.truck.driver)+'</div>'+docBtns(L.truck)+notesBox(L.truck)+'</div>'
      :linkBox(v))
    +[...FIELDS,...(lk?[AT_FIELDS]:[])].map(([g,fs])=>'<fieldset><legend>'+g+'</legend><div class="fg">'+fs.map(input).join('')+'</div></fieldset>').join('')
    +'<div class="edb"><button class="btn2" id="edPrev"'+(i>0?'':' disabled')+'>← Previous</button><button class="btn2" id="edNext"'+(i<rs.length-1?'':' disabled')+'>Next →</button><span style="flex:1"></span><span id="edMsg"></span><button class="btn2" id="edSave">Save</button><button class="btn2 pri" id="edSaveNext">Save &amp; next →</button></div>';
