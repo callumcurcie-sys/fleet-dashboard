@@ -134,11 +134,11 @@ const routes = {
     list.forEach(s => { const day = etDay(new Date(s.time)).ymd, ai = v => v.appointmentIdentifier || {}, hit = svcs.find(v => (s.id && ai(v).id === s.id) || (s.ruleId && ai(v).recurringRuleId === s.ruleId && Date.parse(ai(v).recurringDate) === Date.parse(s.rdate || s.time)))
       || svcs.find(v => svcName(v) === s.tech && etDay(new Date(v.startTime)).ymd === day);
       if (hit) { s.service = hit.id; s.done = true; } });
-    const at = await atData().catch(() => ({ drivers: [] })), people = at.drivers.filter(d => d.name && d.status !== 'Inactive'), roles = {}, phones = {}, seen = new Set();
-    [...new Set(list.map(s => s.tech))].forEach(n => { const m = matchPerson(drivers, n), p = matchPerson(people, n); trucks[n] = m ? m.v : null; roles[n] = p ? p.role : ''; phones[n] = p ? p.phone : ''; if (p) seen.add(p.id); });
+    const at = await atData().catch(() => ({ drivers: [] })), people = at.drivers.filter(d => d.name && d.status !== 'Inactive'), roles = {}, phones = {}, emails = {}, seen = new Set();
+    [...new Set(list.map(s => s.tech))].forEach(n => { const m = matchPerson(drivers, n), p = matchPerson(people, n); trucks[n] = m ? m.v : null; roles[n] = p ? p.role : ''; phones[n] = p ? p.phone : ''; emails[n] = p ? p.email : ''; if (p) seen.add(p.id); });
     // Techs, tech assistants and auditors submit the weekly truck form; owners, district, regional and staffers don't
     const missing = people.filter(d => CHECKUP_ROLES.includes(d.role) && !seen.has(d.id)).map(d => ({ name: d.name, role: d.role }));
-    return { connected: true, now: Date.now(), today: etDay().ymd, weeks, checkups: list.sort((a, b) => Date.parse(b.time) - Date.parse(a.time)), trucks, roles, phones, missing }; },
+    return { connected: true, now: Date.now(), today: etDay().ymd, weeks, checkups: list.sort((a, b) => Date.parse(b.time) - Date.parse(a.time)), trucks, roles, phones, emails, missing }; },
   // Read by the iMessage script on the Mac: who hasn't done this week's check-up yet, with the text to send them
   '/api/texts/missed-checkups': async () => {
     const d = await routes['/api/pom/checkups'](new URLSearchParams('weeks=1'));
@@ -147,8 +147,8 @@ const routes = {
     const monday = +etDay().start - wd * 864e5, texts = [], skipped = [], seen = new Set(), users = await pomUsers().catch(() => null);
     d.checkups.filter(c => !c.done && Date.parse(c.time) >= monday && Date.parse(c.time) < now && CHECKUP_ROLES.includes(d.roles[c.tech])).forEach(c => {
       if (seen.has(c.tech)) return; seen.add(c.tech);
-      const ph = String(d.phones[c.tech] || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''), u = users && matchPerson(users, c.tech), email = u && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(u.email) ? u.email : '';
-      if (ph.length !== 10 && !email) return skipped.push({ name: c.tech, why: 'No phone in Airtable and no email in POM' });
+      const ph = String(d.phones[c.tech] || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''), u = users && matchPerson(users, c.tech), em = (d.emails || {})[c.tech] || (u && u.email) || '', email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em) ? em : '';
+      if (ph.length !== 10 && !email) return skipped.push({ name: c.tech, why: 'No phone or email in Airtable' });
       const day = new Date(c.time).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'short', day: 'numeric' }), first = c.tech.split(' ')[0];
       texts.push({ name: c.tech, phone: ph.length === 10 ? '+1' + ph : '', email, message: 'Hi ' + first + ', reminder: your weekly truck check-up for ' + day + " hasn't been submitted in POM yet. Please fill it out today. Thanks!",
         subject: 'Truck check-up missed: ' + day, body: 'Hi ' + first + ',\n\nYour weekly truck check-up for ' + day + " hasn't been submitted in Pool Office Manager yet. Please fill it out in the POM app today.\n\nThanks,\nMillennial Pools" });
@@ -308,7 +308,7 @@ const F = { vin: 'fldT4fSSnXnZuj2Jr', year: 'fldqjqyAK1ZJfn0oT', make: 'fldOhan3
 // Drivers. Date of birth is only ever written (new driver form), never read or shown.
 const D = { name: 'fldMrVtrXN6WDaOjj', license: 'fldcSIYqy5FCEC0Xn', state: 'fld1NdVP4v6QcckK2', pic: 'fldZeCHS22kI7Ythi',
   policy: 'fldVo5IrWedsKvumK', trucks: 'fld47HPqHRrw9GUL7', notes: 'fldSnexzpxIG22gF0', status: 'fldVuSDYSZVHk0fWN',
-  phone: 'fldNxN3OyrU3TFAjQ', azId: 'fldgBxpfEnLCwdIzS', snap: 'fldhuLqirXbDaAy89', role: 'fld2dWRGDGFmhpbDt' };
+  phone: 'fldNxN3OyrU3TFAjQ', azId: 'fldgBxpfEnLCwdIzS', snap: 'fldhuLqirXbDaAy89', role: 'fld2dWRGDGFmhpbDt', email: 'fldqh3XV7jAkxuLPe' };
 const ROLES = ['Tech', 'Tech assistant', 'District', 'Regional', 'Owner', 'Auditor', 'Staffer'], CHECKUP_ROLES = ['Tech', 'Tech assistant', 'Auditor'];
 const D_DOB = 'fldFMJ06wrdGolZkS';
 
@@ -343,7 +343,7 @@ const atData = () => cached('airtable', 60, async () => {
   const drivers = drv.map(r => ({ id: r.id, name: clean(r.fields[D.name]), license: clean(r.fields[D.license]), state: clean(r.fields[D.state]),
     policy: clean(r.fields[D.policy]?.name ?? r.fields[D.policy]), notes: clean(r.fields[D.notes]), truckIds: r.fields[D.trucks] || [], pic: att(r.fields[D.pic]),
     status: clean(r.fields[D.status]?.name ?? r.fields[D.status]) || 'Active', role: clean(r.fields[D.role]?.name ?? r.fields[D.role]),
-    phone: clean(r.fields[D.phone]), azId: clean(r.fields[D.azId]), snap: parseSnap(r.fields[D.snap]) }));
+    phone: clean(r.fields[D.phone]), email: clean(r.fields[D.email] || ''), azId: clean(r.fields[D.azId]), snap: parseSnap(r.fields[D.snap]) }));
   const byId = Object.fromEntries(drivers.map(d => [d.id, d]));
   return {
     drivers,
@@ -1127,7 +1127,7 @@ let pomUserEmail = true;
 const pomUsers = () => cached('pomusers', 3600, async () => { const out = []; let after = null;
   for (let i = 0; i < 20; i++) { let d;
     try { d = await pom('query($a: String) { infiniteUsers(first: 50, after: $a) { edges { node { id firstName lastName isActive' + (pomUserEmail ? ' email' : '') + ' } } pageInfo { endCursor hasNextPage } } }', { a: after }); }
-    catch (e) { if (!pomUserEmail || !/email/i.test(e.message)) throw e; pomUserEmail = false; i--; continue; }
+    catch (e) { if (!pomUserEmail) throw e; pomUserEmail = false; console.log('POM users: email not readable with this API key, using Airtable emails'); out.length = 0; after = null; i = -1; continue; }
     const c = d.infiniteUsers || {}; (c.edges || []).forEach(e => e && e.node && out.push(e.node)); if (!c.pageInfo || !c.pageInfo.hasNextPage) break; after = c.pageInfo.endCursor; }
   return out.filter(u => u.isActive !== false).map(u => ({ id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' '), email: clean(u.email || '') })); });
 async function checkupPlan() {
@@ -1249,8 +1249,10 @@ async function autoMail() {
 }
 if (process.argv[2] !== 'test') setInterval(autoMail, 10 * 60e3);
 async function mailTest() {
-  const users = await pomUsers(), me = users.find(u => dupeName(u.name) === dupeName('Callum Curcie')) || matchPerson(users, 'Callum Curcie');
-  if (!me || !me.email) throw new Error('Could not find an email for Callum Curcie in POM.');
+  const at = await atData(), d = at.drivers.find(x => dupeName(x.name) === dupeName('Callum Curcie'));
+  const users = d && d.email ? [] : await pomUsers().catch(() => []), u = users.find(x => dupeName(x.name) === dupeName('Callum Curcie'));
+  const me = { email: (d && d.email) || (u && u.email) || '' };
+  if (!me.email) throw new Error('Could not find an email for Callum Curcie (Drivers table in Airtable).');
   const monday = new Date(); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
   const day = monday.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'short', day: 'numeric' });
   await sendMail(me.email, 'TEST · Truck check-up missed: ' + day, 'Hi Callum,\n\nYour weekly truck check-up for ' + day + " hasn't been submitted in Pool Office Manager yet. Please fill it out in the POM app today.\n\nThanks,\nMillennial Pools\n\n(This is a test from the fleet dashboard. The real emails go to each tech who misses their check-up.)");
@@ -2625,6 +2627,8 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 @keyframes wavey{to{background-position:40px 0}}@media (prefers-reduced-motion:reduce){.crewhead h2::after{animation:none}}
 
 /* vehicle notes */
+.role{transition:transform .18s cubic-bezier(.2,1.4,.4,1)}tr:hover .role,.drow:hover .role{transform:scale(1.08) rotate(-2deg)}
+.tchip{transition:transform .18s cubic-bezier(.2,1.4,.4,1),box-shadow .18s}.tchip:hover{transform:translateY(-2px);box-shadow:0 6px 14px -6px rgba(8,145,178,.7)}
 .panel{transition:box-shadow .25s,transform .25s}.panel:hover{box-shadow:0 18px 40px -22px rgba(14,116,144,.55)}
 .cm-auto{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:12px 16px;margin-bottom:12px}.cm-auto>div{display:flex;flex-direction:column;flex:1;min-width:240px}.cm-auto>div b{font-size:14px}.cm-auto>div .muted{font-size:12.5px}
 .btn2.pri{position:relative;overflow:hidden}.btn2.pri::after{content:'';position:absolute;top:0;bottom:0;left:-60%;width:40%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.45),transparent);transform:skewX(-20deg);transition:left .5s ease}.btn2.pri:hover::after{left:120%}
@@ -3807,8 +3811,8 @@ document.addEventListener('click',async e=>{if(e.target.closest('#chkMailX')){$(
     box.innerHTML='<div class="panel rp-add"><div class="rp-addh"><b>'+r.texts.length+' still need to submit this week’s check-up</b><button class="btn2" id="chkMailX">Close</button></div>'
       +(L.length?'<a class="btn2 pri" style="display:block;text-align:center;text-decoration:none;margin-bottom:10px" href="'+esc(all)+'">✉️ Email all '+L.length+' (each gets their own copy)</a>':'')
       +'<ul class="cm-list">'+L.map(t=>'<li><b>'+esc(t.name)+'</b><span class="muted">'+esc(t.email)+'</span><a class="btn2" href="'+esc('mailto:'+t.email+'?subject='+encodeURIComponent(t.subject)+'&body='+encodeURIComponent(t.body))+'">Email</a></li>').join('')
-      +no.map(n=>'<li><b>'+esc(n)+'</b><span class="muted">No email in POM</span></li>').join('')+'</ul>'
-      +'<p class="muted" style="font-size:12px;margin:8px 0 0">Opens in your email app so you can check it before sending. Emails come from each person’s POM user. With the Mac set up, these also go out on their own every Monday at noon.</p></div>'}
+      +no.map(n=>'<li><b>'+esc(n)+'</b><span class="muted">No email in Airtable</span></li>').join('')+'</ul>'
+      +'<p class="muted" style="font-size:12px;margin:8px 0 0">Opens in your email app so you can check it before sending. Emails come from the Email column on the Drivers table in Airtable. With the Mac set up, these also go out on their own every Monday at noon.</p></div>'}
   catch(err){box.innerHTML='<div class="panel rp-add">'+esc(err.message)+'</div>'}});
 
 document.addEventListener('click',async e=>{if(!e.target.closest('#repLink'))return;try{const r=await post('/api/repair/link',{}),u=location.origin+r.url;
