@@ -2674,6 +2674,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 @keyframes wavey{to{background-position:40px 0}}@media (prefers-reduced-motion:reduce){.crewhead h2::after{animation:none}}
 
 /* vehicle notes */
+.chc.ok{transition:transform .2s cubic-bezier(.2,1.6,.4,1)}.chc.ok:hover{transform:scale(1.25) rotate(-8deg)}.chc.miss:hover{animation:chshake .35s}@keyframes chshake{25%{transform:translateX(-2px)}75%{transform:translateX(2px)}}
 .role{transition:transform .18s cubic-bezier(.2,1.4,.4,1)}tr:hover .role,.drow:hover .role{transform:scale(1.08) rotate(-2deg)}
 .tchip{transition:transform .18s cubic-bezier(.2,1.4,.4,1),box-shadow .18s}.tchip:hover{transform:translateY(-2px);box-shadow:0 6px 14px -6px rgba(8,145,178,.7)}
 .panel{transition:box-shadow .25s,transform .25s}.panel:hover{box-shadow:0 18px 40px -22px rgba(14,116,144,.55)}
