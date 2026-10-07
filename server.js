@@ -123,6 +123,10 @@ const routes = {
       const rows = await cached('pomwk:' + start.toISOString().slice(0, 10), w ? 6 * 3600 : 120, () => pomRange(start, end));
       rows.map(pomStop).filter(s => s.tech && pomCheckup(s)).forEach(s => list.push(s));
     }
+    // plus next week's, so someone who was just given a check-up shows up straight away
+    const now = new Date(), seenIds = new Set(list.map(s => s.ruleId + '|' + s.time));
+    (await cached('pomahead', 120, () => pomRange(now, new Date(+now + 15 * 864e5)))).map(pomStop)
+      .filter(s => s.tech && pomCheckup(s) && Date.parse(s.time) < +now + 8 * 864e5 && !seenIds.has(s.ruleId + '|' + s.time)).forEach(s => list.push(s));
     const td = await truckDrivers().catch(() => ({})), drivers = Object.keys(td).filter(v => td[v]).map(v => ({ name: td[v], v })), trucks = {};
     const custIds = [...new Set(list.map(s => s.customerId).filter(Boolean))], svcs = [];
     for (const c of custIds) svcs.push(...await pomServices(c).catch(e => { console.error('POM services:', e.message); return []; }));
@@ -985,9 +989,12 @@ const POM_SVC_FIELDS = `id startTime endTime internalNotes customerNotes created
   media { id description mediaType createdAt customServiceReportFieldLabel file { id url thumbnails { thumbnail450Url thumbnail900Url } } }
   customServiceReport { id name }
   customFields { id value customField { id name type } newCustomField { id name type } }`;
-const pomServices = (customerId, first = 200) => cached('pomsvc:' + customerId + ':' + first, 120, async () => {
-  const d = await pom(`query($c: String!, $n: Int!) { infiniteServices(selector: {filters: {customerId: {equals: $c}}}, first: $n, sort: {field: startTime, order: DESC}) { edges { node { ${POM_SVC_FIELDS} } } } }`, { c: customerId, n: first });
-  return ((d.infiniteServices || {}).edges || []).map(e => e.node).filter(Boolean); });
+const pomServices = customerId => cached('pomsvc:' + customerId, 120, async () => { const out = []; let after = null;   // POM pages at 50
+  for (let i = 0; i < 10; i++) {
+    const d = await pom(`query($c: String!, $a: String) { infiniteServices(selector: {filters: {customerId: {equals: $c}}}, first: 50, after: $a, sort: {field: startTime, order: DESC}) { edges { node { ${POM_SVC_FIELDS} } } pageInfo { endCursor hasNextPage } } }`, { c: customerId, a: after });
+    const c = d.infiniteServices || {}; (c.edges || []).forEach(e => e && e.node && out.push(e.node));
+    if (!c.pageInfo || !c.pageInfo.hasNextPage || out.length >= 300) break; after = c.pageInfo.endCursor; }
+  return out; });
 const pomService = async id => { const d = await pom(`query($id: ID!) { infiniteServices(selector: {filters: {id: {equals: $id}}}) { edges { node { ${POM_SVC_FIELDS} customer { id firstName lastName } } } } }`, { id });
   return (((d.infiniteServices || {}).edges || [])[0] || {}).node || null; };
 // Weekly truck check-ups live in POM as appointments ("Truck Check-Up" for "Trucks Submissions"); they aren't pool visits
@@ -2239,7 +2246,7 @@ header[data-sky=dawn] .sun,header[data-sky=dusk] .sun{background:radial-gradient
 .chs{background:linear-gradient(110deg,#7c2d12,#c2410c 55%,#f59e0b)}.chs .pbring b{font-size:13px}
 .chk{overflow-x:auto;padding:4px 0;box-shadow:inset 0 3px 0 #f59e0b,var(--sh)}.chk table{width:100%;border-collapse:collapse}
 .chk th{font-size:11.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;padding:12px 8px;text-align:center;border-bottom:1px solid var(--line);white-space:nowrap}.chk th:first-child{text-align:left;padding-left:18px}
-.chk th.now{color:#c2410c}.chk td{padding:10px 8px;text-align:center;border-bottom:1px solid var(--line)}.chk td:first-child{text-align:left;padding-left:18px}
+.chk th.now{color:#c2410c}.chk th.next{color:#0891b2}.chk td{padding:10px 8px;text-align:center;border-bottom:1px solid var(--line)}.chk td:first-child{text-align:left;padding-left:18px}
 .chk tbody tr{animation:rise .35s ease-out both;animation-delay:calc(var(--i)*40ms)}.chk tbody tr:hover{background:#fffbeb}
 .chd{display:flex;align-items:center;gap:10px}.chd b{display:block;font-size:14.5px}
 .chc{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:9px;font-weight:800;font-size:15px}
@@ -2314,6 +2321,16 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .live.down .ekg path{stroke:#f59e0b;animation:none;stroke-dashoffset:0;filter:none}
 @keyframes ekg{0%{stroke-dashoffset:60}55%{stroke-dashoffset:0}100%{stroke-dashoffset:-60}}
 @media (prefers-reduced-motion:reduce){.live .ekg path{animation:none;stroke-dashoffset:0}}
+
+/* ===== v20: Edit vehicles list striped by make ===== */
+.eli{position:relative;transition:transform .2s cubic-bezier(.2,.8,.2,1),background .15s}.eli::before{content:'';position:absolute;left:0;top:8px;bottom:8px;width:5px;border-radius:0 5px 5px 0;background:linear-gradient(#67e8f9,#0891b2);transition:width .2s}
+.eli:hover{transform:translateX(4px)}.eli:hover::before{width:8px}
+.eli:has(.mk-ford)::before{background:linear-gradient(#93c5fd,#2563eb)}.eli:has(.mk-chevy)::before{background:linear-gradient(#fde68a,#d97706)}.eli:has(.mk-ram)::before{background:linear-gradient(#fca5a5,#dc2626)}.eli:has(.mk-gmc)::before{background:linear-gradient(#f87171,#991b1b)}.eli:has(.mk-toyota)::before,.eli:has(.mk-nissan)::before{background:linear-gradient(#d4d4d8,#52525b)}
+@media (prefers-reduced-motion:reduce){.eli:hover{transform:none}}
+
+/* ===== v21: wavy water underline on page titles ===== */
+.crewhead h2{position:relative;padding-bottom:9px}.crewhead h2::after{content:'';position:absolute;left:0;bottom:0;width:min(100%,180px);height:8px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 8'%3E%3Cpath d='M0 4 Q5 0 10 4 T20 4 T30 4 T40 4' fill='none' stroke='%2322d3ee' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E") 0 0/40px 8px repeat-x;animation:wavey 2.2s linear infinite;opacity:.9}
+@keyframes wavey{to{background-position:40px 0}}@media (prefers-reduced-motion:reduce){.crewhead h2::after{animation:none}}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -3293,16 +3310,16 @@ function renderChk(){const r=CHK;if(!r)return;
   const rows=techs.map(n=>{const cs=days.map(d=>cell(n,d)),st=cs.map(state),given=st.filter(x=>x==='ok'||x==='miss'),ok=st.filter(x=>x==='ok').length;
     let streak=0;for(const x of st){if(x==='due'||x==='none')continue;if(x==='ok')streak++;else break}
     return {n,cs,st,ok,rate:given.length?Math.round(ok/given.length*100):null,streak,missed:given.length-ok}}).sort((a,b)=>b.missed-a.missed||a.n.localeCompare(b.n));
-  const cur=days[0],curSt=techs.map(n=>state(cell(n,cur))),curOk=curSt.filter(x=>x==='ok').length,curDue=curSt.filter(x=>x==='due').length;
+  const cur=days.find(d=>d<=r.today)||days[days.length-1],curSt=techs.map(n=>state(cell(n,cur))),curOk=curSt.filter(x=>x==='ok').length,curDue=curSt.filter(x=>x==='due').length;
   const lbl=d=>new Date(d+'T12:00').toLocaleDateString([],{month:'short',day:'numeric'}),wk=d=>new Date(d+'T12:00').toLocaleDateString([],{weekday:'short'});
   const curT=r.checkups.find(s=>ymd(s.time)===cur);
   $('chkCount').textContent=techs.length+' drivers · weekly form in Pool Office Manager · last '+days.length+' weeks';
   $('chkSum').innerHTML=cur?'<div class="pbs chs"><div class="pbring" style="--v:'+(techs.length?Math.round(curOk/techs.length*100):0)+'"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9" pathLength="100"/><circle class="fill" cx="18" cy="18" r="15.9" pathLength="100"/></svg><b>'+curOk+'/'+techs.length+'</b></div>'
     +'<div><b>'+wk(cur)+' '+lbl(cur)+'</b><span>this week’s check-up'+(curDue&&curT?' · due '+new Date(curT.time).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'')+'</span></div>'
     +'<div><b>'+curOk+'</b><span>submitted</span></div>'+(curDue?'<div><b>'+curDue+'</b><span>still due</span></div>':'<div><b>'+(techs.length-curOk)+'</b><span>missed</span></div>')
-    +'<div><b>'+rows.reduce((a,x)=>a+x.missed,0)+'</b><span>missed in '+days.length+' weeks</span></div></div>':'';
+    +'<div><b>'+rows.reduce((a,x)=>a+x.missed,0)+'</b><span>missed in '+days.filter(d=>d<=r.today).length+' weeks</span></div></div>':'';
   const icon={ok:'✓',miss:'✕',due:'•',none:''},word={ok:'Submitted',miss:'Missed',due:'Due',none:'Not assigned'};
-  $('chkGrid').innerHTML=rows.length?'<div class="chk panel"><table><thead><tr><th>Driver</th>'+days.map((d,i)=>'<th class="'+(i?'':'now')+'">'+wk(d)+'<br>'+lbl(d)+'</th>').join('')+'<th>On time</th><th>Streak</th></tr></thead><tbody>'
+  $('chkGrid').innerHTML=rows.length?'<div class="chk panel"><table><thead><tr><th>Driver</th>'+days.map((d,i)=>'<th class="'+(d===cur?'now':d>r.today?'next':'')+'">'+(d>r.today?'Next ':'')+wk(d)+'<br>'+lbl(d)+'</th>').join('')+'<th>On time</th><th>Streak</th></tr></thead><tbody>'
     +rows.map((x,ri)=>{const tr=r.trucks[x.n];return '<tr style="--i:'+ri+'"><td><div class="chd">'+avatar(x.n)+'<div><b>'+esc(x.n)+(role(x.n)?'<span class="role r'+RL.indexOf(role(x.n))+'">'+esc(role(x.n))+'</span>':'<span class="role" title="Set a role on the Drivers tab">No role</span>')+'</b>'+(tr?'<button class="tchip" data-truck="'+esc(tr)+'">'+tno(tr)+'Show on map</button>':'<small class="muted">No truck matched</small>')+'</div></div></td>'
       +x.st.map((st,i)=>{const s=x.cs[i],tip=word[st]+(s?' · '+esc(new Date(s.time).toLocaleString([],{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})):'')+(s&&s.service?' · click to open':'');return '<td>'+(s&&s.service?'<a class="chc '+st+' open" href="/checkup?id='+encodeURIComponent(s.service)+'" target="_blank" rel="noopener" title="'+tip+'">'+icon[st]+'</a>':'<span class="chc '+st+'" title="'+tip+'">'+icon[st]+'</span>')+'</td>'}).join('')
       +'<td><b class="chr '+(x.rate===null?'':x.rate>=80?'g':x.rate>=50?'y':'r')+'">'+(x.rate===null?'–':x.rate+'%')+'</b></td><td>'+(x.streak?'<b class="chs2">'+x.streak+' wk'+(x.streak>1?'s':'')+'</b>':'<span class="muted">–</span>')+'</td></tr>'}).join('')
