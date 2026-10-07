@@ -1053,13 +1053,18 @@ async function checkupPlan() {
     if (from && r.workerId) ops.push({ op: 'move', key: 'm:' + r.ruleId, name: r.tech, tech: r.tech, ruleId: r.ruleId, workerId: r.workerId, from: from.rdate || from.time, hour: r.hour, when: start }); });
   return { connected: true, usersOk: !!users, auto: !!((cache.get('chkAuto') || {}).data || {}).on, customer: sample && sample.customerId, serviceType: sample && sample.serviceTypeId, start, ops };
 }
-const POM_RULE_CREATE = 'mutation($data: CreateAppointmentRecurringRuleInput!) { createAppointmentRecurringRule(data: $data) { id rruleString startDate } }';
+// Same request POM's own Create Appointment form sends for a weekly appointment (copied from the form, Oct 2026)
+const POM_RULE_CREATE = 'mutation($data: CreateAppointmentV2Input!) { createAppointmentV2(data: $data) { id date recurringRuleId } }';
+const POM_NOT_BILLED = 'cm6g17pzh000d55eg870dfx5p';   // this account's "Not Billed" billing status, as the form sends it
 const POM_RULE_STOP = 'mutation($id: ID!, $from: AppointmentIdentifierInput, $all: Boolean) { stopAppointmentRecurringRule(appointmentRecurringRuleId: $id, appointmentIdentifier: $from, applyToSeries: $all) { id endDate } }';
 async function applyCheckups(keys) {
   const plan = await checkupPlan(); if (!plan.connected) throw new Error('Pool Office Manager is not connected.');
   if (!plan.customer || !plan.serviceType) throw new Error('Could not find an existing truck check-up in POM to copy the customer and service type from.');
   const todo = plan.ops.filter(o => o.op !== 'none' && (keys === 'all' || keys.includes(o.key))), done = [], failed = [];
-  const create = (workerId, when) => pom(POM_RULE_CREATE, { data: { customer: plan.customer, serviceType: plan.serviceType, workers: [workerId], duration: 60, inventoryItems: [], rruleString: chkRrule(when), startDate: when.toISOString() } });
+  const create = (workerId, when) => pom(POM_RULE_CREATE, { data: { customer: plan.customer, serviceType: plan.serviceType, color: '#87cbf7', duration: 60,
+    primaryWorker: workerId, workers: [workerId], inventoryItems: [], billingStatus: POM_NOT_BILLED, notes: '', privateNotes: '', customDescription: '', servicePrice: 0, serviceQuantity: 1,
+    date: when.toISOString(), appointmentQueue: null, project: null, priority: 'MEDIUM', linkedServiceId: null,
+    recurrence: { rrule: 'FREQ=WEEKLY;WKST=MO;BYDAY=MO;BYHOUR=' + CHK_HOUR + ';BYMINUTE=0;BYSECOND=0', timeZone: 'US/Eastern' } } });
   const stop = (ruleId, from) => pom(POM_RULE_STOP, { id: ruleId, from: { id: null, recurringRuleId: ruleId, recurringDate: from }, all: true });
   for (const o of todo) {
     try {
