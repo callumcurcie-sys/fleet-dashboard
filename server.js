@@ -1205,7 +1205,7 @@ async function graphSend(to, subject, text) {
   }
   const r = await fetch('https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(MS.from) + '/sendMail', { method: 'POST', headers: { Authorization: 'Bearer ' + msTok, 'Content-Type': 'application/json' },
     body: JSON.stringify({ message: { subject, body: { contentType: 'Text', content: text }, toRecipients: [{ emailAddress: { address: to } }] }, saveToSentItems: true }) });
-  if (r.status === 401) msTok = null;
+  if (r.status === 401 || r.status === 403) msTok = null;   // new sign-in next time, so a just-granted permission is picked up
   if (!r.ok) { const t = await r.text(); throw new Error('Outlook would not send (' + r.status + '): ' + (/Authorization_RequestDenied|ErrorAccessDenied|403/.test(t + r.status) ? 'the app needs the Mail.Send application permission with admin consent.' : t.slice(0, 200))); }
 }
 const mailFrom = () => msReady() ? MS.from : SMTP_USER;
