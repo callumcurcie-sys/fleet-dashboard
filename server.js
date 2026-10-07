@@ -113,7 +113,7 @@ const routes = {
     (await pomDay(date)).map(pomStop).filter(s => { const t = Date.parse(s.time); return !pomCheckup(s) && t >= +start && t <= +end; })
       .sort((a, b) => Date.parse(a.time) - Date.parse(b.time)).forEach(s => (by[s.tech] = by[s.tech] || []).push(s));
     const td = await truckDrivers().catch(() => ({})), drivers = Object.keys(td).filter(v => td[v]).map(v => ({ name: td[v], v }));
-    const techs = Object.entries(by).filter(([n]) => n).map(([name, stops]) => { const m = rampMatch(drivers, name);
+    const techs = Object.entries(by).filter(([n]) => n).map(([name, stops]) => { const m = matchPerson(drivers, name);
       return { name, truck: m ? m.v : null, driver: m ? m.name : null, total: stops.length, done: stops.filter(s => s.done).length, stops }; });
     return { connected: true, date, today: date === etDay().ymd, techs }; },   // stops with no tech are ignored
   '/api/pom/checkups': async q => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
@@ -135,11 +135,7 @@ const routes = {
       || svcs.find(v => svcName(v) === s.tech && etDay(new Date(v.startTime)).ymd === day);
       if (hit) { s.service = hit.id; s.done = true; } });
     const at = await atData().catch(() => ({ drivers: [] })), people = at.drivers.filter(d => d.name && d.status !== 'Inactive'), roles = {}, phones = {}, seen = new Set();
-    // POM and Airtable spell some names differently ("Jostin Acosto" / "Jostin Acosta Palacios", "Andrew Morgan" / "Andrew Louis Morgan Jr")
-    const toks = n => dupeName(n).split(' ').filter(w => w && !/^(jr|sr|ii|iii|iv)$/.test(w));
-    const sameName = (a, b) => { const x = toks(a), y = toks(b); if (!x.length || !y.length || x[0].slice(0, 3) !== y[0].slice(0, 3)) return false;
-      return x.slice(1).some(w => y.slice(1).some(v => v === w || (w.length > 3 && near(w, v)))); };
-    [...new Set(list.map(s => s.tech))].forEach(n => { const m = rampMatch(drivers, n), p = rampMatch(people, n) || people.find(d => sameName(d.name, n)); trucks[n] = m ? m.v : null; roles[n] = p ? p.role : ''; phones[n] = p ? p.phone : ''; if (p) seen.add(p.id); });
+    [...new Set(list.map(s => s.tech))].forEach(n => { const m = matchPerson(drivers, n), p = matchPerson(people, n); trucks[n] = m ? m.v : null; roles[n] = p ? p.role : ''; phones[n] = p ? p.phone : ''; if (p) seen.add(p.id); });
     // Techs, tech assistants and auditors submit the weekly truck form; owners, district, regional and staffers don't
     const missing = people.filter(d => CHECKUP_ROLES.includes(d.role) && !seen.has(d.id)).map(d => ({ name: d.name, role: d.role }));
     return { connected: true, now: Date.now(), today: etDay().ymd, weeks, checkups: list.sort((a, b) => Date.parse(b.time) - Date.parse(a.time)), trucks, roles, phones, missing }; },
@@ -414,7 +410,8 @@ async function atLinks() {
   const usedIds = new Set(Object.values(m).filter(x => x.truck).map(x => x.truck.id));
   const vinCount = {}; at.trucks.forEach(t => t.vin && (vinCount[t.vin] = (vinCount[t.vin] || 0) + 1));
   return { connected: true, links, notInAzuga: at.trucks.filter(t => !usedIds.has(t.id)).map(t => ({ id: t.id, truckNo: t.truckNo, vin: t.vin,
-    vinOk: /^[A-HJ-NPR-Z0-9]{17}$/.test(t.vin), dupVin: vinCount[t.vin] > 1, desc: [t.year, t.make, t.model].filter(Boolean).join(' ') })) };
+    vinOk: /^[A-HJ-NPR-Z0-9]{17}$/.test(t.vin), dupVin: vinCount[t.vin] > 1, desc: [t.year, t.make, t.model].filter(Boolean).join(' '),
+    plate: t.plate, active: t.active, driverName: t.driver ? t.driver.name : '', notes: t.notes, oilDate: t.oilDate, oilMiles: t.oilMiles })) };
 }
 
 // Edit tab save: Airtable first (it's the master), then Azuga.
@@ -1066,6 +1063,11 @@ const pomService = async id => { const d = await pom(`query($id: ID!) { infinite
 // Weekly truck check-ups live in POM as appointments ("Truck Check-Up" for "Trucks Submissions"); they aren't pool visits
 const pomCheckup = s => /truck\s*(check|submission|inspection)/i.test((s.type || '') + ' ' + (s.customer || ''));
 const pomDone = a => /complet|done|finish|serviced|closed/i.test(String(a.status || '') + ' ' + (a.serviceStatus && a.serviceStatus.name || ''));
+// POM, Azuga and Airtable spell some names differently ("Jostin Acosto" / "Jostin Acosta Palacios", "Andrew Morgan" / "Andrew Louis Morgan Jr")
+const nameToks = n => dupeName(n).split(' ').filter(w => w && !/^(jr|sr|ii|iii|iv)$/.test(w));
+const sameName = (a, b) => { const x = nameToks(a), y = nameToks(b); if (!x.length || !y.length || x[0].slice(0, 3) !== y[0].slice(0, 3)) return false;
+  return x.slice(1).some(w => y.slice(1).some(v => v === w || (w.length > 3 && near(w, v)))); };
+const matchPerson = (list, n) => rampMatch(list, n) || list.find(d => sameName(d.name, n));
 const pomStop = a => { const c = a.customer || {}, w = a.primaryWorker || (a.workers || []).find(x => x.primary) || (a.workers || [])[0] || {};
   return { id: a.id, ruleId: a.recurringRuleId || null, rdate: a.recurringDate || null, rrule: a.recurringRule && a.recurringRule.rruleString || '', workerId: w.id || null, serviceTypeId: a.serviceType && a.serviceType.id || null, time: a.date, mins: a.duration, status: a.status, serviceStatus: a.serviceStatus && a.serviceStatus.name, done: pomDone(a),
     type: a.serviceType && a.serviceType.display, tech: [w.firstName, w.lastName].filter(Boolean).join(' '),
@@ -2446,6 +2448,9 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 @keyframes wavey{to{background-position:40px 0}}@media (prefers-reduced-motion:reduce){.crewhead h2::after{animation:none}}
 
 /* vehicle notes */
+.nah{display:flex;justify-content:space-between;align-items:center;margin:16px 4px 6px;font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#64748b}.nah span{background:#e2e8f0;color:#334155;border-radius:999px;padding:1px 9px}
+.nai{display:block!important;cursor:default}.nai summary{display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:pointer;list-style:none}.nai summary::-webkit-details-marker{display:none}
+.nai .pill.nat{background:#f1f5f9;color:#64748b;border:1px dashed #94a3b8;font-size:11px;font-weight:700;border-radius:999px;padding:2px 8px;white-space:nowrap}.naw{margin-top:8px}.nai b .tno{margin-right:6px}
 .tcard{transition:transform .2s cubic-bezier(.2,1.4,.4,1),box-shadow .2s}.tcard:hover{transform:translateY(-4px) rotate(-.4deg);box-shadow:0 14px 30px -12px rgba(14,116,144,.55),0 0 0 2px rgba(34,211,238,.35)}
 .oilc{margin-left:auto;font-size:12px;font-weight:700;color:#15803d;background:#dcfce7;border-radius:999px;padding:3px 10px}
 .vnl{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
@@ -2887,7 +2892,11 @@ const dirtyCount=()=>document.querySelectorAll('#edCard .dirty').length;
 function renderEdit(){
   const rs=edRows();
   $('edList').innerHTML=rs.length?rs.map(v=>{const m=missing(v);return '<div class="eli'+(edSel==vid(v)?' sel':'')+'" data-id="'+esc(vid(v))+'"><div><b>'+tno(vid(v))+esc(title(v))+'</b>'+azSub(v)+'<small>'+esc(/[a-z]/i.test(dname(v))?dname(v):'No driver')+(pick(v,'licensePlateNo','licensePlate')?' · '+esc(pick(v,'licensePlateNo','licensePlate')):'')+'</small></div>'+(outOfSync(v)?'<span class="pill warn">Sync</span>':m.length?'<span class="bang" title="Missing '+m.join(', ')+'" aria-label="Missing '+m.join(', ')+'">!</span>':'')+'</div>'}).join(''):'<div class="empty" style="padding:30px">'+(vehicles.length?'No trucks match.':'Loading...')+'</div>';
-  document.querySelectorAll('.eli').forEach(e=>e.onclick=()=>openEd(e.dataset.id));
+  // Trucks that are in Airtable but have no Azuga tracker, so they still show up here
+  const q=$('q').value.toLowerCase(),na=(AT&&AT.notInAzuga||[]).filter(t=>!q||[t.truckNo,t.desc,t.driverName,t.plate].join(' ').toLowerCase().includes(q)).sort((a,b)=>(parseInt(a.truckNo)||999)-(parseInt(b.truckNo)||999)||a.desc.localeCompare(b.desc));
+  if(na.length)$('edList').insertAdjacentHTML('beforeend','<div class="nah">In Airtable, no Azuga tracker <span>'+na.length+'</span></div>'+na.map(t=>'<details class="eli nai"><summary><div><b>'+(t.truckNo?'<span class="tno">#'+esc(t.truckNo.split(/[ ~(]/)[0])+'</span>':'')+esc(t.desc||'Truck')+'</b><small>'+esc(t.driverName||'No driver')+(t.plate?' · '+esc(t.plate.trim()):'')+'</small></div><span class="pill nat">No tracker</span></summary>'
+    +'<div class="naw">'+(!t.vinOk?'<div class="note">The VIN in Airtable doesn’t look right ('+esc(t.vin||'empty')+'). Fix it there so a tracker can link.</div>':t.dupVin?'<div class="note">Another Airtable truck has the same VIN ('+esc(t.vin)+'). One of them is wrong.</div>':'<div class="muted" style="font-size:12.5px">VIN '+esc(t.vin)+'. If one of the unnamed trackers above is in this truck, open that tracker and link it to #'+esc(t.truckNo||'this truck')+'.</div>')+notesBox(t)+'</div></details>').join(''));
+  document.querySelectorAll('.eli[data-id]').forEach(e=>e.onclick=()=>openEd(e.dataset.id));
   const n=vehicles.filter(outOfSync).length;
   if(!syncing)$('syncBar').innerHTML=!AT?'':!AT.connected?'<span class="muted">Airtable not connected</span>':AT.error?'<span class="muted">Airtable unavailable</span>':n?'<button class="btn2 pri" id="syncAll" style="width:100%">Sync '+n+' truck'+(n>1?'s':'')+' from Airtable → Azuga</button>':'<span style="color:var(--go);display:inline-flex;gap:6px;align-items:center">'+ICON.check+'Azuga matches Airtable</span>';
   if($('syncAll'))$('syncAll').onclick=syncAll;
@@ -3132,7 +3141,7 @@ async function pomBox(id,name,date){const el=$('pomBox');if(!el)return;if(!name)
   el.innerHTML=head('<span class="pcount">'+done+' of '+st.length+' done</span>')+'<div class="pbar"><i style="width:'+pct+'%"></i></div>'
    +(vis.length?'<div class="psum"><b>'+Math.floor(tot/60)+'h '+(tot%60)+'m</b> at pools · '+vis.length+' of '+st.length+' visits found in the truck’s breadcrumbs</div>'+tl:(r.points?'':'<div class="muted" style="font-size:12px">No breadcrumbs from the truck '+(isToday?'yet today':'that day')+', so time on site can’t be measured.</div>'))
    +(r.tech.toLowerCase()!==name.toLowerCase()?'<div class="muted" style="font-size:12px;margin:4px 0">Shown as '+esc(r.tech)+' in Pool Office Manager</div>':'')
-   +'<ol class="plist">'+st.map((s,i)=>'<li class="'+(s.done?'done':'')+'" data-i="'+i+'"><span class="pn">'+(s.done?'✓':i+1)+'</span><div><b>'+esc(s.customer||'Customer')+'</b>'+(s.type?'<span class="psvc" style="--h:'+([...s.type].reduce((h,c)=>h*31+c.charCodeAt(0)>>>0,7)%360)+'">'+esc(s.type)+'</span>':'')+'<span>'+esc(s.address||'No address')+'</span>'
+   +'<ol class="plist">'+st.map((s,i)=>'<li class="'+(s.done?'done':'')+'" data-i="'+i+'"><span class="pn">'+(s.done?'✓':i+1)+'</span><div><b>'+esc(s.customer||'Customer')+'</b>'+(s.type?'<span class="psvc" style="--h:'+([...s.type].reduce((h,c)=>h*31+c.charCodeAt(0)>>>0,7)%150+170)+'">'+esc(s.type)+'</span>':'')+'<span>'+esc(s.address||'No address')+'</span>'
      +(s.visit?'<span class="pvisit">Arrived '+t(s.visit.arrive)+' · left '+t(s.visit.leave)+(s.visit.visits>1?' · came back '+(s.visit.visits-1)+'×':'')+(s.visit.how==='wide'?' <span class="pfar">parked ~'+(s.visit.ft>=1000?(s.visit.ft/5280).toFixed(2)+' mi':s.visit.ft+' ft')+' away</span>'+flag('The truck never stopped within 500 ft of the address in Pool Office Manager, so this visit was matched from up to 0.3 mi away. The address in POM may be off, or this could be a neighbouring stop.'):s.visit.how==='addr'?' <span class="pfar">matched by street</span>'+flag('Matched by street address instead of map position: the truck stopped at '+(s.visit.parkedAt||'a nearby number on the same street')+'. '+(s.lat?'POM\\'s map pin for this pool is more than 0.3 mi away, so the pin is probably wrong.':'POM has no map pin for this pool.')):'')+'</span>':(!isToday||s.done?'<span class="pvisit none">Truck not seen at this address</span>':''))+'</div>'
      +'<em>'+(s.visit?'<strong class="vmins'+(s.visit.mins<5?' short':s.visit.mins>60?' long':'')+'">'+s.visit.mins+' min</strong>':'')+(s.done?'Done':esc(String(s.serviceStatus||s.status||'To do').toLowerCase().split('_').join(' ').replace(/^./,c=>c.toUpperCase())))+(s.time?'<small>Scheduled '+t(s.time)+'</small>':'')+'</em></li>').join('')+'</ol>';
   bind();POMDAY=isToday?null:st;
@@ -3454,24 +3463,25 @@ function renderPlan(){const r=PLAN;if(!r||!r.connected){$('chkPlan').innerHTML='
 function renderChk(){const r=CHK;if(!r)return;
   if(!r.connected){$('chkCount').textContent='Pool Office Manager is not connected (add POM_API_KEY in Render).';$('chkSum').innerHTML=$('chkGrid').innerHTML='';return}
   const ymd=t=>new Date(t).toLocaleDateString('en-CA',{timeZone:'America/New_York'}),now=r.now;
-  const days=[...new Set(r.checkups.map(s=>ymd(s.time)))].sort().reverse();   // one column per check-up day, newest first
+  const wkOf=t=>{const d=new Date(ymd(t)+'T12:00');d.setDate(d.getDate()-(d.getDay()+6)%7);return d.toLocaleDateString('en-CA')};   // Monday of that week
+  const days=[...new Set(r.checkups.map(s=>wkOf(s.time)))].sort().reverse(),todayWk=wkOf(r.today+'T12:00');   // one column per week, newest first
   const RL=['Tech','Tech assistant','District','Regional','Owner','Auditor','Staffer'],NEED=['Tech','Tech assistant','Auditor'],role=n=>(r.roles||{})[n]||'',need=n=>!role(n)||NEED.includes(role(n));   // no role set yet: still expected
   const q=$('q').value.trim().toLowerCase(),every=[...new Set(r.checkups.map(s=>s.tech))].filter(n=>!q||n.toLowerCase().includes(q)),techs=every.filter(need),skip=every.filter(n=>!need(n));
-  const cell=(n,d)=>r.checkups.find(s=>s.tech===n&&ymd(s.time)===d);
+  const cell=(n,d)=>{const cs=r.checkups.filter(s=>s.tech===n&&wkOf(s.time)===d);return cs.find(s=>s.done)||cs[0]};
   const state=s=>!s?'none':s.done?'ok':Date.parse(s.time)>now?'due':'miss';
   const rows=techs.map(n=>{const cs=days.map(d=>cell(n,d)),st=cs.map(state),given=st.filter(x=>x==='ok'||x==='miss'),ok=st.filter(x=>x==='ok').length;
     let streak=0;for(const x of st){if(x==='due'||x==='none')continue;if(x==='ok')streak++;else break}
     return {n,cs,st,ok,rate:given.length?Math.round(ok/given.length*100):null,streak,missed:given.length-ok}}).sort((a,b)=>b.missed-a.missed||a.n.localeCompare(b.n));
-  const cur=days.find(d=>d<=r.today)||days[days.length-1],curSt=techs.map(n=>state(cell(n,cur))),curOk=curSt.filter(x=>x==='ok').length,curDue=curSt.filter(x=>x==='due').length;
+  const cur=days.find(d=>d<=todayWk)||days[days.length-1],curSt=techs.map(n=>state(cell(n,cur))),curOk=curSt.filter(x=>x==='ok').length,curDue=curSt.filter(x=>x==='due').length,curMiss=curSt.filter(x=>x==='miss').length,curN=curOk+curDue+curMiss;
   const lbl=d=>new Date(d+'T12:00').toLocaleDateString([],{month:'short',day:'numeric'}),wk=d=>new Date(d+'T12:00').toLocaleDateString([],{weekday:'short'});
-  const curT=r.checkups.find(s=>ymd(s.time)===cur);
+  const curT=r.checkups.find(s=>wkOf(s.time)===cur&&Date.parse(s.time)>now);
   $('chkCount').textContent=techs.length+' drivers · weekly form in Pool Office Manager · last '+days.length+' weeks';
-  $('chkSum').innerHTML=cur?'<div class="pbs chs"><div class="pbring" style="--v:'+(techs.length?Math.round(curOk/techs.length*100):0)+'"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9" pathLength="100"/><circle class="fill" cx="18" cy="18" r="15.9" pathLength="100"/></svg><b>'+curOk+'/'+techs.length+'</b></div>'
+  $('chkSum').innerHTML=cur?'<div class="pbs chs"><div class="pbring" style="--v:'+(curN?Math.round(curOk/curN*100):0)+'"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9" pathLength="100"/><circle class="fill" cx="18" cy="18" r="15.9" pathLength="100"/></svg><b>'+curOk+'/'+curN+'</b></div>'
     +'<div><b>'+wk(cur)+' '+lbl(cur)+'</b><span>this week’s check-up'+(curDue&&curT?' · due '+new Date(curT.time).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'')+'</span></div>'
-    +'<div><b>'+curOk+'</b><span>submitted</span></div>'+(curDue?'<div><b>'+curDue+'</b><span>still due</span></div>':'<div><b>'+(techs.length-curOk)+'</b><span>missed</span></div>')
-    +'<div><b>'+rows.reduce((a,x)=>a+x.missed,0)+'</b><span>missed in '+days.filter(d=>d<=r.today).length+' weeks</span></div></div>':'';
+    +'<div><b>'+curOk+'</b><span>submitted</span></div>'+(curDue?'<div><b>'+curDue+'</b><span>still due</span></div>':'')+(curMiss?'<div><b>'+curMiss+'</b><span>missed</span></div>':'')+(techs.length>curN?'<div><b>'+(techs.length-curN)+'</b><span>not assigned</span></div>':'')
+    +'<div><b>'+rows.reduce((a,x)=>a+x.missed,0)+'</b><span>missed in '+days.filter(d=>d<=todayWk).length+' weeks</span></div></div>':'';
   const icon={ok:'✓',miss:'✕',due:'•',none:''},word={ok:'Submitted',miss:'Missed',due:'Due',none:'Not assigned'};
-  $('chkGrid').innerHTML=rows.length?'<div class="chk panel"><table><thead><tr><th>Driver</th>'+days.map((d,i)=>'<th class="'+(d===cur?'now':d>r.today?'next':'')+'">'+(d>r.today?'Next ':'')+wk(d)+'<br>'+lbl(d)+'</th>').join('')+'<th>On time</th><th>Streak</th></tr></thead><tbody>'
+  $('chkGrid').innerHTML=rows.length?'<div class="chk panel"><table><thead><tr><th>Driver</th>'+days.map((d,i)=>'<th class="'+(d===cur?'now':d>todayWk?'next':'')+'">'+(d>todayWk?'Next week':'Week of')+'<br>'+lbl(d)+'</th>').join('')+'<th>On time</th><th>Streak</th></tr></thead><tbody>'
     +rows.map((x,ri)=>{const tr=r.trucks[x.n];return '<tr style="--i:'+ri+'"><td><div class="chd">'+avatar(x.n)+'<div><b>'+esc(x.n)+(role(x.n)?'<span class="role r'+RL.indexOf(role(x.n))+'">'+esc(role(x.n))+'</span>':'<span class="role" title="Set a role on the Drivers tab">No role</span>')+'</b>'+(tr?'<button class="tchip" data-truck="'+esc(tr)+'">'+tno(tr)+'Show on map</button>':'<small class="muted">No truck matched</small>')+'</div></div></td>'
       +x.st.map((st,i)=>{const s=x.cs[i],tip=word[st]+(s?' · '+esc(new Date(s.time).toLocaleString([],{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})):'')+(s&&s.service?' · click to open':'');return '<td>'+(s&&s.service?'<a class="chc '+st+' open" href="/checkup?id='+encodeURIComponent(s.service)+'" target="_blank" rel="noopener" title="'+tip+'">'+icon[st]+'</a>':'<span class="chc '+st+'" title="'+tip+'">'+icon[st]+'</span>')+'</td>'}).join('')
       +'<td><b class="chr '+(x.rate===null?'':x.rate>=80?'g':x.rate>=50?'y':'r')+'">'+(x.rate===null?'–':x.rate+'%')+'</b></td><td>'+(x.streak?'<b class="chs2">'+x.streak+' wk'+(x.streak>1?'s':'')+'</b>':'<span class="muted">–</span>')+'</td></tr>'}).join('')
