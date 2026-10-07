@@ -169,6 +169,9 @@ const routes = {
     if (cid) await tryIt('services', `query($c: String!) { infiniteServices(selector: {filters: {customerId: {equals: $c}}}, first: 3, sort: {field: startTime, order: DESC}) { edges { node { ${POM_SVC_FIELDS} } } } }`, { c: cid });
     return out; },
   '/api/pom/checkup-plan': () => checkupPlan(),
+  '/api/repairs': async () => { if (!AIRTABLE_TOKEN) return { connected: false };
+    const at = await atData(); return { connected: true, trucks: at.trucks.filter(t => t.notes).map(t => ({ id: t.id, truckNo: t.truckNo, desc: [t.year, t.make, t.model].filter(Boolean).join(' '),
+      driver: t.driver ? t.driver.name : '', notes: t.notes })) }; },
   '/api/pom/stops': async () => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
     return { connected: true, day: etDay().ymd, stops: (await pomToday()).map(pomStop).filter(s => s.tech && !pomCheckup(s) && s.lat && s.lng) }; },
   '/api/pom/debug': async () => { const { start, end } = etDay();   // behind the dashboard login: what POM sends back, for setting this up
@@ -2448,6 +2451,25 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 @keyframes wavey{to{background-position:40px 0}}@media (prefers-reduced-motion:reduce){.crewhead h2::after{animation:none}}
 
 /* vehicle notes */
+#vRep{padding:14px 24px 24px;max-width:1240px;margin:0 auto;animation:fadein .3s ease-out}body[data-v=vRep] .vopt{display:none}body[data-v=vRep] .bar{max-width:1240px;margin:0 auto}
+#repMiss[aria-pressed=true]{background:#f59e0b;color:#fff;border-color:#f59e0b}
+.rp-grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;align-items:start}@media(max-width:900px){#vRep{padding:12px 16px}.rp-grid{grid-template-columns:1fr}}
+.rp-pan{padding:14px 16px;margin-bottom:14px}.rp-pan h3{margin:0 0 10px;font-size:14px}
+.rp-mo{display:flex;align-items:flex-end;gap:5px;height:120px}.rp-mo div{flex:1;height:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px}
+.rp-mo i{display:block;width:100%;border-radius:6px 6px 2px 2px;background:linear-gradient(180deg,#22d3ee,#0e7490);transition:height .5s cubic-bezier(.2,.9,.3,1.2)}.rp-mo div:hover i{background:linear-gradient(180deg,#facc15,#f59e0b)}.rp-mo span{font-size:10px;color:#64748b}
+.rp-tk{position:relative;display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;text-align:left;border:1px solid #e2e8f0;background:#fff;border-radius:10px;padding:8px 10px;margin-bottom:6px;cursor:pointer;font:inherit;overflow:hidden;transition:border-color .15s,transform .15s}
+.rp-tk:hover{border-color:#22d3ee;transform:translateX(2px)}.rp-tk.on{border-color:#0e7490;box-shadow:0 0 0 2px rgba(34,211,238,.35)}
+.rp-tk span{display:flex;flex-direction:column;position:relative;z-index:1;min-width:0}.rp-tk b{font-size:13px}.rp-tk small{font-size:11.5px;color:#64748b}.rp-tk em{font-style:normal;font-weight:800;font-size:13px;position:relative;z-index:1;font-variant-numeric:tabular-nums}
+.rp-tk i{position:absolute;left:0;bottom:0;height:3px;background:linear-gradient(90deg,#22d3ee,#a78bfa)}
+.rp-list{padding:4px 0}.rp-row{display:grid;grid-template-columns:62px minmax(0,1fr) auto;gap:12px;align-items:center;padding:11px 16px;border-top:1px solid #eef2f7;animation:vnin .3s ease-out both;animation-delay:calc(var(--i)*25ms)}.rp-row:first-child{border-top:0}
+.rp-row:hover{background:#f0fdff}.rp-dt{display:flex;flex-direction:column;align-items:center;background:#ecfeff;border-radius:10px;padding:5px 0}.rp-dt b{font-size:13px;color:#0e7490}.rp-dt small{font-size:10.5px;color:#64748b}
+.rp-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.rp-chip{border:0;background:#0e7490;color:#fff;font:inherit;font-size:11.5px;font-weight:700;border-radius:999px;padding:2px 9px;cursor:pointer}.rp-chip:hover{background:#0891b2}
+.rp-shop{font-size:12.5px;font-weight:600;color:#334155}.rp-tag{font-size:10.5px;font-weight:700;color:#7c3aed;background:#ede9fe;border-radius:6px;padding:1px 6px}
+.rp-work{font-size:13.5px;color:#0f172a;margin-top:3px}.rp-amt{font-weight:800;font-size:15px;font-variant-numeric:tabular-nums;white-space:nowrap}.rp-amt.miss{font-size:12px;font-weight:700;color:#b45309;background:#fef3c7;border-radius:999px;padding:3px 10px}
+.rp-fil{display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:13.5px}
+.tabs button:hover .ti{animation:tiwig .45s ease-in-out}@keyframes tiwig{25%{transform:rotate(-14deg) scale(1.15)}60%{transform:rotate(10deg) scale(1.1)}}
+
+.chk tbody tr:hover .av,.drow:hover .av,.eli:hover .av{box-shadow:0 0 0 2px #fff,0 0 0 4px #22d3ee,0 6px 14px -4px rgba(14,116,144,.6)}.chk th.now{background:linear-gradient(180deg,#cffafe,transparent);border-radius:10px 10px 0 0}
 .nah{display:flex;justify-content:space-between;align-items:center;margin:16px 4px 6px;font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#64748b}.nah span{background:#e2e8f0;color:#334155;border-radius:999px;padding:1px 9px}
 .nai{display:block!important;cursor:default}.nai summary{display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:pointer;list-style:none}.nai summary::-webkit-details-marker{display:none}
 .nai .pill.nat{background:#f1f5f9;color:#64748b;border:1px dashed #94a3b8;font-size:11px;font-weight:700;border-radius:999px;padding:2px 8px;white-space:nowrap}.naw{margin-top:8px}.nai b .tno{margin-right:6px}
@@ -2484,7 +2506,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
  <svg class="hwave front" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M3 9c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0"/><path d="M3 15c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0" opacity=".6"/></svg></div><div>Millennial Pools<small>Fleet</small></div></div>
  <div class="live" id="live"><span class="dot"></span><svg class="ekg" viewBox="0 0 40 14" aria-hidden="true"><path d="M0 7h12l3-5 4 10 3-8 2 3h16"/></svg><span id="upd">Connecting to Azuga...</span></div>
- <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Live map</button><button data-v="vEdit"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l2-5h11l3 5v4H3z"/><circle cx="7" cy="17" r="2"/><circle cx="16" cy="17" r="2"/></svg>Edit vehicles</button><button data-v="vDrv"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><circle cx="17" cy="9" r="2.4"/><path d="M15.5 14.6c2.8.2 5 2.1 5 5.4"/></svg>Drivers</button><button data-v="vPom"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M2 19.5c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M8 12V5a2 2 0 0 1 4 0M14 12V5a2 2 0 0 1 4 0M8 8h6"/></svg>Pools</button><button data-v="vChk"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12l2 2 4-4M9 17h6"/></svg>Truck check-ups</button><button data-v="vCam"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3z"/></svg>Cameras</button><a class="reptab" href="/report" target="_blank" rel="noopener"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Score report</a></nav>
+ <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Live map</button><button data-v="vEdit"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l2-5h11l3 5v4H3z"/><circle cx="7" cy="17" r="2"/><circle cx="16" cy="17" r="2"/></svg>Edit vehicles</button><button data-v="vDrv"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><circle cx="17" cy="9" r="2.4"/><path d="M15.5 14.6c2.8.2 5 2.1 5 5.4"/></svg>Drivers</button><button data-v="vPom"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M2 19.5c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M8 12V5a2 2 0 0 1 4 0M14 12V5a2 2 0 0 1 4 0M8 8h6"/></svg>Pools</button><button data-v="vChk"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12l2 2 4-4M9 17h6"/></svg>Truck check-ups</button><button data-v="vRep"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z"/></svg>Repairs</button><button data-v="vCam"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3z"/></svg>Cameras</button><a class="reptab" href="/report" target="_blank" rel="noopener"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Score report</a></nav>
 </header>
 <div class="bar"><div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search trucks or drivers" aria-label="Search trucks or drivers"></div><nav class="sum" id="sum" aria-label="Filter vehicles"></nav>
  <div class="vopt"><button id="voBtn" aria-expanded="false" aria-controls="voPop"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>View<span id="voHid"></span></button>
@@ -2566,6 +2588,10 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 <div id="vChk" hidden>
  <div class="crewhead"><div><h2>Truck check-ups</h2><p id="chkCount" class="muted">Loading check-ups from Pool Office Manager...</p></div></div>
  <div id="chkSum"></div><div id="chkPlan"></div><div id="chkGrid"></div>
+</div>
+<div id="vRep" hidden>
+ <div class="crewhead"><div><h2>Repairs</h2><p id="repCount" class="muted">Loading repairs from Airtable...</p></div><span style="flex:1"></span><button class="btn2" id="repMiss" aria-pressed="false">Missing a total</button></div>
+ <div id="repSum"></div><div class="rp-grid"><div id="repList"></div><aside id="repSide"></aside></div>
 </div>
 <div id="vCam" hidden>
  <div class="crewhead"><div><h2>Camera events</h2><p id="camCount" class="muted">Loading the last 7 days from Azuga...</p></div><span style="flex:1"></span>
@@ -3532,10 +3558,44 @@ function moveTab(){const b=document.querySelector('.tabs button.on'),i=document.
 addEventListener('resize',moveTab);(document.fonts&&document.fonts.ready||Promise.resolve()).then(moveTab);setTimeout(moveTab,50);
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));moveTab();
-  ['vMap','vEdit','vDrv','vPom','vCam','vChk'].forEach(v=>$(v).hidden=b.dataset.v!==v);if(b.dataset.v==='vChk')loadChk();if(b.dataset.v==='vPom')loadPomBoard();if(b.dataset.v==='vCam')loadCamTab();if(b.dataset.v==='vMap'&&sel&&TRUCKV.length)drawCams();document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
+  ['vMap','vEdit','vDrv','vPom','vCam','vChk','vRep'].forEach(v=>$(v).hidden=b.dataset.v!==v);if(b.dataset.v==='vChk')loadChk();if(b.dataset.v==='vRep')loadRep();if(b.dataset.v==='vPom')loadPomBoard();if(b.dataset.v==='vCam')loadCamTab();if(b.dataset.v==='vMap'&&sel&&TRUCKV.length)drawCams();document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
   if(b.dataset.v!=='vMap')loadSync();if(b.dataset.v==='vEdit')renderEdit();else if(b.dataset.v==='vDrv'){if(!PEOPLE)loadPeople();else renderDrivers()}else map.invalidateSize();
 });
-$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();if(!$('vPom').hidden)renderPom();if(!$('vCam').hidden)renderCamTab();if(!$('vChk').hidden)renderChk();};
+$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();if(!$('vPom').hidden)renderPom();if(!$('vCam').hidden)renderCamTab();if(!$('vChk').hidden)renderChk();if(!$('vRep').hidden)renderRep();};
+$('repMiss').onclick=e=>{const b=e.currentTarget;b.setAttribute('aria-pressed',b.getAttribute('aria-pressed')==='true'?'false':'true');renderRep()};
+// ===== Repairs tab: every shop invoice saved as a vehicle note, with totals =====
+let REP=null,REPT='';
+const REP_RE=/^([A-Z][a-z]{2} \\d{1,2}, \\d{4}) · From (.+?) (invoice|estimate)([^:]*): (.*)$/;
+function repParse(trucks){const out=[];trucks.forEach(t=>String(t.notes||'').split('\\n').forEach(line=>{const m=REP_RE.exec(line);if(!m)return;
+  const tm=/Total \\$([\\d,]+\\.\\d\\d)/.exec(m[5]),noc=/No charge/i.test(m[5]);
+  out.push({t,line,date:m[1],ts:Date.parse(m[1]),shop:m[2],est:m[3]==='estimate',paid:/paid/i.test(m[4]),work:m[5].replace(/\\.? ?(Total \\$[\\d,]+\\.\\d\\d|Total not shown on photo|No charge shown)[^]*$/,'').replace(/\\.$/,''),total:tm?+tm[1].replace(/,/g,''):noc?0:null,missing:!tm&&!noc})}));
+  return out.sort((a,b)=>b.ts-a.ts)}
+const repName=t=>(t.truckNo?'#'+t.truckNo.split(/[ ~(]/)[0]+' ':'')+(t.desc||'Truck');
+const money=n=>'$'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+async function loadRep(){if(!REP)$('repCount').textContent='Loading repairs from Airtable...';try{REP=await get('/api/repairs')}catch(e){$('repCount').textContent='Could not load repairs: '+e.message;return}renderRep()}
+function renderRep(){if(!REP)return;if(!REP.connected){$('repCount').textContent='Airtable is not connected.';return}
+  const all=repParse(REP.trucks),q=$('q').value.trim().toLowerCase(),miss=$('repMiss').getAttribute('aria-pressed')==='true';
+  const rows=all.filter(r=>(!REPT||r.t.id===REPT)&&(!miss||r.missing)&&(!q||(repName(r.t)+' '+(r.t.driver||'')+' '+r.shop+' '+r.work).toLowerCase().includes(q)));
+  const sum=a=>a.reduce((s,r)=>s+(r.total||0),0),yr=new Date().getFullYear(),thisYr=all.filter(r=>new Date(r.ts).getFullYear()===yr);
+  $('repCount').textContent=all.length+' repairs on '+new Set(all.map(r=>r.t.id)).size+' trucks · from invoices saved to each truck in Airtable';
+  // per truck
+  const by={};all.forEach(r=>{const k=r.t.id;(by[k]=by[k]||{t:r.t,n:0,sum:0,miss:0});by[k].n++;by[k].sum+=r.total||0;if(r.missing)by[k].miss++});
+  const tr=Object.values(by).sort((a,b)=>b.sum-a.sum),top=tr[0],max=top?top.sum:1;
+  $('repSum').innerHTML='<div class="pbs"><div><b>'+money(sum(all))+'</b><span>spent on repairs</span></div><div><b>'+money(sum(thisYr))+'</b><span>in '+yr+'</span></div><div><b>'+all.length+'</b><span>invoices</span></div>'
+    +(top?'<div><b>'+esc(repName(top.t))+'</b><span>costs the most · '+money(top.sum)+'</span></div>':'')
+    +(all.some(r=>r.missing)?'<div><b>'+all.filter(r=>r.missing).length+'</b><span>missing a total</span></div>':'')+'</div>';
+  // monthly bars, last 12 months
+  const mo=[];for(let i=11;i>=0;i--){const d=new Date();d.setDate(1);d.setMonth(d.getMonth()-i);mo.push({k:d.getFullYear()+'-'+d.getMonth(),l:d.toLocaleDateString('en-US',{month:'short'}),v:0})}
+  all.forEach(r=>{const d=new Date(r.ts),m=mo.find(x=>x.k===d.getFullYear()+'-'+d.getMonth());if(m)m.v+=r.total||0});const mm=Math.max(1,...mo.map(m=>m.v));
+  $('repSide').innerHTML='<div class="panel rp-pan"><h3>Spend by month</h3><div class="rp-mo">'+mo.map(m=>'<div title="'+m.l+': '+money(m.v)+'"><i style="height:'+Math.max(2,m.v/mm*100)+'%"></i><span>'+m.l+'</span></div>').join('')+'</div></div>'
+    +'<div class="panel rp-pan"><h3>By truck</h3><p class="muted" style="font-size:12px;margin:-4px 0 8px">Click a truck to see only its repairs</p>'+tr.map(x=>'<button class="rp-tk'+(REPT===x.t.id?' on':'')+'" data-rt="'+esc(x.t.id)+'"><span><b>'+esc(repName(x.t))+'</b><small>'+esc(x.t.driver||'No driver')+' · '+x.n+' invoice'+(x.n>1?'s':'')+(x.miss?' · '+x.miss+' no total':'')+'</small></span><em>'+money(x.sum)+'</em><i style="width:'+(x.sum/max*100)+'%"></i></button>').join('')+'</div>';
+  $('repList').innerHTML=(REPT?'<div class="rp-fil">Showing <b>'+esc(repName(by[REPT].t))+'</b> · '+money(sum(rows))+' <button class="btn2" data-rt="">Show all trucks</button></div>':'')
+    +(rows.length?'<div class="panel rp-list">'+rows.map((r,i)=>'<div class="rp-row" style="--i:'+Math.min(i,20)+'"><div class="rp-dt"><b>'+esc(r.date.replace(/, \\d{4}$/,''))+'</b><small>'+new Date(r.ts).getFullYear()+'</small></div>'
+      +'<div class="rp-body"><div class="rp-top"><button class="rp-chip" data-rt="'+esc(r.t.id)+'">'+esc(repName(r.t))+'</button><span class="rp-shop">'+esc(r.shop)+'</span>'+(r.est?'<span class="rp-tag">'+(r.paid?'Estimate, paid':'Estimate')+'</span>':'')+'</div><div class="rp-work">'+esc(r.work)+'</div></div>'
+      +'<div class="rp-amt'+(r.missing?' miss':'')+'">'+(r.missing?'No total':r.total===0?'No charge':money(r.total))+'</div></div>').join('')+'</div>'
+     :'<div class="empty">'+(all.length?'No repairs match.':'No repair invoices saved yet. Send invoice photos to Claude and they show up here.')+'</div>')}
+document.addEventListener('click',e=>{const b=e.target.closest('#vRep [data-rt]');if(!b)return;REPT=REPT===b.dataset.rt?'':b.dataset.rt;renderRep();$('vRep').scrollIntoView({behavior:'smooth',block:'start'})});
+
 window.addEventListener('beforeunload',e=>{if(dirtyCount())e.preventDefault()});
 refresh();setInterval(refresh,30000);
 </script></body></html>`;
