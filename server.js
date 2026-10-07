@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['scores', 'ramp', 'trips']);
+const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -127,7 +127,7 @@ const routes = {
     const custIds = [...new Set(list.map(s => s.customerId).filter(Boolean))], svcs = [];
     for (const c of custIds) svcs.push(...await pomServices(c).catch(e => { console.error('POM services:', e.message); return []; }));
     const svcName = v => { const w = (v.workers || []).find(x => x.primary) || (v.workers || [])[0]; return w && w.user ? [w.user.firstName, w.user.lastName].filter(Boolean).join(' ') : ''; };
-    list.forEach(s => { const day = etDay(new Date(s.time)).ymd, hit = svcs.find(v => v.appointmentIdentifier && v.appointmentIdentifier.id === s.id)
+    list.forEach(s => { const day = etDay(new Date(s.time)).ymd, ai = v => v.appointmentIdentifier || {}, hit = svcs.find(v => (s.id && ai(v).id === s.id) || (s.ruleId && ai(v).recurringRuleId === s.ruleId && Date.parse(ai(v).recurringDate) === Date.parse(s.rdate || s.time)))
       || svcs.find(v => svcName(v) === s.tech && etDay(new Date(v.startTime)).ymd === day);
       if (hit) { s.service = hit.id; s.done = true; } });
     const at = await atData().catch(() => ({ drivers: [] })), people = at.drivers.filter(d => d.name && d.status !== 'Inactive'), roles = {}, seen = new Set();
@@ -148,6 +148,7 @@ const routes = {
     const cid = Array.isArray(out.rules) && out.rules[0] && out.rules[0].customer && out.rules[0].customer.id;
     if (cid) await tryIt('services', `query($c: String!) { infiniteServices(selector: {filters: {customerId: {equals: $c}}}, first: 3, sort: {field: startTime, order: DESC}) { edges { node { ${POM_SVC_FIELDS} } } } }`, { c: cid });
     return out; },
+  '/api/pom/checkup-plan': () => checkupPlan(),
   '/api/pom/stops': async () => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
     return { connected: true, day: etDay().ymd, stops: (await pomToday()).map(pomStop).filter(s => s.tech && !pomCheckup(s) && s.lat && s.lng) }; },
   '/api/pom/debug': async () => { const { start, end } = etDay();   // behind the dashboard login: what POM sends back, for setting this up
@@ -623,6 +624,7 @@ async function updateDriver(b) {
   if (b.photo) await uploadLicense(d.id, name, b.photo);
   cache.delete('airtable');
   console.log(new Date().toISOString(), 'Airtable driver updated', name);
+  if ('role' in b || b.status) setTimeout(autoCheckups, 5000);   // roles drive the POM truck check-up
   // Push to Azuga right away instead of waiting for the 5-minute sync
   try { const r = await reconcile(); return { ok: true, synced: true, notes: r.notes.filter(n => n.startsWith(name)) }; }
   catch (e) { return { ok: true, warning: 'Saved to Airtable. Azuga will be updated by the next automatic sync (' + e.message + ')' }; }
@@ -947,7 +949,7 @@ async function pom(query, variables) {
   }
   throw new Error('Pool Office Manager said: ' + last);
 }
-const POM_STOP_FIELDS = `id date duration status pinned primaryWorker { id firstName lastName } workers { id firstName lastName primary }
+const POM_STOP_FIELDS = `id date duration status pinned recurringRuleId recurringDate recurringRule { id rruleString } primaryWorker { id firstName lastName } workers { id firstName lastName primary }
   serviceType { id display } serviceStatus { id name } customer { id firstName lastName streetAddress city state zipCode latitude longitude }`;
 // Midnight-to-midnight today in New Jersey time
 function etDay(d = new Date()) {
@@ -988,7 +990,7 @@ const pomService = async id => { const d = await pom(`query($id: ID!) { infinite
 const pomCheckup = s => /truck\s*(check|submission|inspection)/i.test((s.type || '') + ' ' + (s.customer || ''));
 const pomDone = a => /complet|done|finish|serviced|closed/i.test(String(a.status || '') + ' ' + (a.serviceStatus && a.serviceStatus.name || ''));
 const pomStop = a => { const c = a.customer || {}, w = a.primaryWorker || (a.workers || []).find(x => x.primary) || (a.workers || [])[0] || {};
-  return { id: a.id, time: a.date, mins: a.duration, status: a.status, serviceStatus: a.serviceStatus && a.serviceStatus.name, done: pomDone(a),
+  return { id: a.id, ruleId: a.recurringRuleId || null, rdate: a.recurringDate || null, rrule: a.recurringRule && a.recurringRule.rruleString || '', workerId: w.id || null, serviceTypeId: a.serviceType && a.serviceType.id || null, time: a.date, mins: a.duration, status: a.status, serviceStatus: a.serviceStatus && a.serviceStatus.name, done: pomDone(a),
     type: a.serviceType && a.serviceType.display, tech: [w.firstName, w.lastName].filter(Boolean).join(' '),
     customerId: c.id || null, customer: [c.firstName, c.lastName].filter(Boolean).join(' '), address: [c.streetAddress, c.city, c.state].filter(Boolean).join(', '),
     lat: +c.latitude || null, lng: +c.longitude || null }; };
@@ -999,6 +1001,67 @@ async function pomStopsFor(name, ymd) {
     return a[0] && b[0] && a[0].slice(0, 3) === b[0].slice(0, 3) && near(a[a.length - 1], b[b.length - 1]); });
   return { tech: m ? m.name : null, stops: m ? stops.filter(s => s.tech === m.name).sort((x, y) => Date.parse(x.time) - Date.parse(y.time)) : [] };
 }
+
+
+// ---------------- Keep the weekly truck check-up in POM in line with Airtable roles ----------------
+// Techs, tech assistants and auditors get a "Truck Check-Up" for "Trucks Submissions" every Monday at 9 AM (New Jersey time).
+// Changing someone to another role (or inactive) stops theirs from the next Monday on; past weeks and submissions stay.
+// Anyone with no role set is left alone. Field names below are the ones POM's own schedule uses.
+const CHK_HOUR = 9;
+function nextMonday9(after = new Date()) {   // the first Monday 9:00 AM New Jersey time after `after` (no clock change happens on a Monday morning)
+  for (let i = 0; i < 9; i++) { const d = etDay(new Date(+after + i * 864e5)), t = new Date(+d.start + CHK_HOUR * 36e5);
+    if (new Date(d.ymd + 'T12:00:00Z').getUTCDay() === 1 && t > after) return t; }
+}
+const chkRrule = t => { const ymd = etDay(t).ymd.replace(/-/g, ''); return 'DTSTART;TZID=US/Eastern:' + ymd + 'T' + String(CHK_HOUR).padStart(2, '0') + '0000\nRRULE:FREQ=WEEKLY;WKST=MO;BYDAY=MO;BYHOUR=' + CHK_HOUR + ';BYMINUTE=0;BYSECOND=0'; };
+const ruleHour = r => { const m = /BYHOUR=(\d+)/.exec(r || ''); return m ? +m[1] : null; };
+async function checkupPlan() {
+  if (!clean(process.env.POM_API_KEY)) return { connected: false };
+  const now = new Date(), anchor = etDay().end, appts = [];
+  for (let w = 0; w < 4; w++) { const end = new Date(+anchor - w * 7 * 864e5), start = new Date(+end - 7 * 864e5 + 1);   // same weeks the check-ups tab reads
+    appts.push(...(await cached('pomwk:' + start.toISOString().slice(0, 10), w ? 6 * 3600 : 120, () => pomRange(start, end))).map(pomStop)); }
+  const ahead = (await cached('pomahead', 120, () => pomRange(now, new Date(+now + 15 * 864e5)))).map(pomStop);
+  const workers = {}; [...appts, ...ahead].forEach(s => { if (s.tech && s.workerId) workers[s.tech] = s.workerId; });
+  const chk = [...appts, ...ahead].filter(s => pomCheckup(s)), sample = chk.find(s => s.customerId && s.serviceTypeId);
+  const rules = {}; ahead.filter(s => pomCheckup(s) && s.ruleId).sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
+    .forEach(s => { if (!rules[s.ruleId]) rules[s.ruleId] = { ruleId: s.ruleId, tech: s.tech, workerId: s.workerId, next: s, hour: ruleHour(s.rrule) }; });
+  const at = await atData(), people = at.drivers.filter(d => d.name), byTech = {};
+  Object.values(rules).forEach(r => { (byTech[r.tech] = byTech[r.tech] || []).push(r); });
+  const techNames = Object.keys(workers).map(name => ({ name }));
+  const ops = [], start = nextMonday9(now);
+  for (const d of people) {
+    const needs = d.status !== 'Inactive' && CHECKUP_ROLES.includes(d.role), notNeeded = d.status === 'Inactive' || (d.role && !CHECKUP_ROLES.includes(d.role));
+    const m = rampMatch(techNames, d.name), tech = m && m.name, mine = tech ? byTech[tech] || [] : [];
+    if (needs && !mine.length) ops.push(tech ? { op: 'create', key: 'c:' + tech, name: d.name, tech, workerId: workers[tech], role: d.role, when: start }
+      : { op: 'none', key: 'n:' + d.name, name: d.name, role: d.role, why: 'Not found in POM. Their name must match a POM user who has appointments.' });
+    if (notNeeded) mine.forEach(r => ops.push({ op: 'remove', key: 'r:' + r.ruleId, name: d.name, tech, ruleId: r.ruleId, next: r.next.rdate || r.next.time, role: d.status === 'Inactive' ? 'Inactive' : d.role }));
+  }
+  const removing = new Set(ops.filter(o => o.op === 'remove').map(o => o.ruleId));
+  Object.values(rules).filter(r => !removing.has(r.ruleId) && r.hour !== CHK_HOUR).forEach(r => {   // move everyone else's to Monday 9 AM
+    const from = [...ahead].filter(s => s.ruleId === r.ruleId && Date.parse(s.time) >= +start - 864e5).sort((a, b) => Date.parse(a.time) - Date.parse(b.time))[0];
+    if (from) ops.push({ op: 'move', key: 'm:' + r.ruleId, name: r.tech, tech: r.tech, ruleId: r.ruleId, workerId: r.workerId, from: from.rdate || from.time, hour: r.hour, when: start }); });
+  return { connected: true, auto: !!((cache.get('chkAuto') || {}).data || {}).on, customer: sample && sample.customerId, serviceType: sample && sample.serviceTypeId, start, ops };
+}
+const POM_RULE_CREATE = 'mutation($data: CreateAppointmentRecurringRuleInput!) { createAppointmentRecurringRule(data: $data) { id rruleString startDate } }';
+const POM_RULE_STOP = 'mutation($id: ID!, $from: AppointmentIdentifierInput, $all: Boolean) { stopAppointmentRecurringRule(appointmentRecurringRuleId: $id, appointmentIdentifier: $from, applyToSeries: $all) { id endDate } }';
+async function applyCheckups(keys) {
+  const plan = await checkupPlan(); if (!plan.connected) throw new Error('Pool Office Manager is not connected.');
+  if (!plan.customer || !plan.serviceType) throw new Error('Could not find an existing truck check-up in POM to copy the customer and service type from.');
+  const todo = plan.ops.filter(o => o.op !== 'none' && (keys === 'all' || keys.includes(o.key))), done = [], failed = [];
+  const create = (workerId, when) => pom(POM_RULE_CREATE, { data: { customer: plan.customer, serviceType: plan.serviceType, workers: [workerId], duration: 60, inventoryItems: [], rruleString: chkRrule(when), startDate: when.toISOString() } });
+  const stop = (ruleId, from) => pom(POM_RULE_STOP, { id: ruleId, from: { id: null, recurringRuleId: ruleId, recurringDate: from }, all: true });
+  for (const o of todo) {
+    try {
+      if (o.op === 'create') await create(o.workerId, new Date(o.when));
+      if (o.op === 'remove') await stop(o.ruleId, o.next);
+      if (o.op === 'move') { await stop(o.ruleId, o.from); await create(o.workerId, new Date(o.when)); }
+      done.push(o); console.log(new Date().toISOString(), 'POM check-up', o.op, o.name);
+    } catch (e) { failed.push({ ...o, error: e.message }); console.error('POM check-up', o.op, o.name, 'failed:', e.message); }
+  }
+  [...cache.keys()].filter(k => /^pom/.test(k)).forEach(k => cache.delete(k));   // re-read POM next time
+  return { done, failed };
+}
+async function autoCheckups() { if (!((cache.get('chkAuto') || {}).data || {}).on) return; try { const r = await applyCheckups('all'); if (r.done.length || r.failed.length) console.log('Check-up sync:', r.done.length, 'done,', r.failed.length, 'failed'); } catch (e) { console.error('Check-up sync failed:', e.message); } }
+if (process.argv[2] !== 'test') setInterval(autoCheckups, 60 * 60e3);
 
 // ---------------- Ramp: each driver's card spend over the last 30 days ----------------
 // Needs RAMP_CLIENT_ID / RAMP_CLIENT_SECRET (a Ramp developer app with transactions:read, reimbursements:read, users:read) in Render.
@@ -1433,10 +1496,14 @@ async function serveCheckup(res, id) {
     const at = await atData().catch(() => ({ trucks: [] })), tm = rampMatch(at.trucks.filter(t => t.driver && t.driver.name).map(t => ({ name: t.driver.name, t })), who), truck = tm ? tm.t : null;
     const val = (f, x) => { const t = String((f && f.type) || '').toLowerCase(), raw = x == null ? '' : String(x);
       if (/bool|check/.test(t) || /^(true|false)$/i.test(raw)) return /^(true|yes|1)$/i.test(raw) ? '<b class="yes">✓ Yes</b>' : '<b class="no">✕ No</b>';
+      if (/^\d{4}-\d{2}-\d{2}T/.test(raw) && !isNaN(Date.parse(raw))) return '<b>' + H(new Date(raw).toLocaleDateString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium' })) + '</b>';
       return raw ? '<b>' + H(raw) + '</b>' : '<b class="muted">–</b>'; };
-    const ans = (v.customFields || []).map(c => { const f = c.newCustomField || c.customField || {}; return f.name ? '<div><span>' + H(f.name) + '</span>' + val(f, c.value) + '</div>' : ''; }).join('');
     const pics = [...(v.media || []).filter(x => x.file && x.file.url && !/video/i.test(x.mediaType || '')).map(x => ({ url: (x.file.thumbnails && x.file.thumbnails.thumbnail900Url) || x.file.url, full: x.file.url, cap: x.customServiceReportFieldLabel || x.description || '' })),
-      ...(v.pictures || []).filter(x => x.file && x.file.url).map(x => ({ url: x.file.url, full: x.file.url, cap: x.description || '' }))];
+      ...(v.pictures || []).filter(x => x.file && x.file.url).map(x => ({ url: x.file.url, full: x.file.url, cap: x.description || '' }))]
+      .filter((x, i, a) => a.findIndex(y => y.full.split('/').pop() === x.full.split('/').pop()) === i);   // POM lists each photo twice (media + pictures)
+    const shown = new Set(pics.map(x => x.cap.toLowerCase()));
+    const ans = (v.customFields || []).map(c => { const f = c.newCustomField || c.customField || {}; if (!f.name || shown.has(f.name.toLowerCase())) return '';   // photo questions appear with their photo below
+      return '<div><span>' + H(f.name) + '</span>' + val(f, c.value) + '</div>'; }).join('');
     const notes = [v.customerNotes, v.internalNotes].filter(x => clean(x));
     const body = `<div class="card"><div class="head"><span class="score good" style="font-size:20px">✓<i>done</i></span><div><h2>${H(who)}</h2><div class="muted">Submitted ${H(when(v.endTime || v.startTime || v.createdAt))}${truck ? ' · ' + H([truck.truckNo && '#' + truck.truckNo.split(/[ ~(]/)[0], truck.year, truck.make, truck.model].filter(Boolean).join(' ')) : ''}${v.customServiceReport && v.customServiceReport.name ? ' · ' + H(v.customServiceReport.name) : ''}</div></div></div></div>`
       + `<div class="card"><h3 style="margin-top:0">Answers</h3>${ans ? '<div class="ans">' + ans + '</div>' : '<p class="muted">No form answers on this submission.</p>'}</div>`
@@ -1487,7 +1554,9 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
+  const POSTS = { '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+    '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
+    '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   if (POSTS[url.pathname]) {
     // JSON-only + POST-only, so another website can't trigger a change with a plain form
     if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
@@ -2207,6 +2276,19 @@ header[data-sky=night] .birds{display:none}
 .tcard.fin .pbar i::after{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='8' fill='none' stroke='white' stroke-width='6'/%3E%3Ccircle cx='12' cy='12' r='8' fill='none' stroke='%2322c55e' stroke-width='6' stroke-dasharray='6.28 6.28'/%3E%3Ccircle cx='12' cy='12' r='11' fill='none' stroke='%230b2533' stroke-opacity='.35'/%3E%3Ccircle cx='12' cy='12' r='5' fill='none' stroke='%230b2533' stroke-opacity='.35'/%3E%3C/svg%3E")}
 @keyframes ringbob{0%,100%{transform:translateY(0) rotate(-8deg)}50%{transform:translateY(-3px) rotate(8deg)}}
 @media (prefers-reduced-motion:reduce){.tcard .pbar i::after{animation:none}}
+
+.cplan{background:var(--card);border-radius:16px;padding:14px 18px;margin-bottom:14px;box-shadow:inset 0 3px 0 #0891b2,var(--sh)}
+.cph2{display:flex;align-items:center;gap:14px;flex-wrap:wrap}.cph2>div{flex:1;min-width:220px}.cph2 b{display:block;font-size:15px}.cph2 .muted{font-size:12.5px}
+.cauto{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:600;color:var(--ink2)}
+.cplan ul{list-style:none;margin:10px 0 0;padding:0}.cplan li{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--line);font-size:13.5px}.cplan li>span:nth-child(2){flex:1}
+.opi{flex:none;width:24px;height:24px;border-radius:8px;display:grid;place-items:center;font-weight:800}.op-create .opi{background:#dcfce7;color:#15803d}.op-move .opi{background:#e0f2fe;color:#0369a1}.op-remove .opi{background:#fee2e2;color:#dc2626}.op-none .opi{background:#fef3c7;color:#b45309}
+.cpmsg{margin:8px 0 0;font-size:12.5px}
+
+/* ===== v18: the live map follows the time of day ===== */
+.leaflet-tile-pane{transition:filter 1.5s}
+body:has(header[data-sky=dusk]) .leaflet-tile-pane,body:has(header[data-sky=dawn]) .leaflet-tile-pane{filter:sepia(.4) saturate(1.35) hue-rotate(-18deg) brightness(.96)}
+body:has(header[data-sky=night]) .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.92) contrast(.88) saturate(.75)}
+body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),0 0 14px rgba(125,211,252,.8)}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -2298,7 +2380,7 @@ header[data-sky=night] .birds{display:none}
 </div>
 <div id="vChk" hidden>
  <div class="crewhead"><div><h2>Truck check-ups</h2><p id="chkCount" class="muted">Loading check-ups from Pool Office Manager...</p></div></div>
- <div id="chkSum"></div><div id="chkGrid"></div>
+ <div id="chkSum"></div><div id="chkPlan"></div><div id="chkGrid"></div>
 </div>
 <div id="vCam" hidden>
  <div class="crewhead"><div><h2>Camera events</h2><p id="camCount" class="muted">Loading the last 7 days from Azuga...</p></div><span style="flex:1"></span>
@@ -3153,7 +3235,28 @@ const truckKind=m=>/transit|promaster|express|savana|sprinter|econoline|e-?serie
 // ---- Truck check-ups tab: the weekly POM truck form, per driver, week by week ----
 let CHK=null;
 async function loadChk(){if(!CHK)$('chkGrid').innerHTML='<div class="panel" style="padding:16px"><div class="sk" style="width:60%"></div><div class="sk" style="width:80%"></div></div>';
-  try{CHK=await get('/api/pom/checkups?weeks=8');renderChk()}catch(e){$('chkGrid').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
+  try{CHK=await get('/api/pom/checkups?weeks=8');renderChk()}catch(e){$('chkGrid').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}
+  loadPlan()}
+// POM schedule: what the site would create / move / stop so roles and the Monday 9 AM check-up line up
+let PLAN=null;
+async function loadPlan(){try{PLAN=await get('/api/pom/checkup-plan');renderPlan()}catch(e){$('chkPlan').innerHTML='<div class="cplan"><b>POM schedule</b><p class="muted">'+esc(e.message)+'</p></div>'}}
+function renderPlan(){const r=PLAN;if(!r||!r.connected){$('chkPlan').innerHTML='';return}
+  const d=t=>new Date(t).toLocaleString([],{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}),hr=h=>h==null?'another time':((h%12)||12)+(h<12?' AM':' PM');
+  const txt={create:o=>'<b>Add</b> a Monday 9 AM truck check-up for <b>'+esc(o.name)+'</b> ('+esc(o.role)+'), starting '+d(o.when),
+    move:o=>'<b>Move</b> <b>'+esc(o.name)+'</b>\u2019s check-up from '+hr(o.hour)+' to Monday 9 AM, starting '+d(o.when),
+    remove:o=>'<b>Stop</b> <b>'+esc(o.name)+'</b>\u2019s weekly check-up from '+d(o.next)+' ('+esc(o.role)+' doesn\u2019t submit one)',
+    none:o=>'<b>'+esc(o.name)+'</b> ('+esc(o.role)+') needs a check-up but '+esc(o.why)};
+  const ops=r.ops,act=ops.filter(o=>o.op!=='none');
+  $('chkPlan').innerHTML='<div class="cplan"><div class="cph2"><div><b>POM schedule</b><span class="muted">'+(act.length?act.length+' change'+(act.length>1?'s':'')+' to line POM up with roles':'POM matches everyone\u2019s role. Nothing to change.')+'</span></div>'
+    +'<label class="cauto"><input type="checkbox" id="chkAuto"'+(r.auto?' checked':'')+'> Keep POM in sync automatically</label>'+(act.length?'<button class="btn2 pri" id="chkAll">Apply all '+act.length+'</button>':'')+'</div>'
+    +(ops.length?'<ul>'+ops.map(o=>'<li class="op-'+o.op+'"><span class="opi">'+({create:'+',move:'⟳',remove:'−',none:'!'})[o.op]+'</span><span>'+txt[o.op](o)+'</span>'+(o.op!=='none'?'<button class="btn2" data-key="'+esc(o.key)+'">Apply</button>':'')+'</li>').join('')+'</ul>':'')
+    +'<p class="cpmsg muted" id="chkMsg"></p></div>';
+  $('chkAuto').onchange=async e=>{try{await post('/api/pom/checkup-auto',{on:e.target.checked});$('chkMsg').textContent=e.target.checked?'On: POM is checked every hour and right after a role change.':'Off: changes only happen when you press Apply.'}catch(err){e.target.checked=!e.target.checked;$('chkMsg').textContent=err.message}};
+  const run=async(body,btn)=>{btn.disabled=true;const m=$('chkMsg');m.textContent='Updating POM...';
+    try{const x=await post('/api/pom/checkup-apply',body);m.textContent=x.done.length+' change'+(x.done.length===1?'':'s')+' made in POM.'+(x.failed.length?' '+x.failed.length+' failed: '+x.failed.map(f=>f.name+' ('+f.error+')').join('; '):'');CHK=null;loadChk()}
+    catch(err){m.textContent=err.message;btn.disabled=false}};
+  if($('chkAll'))$('chkAll').onclick=e=>{if(confirm('Make all '+act.length+' changes in Pool Office Manager?'))run({all:true},e.target)};
+  $('chkPlan').querySelectorAll('li button').forEach(b=>b.onclick=()=>run({keys:[b.dataset.key]},b))}
 function renderChk(){const r=CHK;if(!r)return;
   if(!r.connected){$('chkCount').textContent='Pool Office Manager is not connected (add POM_API_KEY in Render).';$('chkSum').innerHTML=$('chkGrid').innerHTML='';return}
   const ymd=t=>new Date(t).toLocaleDateString('en-CA',{timeZone:'America/New_York'}),now=r.now;
