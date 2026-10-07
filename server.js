@@ -139,7 +139,8 @@ const routes = {
     const out = {}, tryIt = async (k, q, v) => { try { out[k] = await pom(q, v); } catch (e) { out[k] = { error: e.message }; } };
     await tryIt('needs', 'mutation($data: CreateAppointmentRecurringRuleInput!) { createAppointmentRecurringRule(data: $data) { id } }', { data: {} });
     await tryIt('unknown', 'mutation($data: CreateAppointmentRecurringRuleInput!) { createAppointmentRecurringRule(data: $data) { id } }', { data: { zzzNotAField: 1 } });
-    await tryIt('users', '{ infiniteUsers(first: 200) { edges { node { id firstName lastName isActive } } } }');
+    await tryIt('users', 'query { infiniteUsers(first: 50) { edges { node { id firstName lastName isActive } } pageInfo { hasNextPage } } }');
+    await tryIt('usersPlain', 'query { infiniteUsers { edges { node { id firstName lastName } } } }');
     const { start } = etDay(), from = new Date(+start - 8 * 864e5);
     await tryIt('rules', `query($s: AppointmentsV2Selector) { infiniteAppointmentsV2(selector: $s, first: 200) { edges { node { id date duration recurringRuleId recurringDate
       recurringRule { id rruleString startDate endDate } serviceType { id display } customer { id firstName lastName } primaryWorker { id firstName lastName } } } } }`,
@@ -942,7 +943,10 @@ async function pom(query, variables) {
     if (st !== 'bearer') h['x-api-key'] = key;
     const r = await fetch(POM_GQL, { method: 'POST', headers: h, body: JSON.stringify({ query, variables }) });
     const j = await r.json().catch(() => ({}));
-    const err = (j.errors || []).map(e => e.message).join('; ');
+    const why = e => { const x = e.extensions || {}, o = x.originalError || x.exception || x.response || {}, m = [].concat(o.message || x.message || []).filter(v => v && v !== e.message);
+      return e.message + (m.length ? ' (' + m.join(', ') + ')' : x.code && x.code !== 'BAD_REQUEST' ? ' (' + x.code + ')' : ''); };
+    const err = (j.errors || []).map(why).join('; ');
+    if (err && /^\s*mutation/.test(query)) { console.error('POM write refused:', err, JSON.stringify(j.errors).slice(0, 800)); throw new Error('Pool Office Manager said: ' + err); }
     if (r.ok && j.data && !/unauth|forbidden|not authenticated|invalid.*(key|token)/i.test(err)) { pomAuth = st; if (err) console.error('POM partial:', err); return j.data; }
     last = r.status + ' ' + (err || JSON.stringify(j).slice(0, 160));
     if (pomAuth) break;
@@ -1014,16 +1018,24 @@ function nextMonday9(after = new Date()) {   // the first Monday 9:00 AM New Jer
 }
 const chkRrule = t => { const ymd = etDay(t).ymd.replace(/-/g, ''); return 'DTSTART;TZID=US/Eastern:' + ymd + 'T' + String(CHK_HOUR).padStart(2, '0') + '0000\nRRULE:FREQ=WEEKLY;WKST=MO;BYDAY=MO;BYHOUR=' + CHK_HOUR + ';BYMINUTE=0;BYSECOND=0'; };
 const ruleHour = r => { const m = /BYHOUR=(\d+)/.exec(r || ''); return m ? +m[1] : null; };
+// POM user ids (a new appointment's workers are users; the ids on existing appointments belong to the appointment's worker links)
+const pomUsers = () => cached('pomusers', 3600, async () => { const out = []; let after = null;
+  for (let i = 0; i < 20; i++) { const d = await pom('query($a: String) { infiniteUsers(first: 50, after: $a) { edges { node { id firstName lastName isActive } } pageInfo { endCursor hasNextPage } } }', { a: after });
+    const c = d.infiniteUsers || {}; (c.edges || []).forEach(e => e && e.node && out.push(e.node)); if (!c.pageInfo || !c.pageInfo.hasNextPage) break; after = c.pageInfo.endCursor; }
+  return out.filter(u => u.isActive !== false).map(u => ({ id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' ') })); });
 async function checkupPlan() {
   if (!clean(process.env.POM_API_KEY)) return { connected: false };
   const now = new Date(), anchor = etDay().end, appts = [];
   for (let w = 0; w < 4; w++) { const end = new Date(+anchor - w * 7 * 864e5), start = new Date(+end - 7 * 864e5 + 1);   // same weeks the check-ups tab reads
     appts.push(...(await cached('pomwk:' + start.toISOString().slice(0, 10), w ? 6 * 3600 : 120, () => pomRange(start, end))).map(pomStop)); }
   const ahead = (await cached('pomahead', 120, () => pomRange(now, new Date(+now + 15 * 864e5)))).map(pomStop);
-  const workers = {}; [...appts, ...ahead].forEach(s => { if (s.tech && s.workerId) workers[s.tech] = s.workerId; });
+  const users = await pomUsers().catch(e => { console.error('POM users:', e.message); return null; });
+  const userOf = n => users && rampMatch(users, n), workers = {};
+  [...appts, ...ahead].forEach(s => { if (s.tech) workers[s.tech] = (userOf(s.tech) || {}).id || null; });
+  (users || []).forEach(u => { if (!(u.name in workers)) workers[u.name] = u.id; });
   const chk = [...appts, ...ahead].filter(s => pomCheckup(s)), sample = chk.find(s => s.customerId && s.serviceTypeId);
   const rules = {}; ahead.filter(s => pomCheckup(s) && s.ruleId).sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
-    .forEach(s => { if (!rules[s.ruleId]) rules[s.ruleId] = { ruleId: s.ruleId, tech: s.tech, workerId: s.workerId, next: s, hour: ruleHour(s.rrule) }; });
+    .forEach(s => { if (!rules[s.ruleId]) rules[s.ruleId] = { ruleId: s.ruleId, tech: s.tech, workerId: s.tech ? workers[s.tech] : null, next: s, hour: ruleHour(s.rrule) }; });
   const at = await atData(), people = at.drivers.filter(d => d.name), byTech = {};
   Object.values(rules).forEach(r => { (byTech[r.tech] = byTech[r.tech] || []).push(r); });
   const techNames = Object.keys(workers).map(name => ({ name }));
@@ -1031,15 +1043,15 @@ async function checkupPlan() {
   for (const d of people) {
     const needs = d.status !== 'Inactive' && CHECKUP_ROLES.includes(d.role), notNeeded = d.status === 'Inactive' || (d.role && !CHECKUP_ROLES.includes(d.role));
     const m = rampMatch(techNames, d.name), tech = m && m.name, mine = tech ? byTech[tech] || [] : [];
-    if (needs && !mine.length) ops.push(tech ? { op: 'create', key: 'c:' + tech, name: d.name, tech, workerId: workers[tech], role: d.role, when: start }
-      : { op: 'none', key: 'n:' + d.name, name: d.name, role: d.role, why: 'Not found in POM. Their name must match a POM user who has appointments.' });
+    if (needs && !mine.length) ops.push(tech && workers[tech] ? { op: 'create', key: 'c:' + tech, name: d.name, tech, workerId: workers[tech], role: d.role, when: start }
+      : { op: 'none', key: 'n:' + d.name, name: d.name, role: d.role, why: users ? 'Not found in POM. Their name must match a POM user.' : 'POM\u2019s user list could not be read, so the site can\u2019t look them up.' });
     if (notNeeded) mine.forEach(r => ops.push({ op: 'remove', key: 'r:' + r.ruleId, name: d.name, tech, ruleId: r.ruleId, next: r.next.rdate || r.next.time, role: d.status === 'Inactive' ? 'Inactive' : d.role }));
   }
   const removing = new Set(ops.filter(o => o.op === 'remove').map(o => o.ruleId));
   Object.values(rules).filter(r => !removing.has(r.ruleId) && r.hour !== CHK_HOUR).forEach(r => {   // move everyone else's to Monday 9 AM
     const from = [...ahead].filter(s => s.ruleId === r.ruleId && Date.parse(s.time) >= +start - 864e5).sort((a, b) => Date.parse(a.time) - Date.parse(b.time))[0];
-    if (from) ops.push({ op: 'move', key: 'm:' + r.ruleId, name: r.tech, tech: r.tech, ruleId: r.ruleId, workerId: r.workerId, from: from.rdate || from.time, hour: r.hour, when: start }); });
-  return { connected: true, auto: !!((cache.get('chkAuto') || {}).data || {}).on, customer: sample && sample.customerId, serviceType: sample && sample.serviceTypeId, start, ops };
+    if (from && r.workerId) ops.push({ op: 'move', key: 'm:' + r.ruleId, name: r.tech, tech: r.tech, ruleId: r.ruleId, workerId: r.workerId, from: from.rdate || from.time, hour: r.hour, when: start }); });
+  return { connected: true, usersOk: !!users, auto: !!((cache.get('chkAuto') || {}).data || {}).on, customer: sample && sample.customerId, serviceType: sample && sample.serviceTypeId, start, ops };
 }
 const POM_RULE_CREATE = 'mutation($data: CreateAppointmentRecurringRuleInput!) { createAppointmentRecurringRule(data: $data) { id rruleString startDate } }';
 const POM_RULE_STOP = 'mutation($id: ID!, $from: AppointmentIdentifierInput, $all: Boolean) { stopAppointmentRecurringRule(appointmentRecurringRuleId: $id, appointmentIdentifier: $from, applyToSeries: $all) { id endDate } }';
@@ -1051,11 +1063,13 @@ async function applyCheckups(keys) {
   const stop = (ruleId, from) => pom(POM_RULE_STOP, { id: ruleId, from: { id: null, recurringRuleId: ruleId, recurringDate: from }, all: true });
   for (const o of todo) {
     try {
+      if ((o.op === 'create' || o.op === 'move') && !o.workerId) throw new Error('No POM worker on this check-up, so it was left as it is.');
       if (o.op === 'create') await create(o.workerId, new Date(o.when));
       if (o.op === 'remove') await stop(o.ruleId, o.next);
-      if (o.op === 'move') { await stop(o.ruleId, o.from); await create(o.workerId, new Date(o.when)); }
+      if (o.op === 'move') { await create(o.workerId, new Date(o.when)); await stop(o.ruleId, o.from); }   // new one first: a failure never leaves someone without a check-up
       done.push(o); console.log(new Date().toISOString(), 'POM check-up', o.op, o.name);
-    } catch (e) { failed.push({ ...o, error: e.message }); console.error('POM check-up', o.op, o.name, 'failed:', e.message); }
+    } catch (e) { failed.push({ ...o, error: e.message }); console.error('POM check-up', o.op, o.name, 'failed:', e.message);
+      if (keys === 'all') { failed.push(...todo.slice(todo.indexOf(o) + 1).map(x => ({ ...x, error: 'Not tried: stopped after the first error.' }))); break; } }
   }
   [...cache.keys()].filter(k => /^pom/.test(k)).forEach(k => cache.delete(k));   // re-read POM next time
   return { done, failed };
@@ -2289,6 +2303,12 @@ header[data-sky=night] .birds{display:none}
 body:has(header[data-sky=dusk]) .leaflet-tile-pane,body:has(header[data-sky=dawn]) .leaflet-tile-pane{filter:sepia(.4) saturate(1.35) hue-rotate(-18deg) brightness(.96)}
 body:has(header[data-sky=night]) .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.92) contrast(.88) saturate(.75)}
 body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),0 0 14px rgba(125,211,252,.8)}
+
+/* ===== v19: heartbeat line in the Live badge ===== */
+.live .ekg{width:34px;height:12px;flex:none;margin:0 2px 0 -2px}.live .ekg path{fill:none;stroke:#4ade80;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:60;stroke-dashoffset:60;animation:ekg 2.4s linear infinite;filter:drop-shadow(0 0 3px rgba(74,222,128,.8))}
+.live.down .ekg path{stroke:#f59e0b;animation:none;stroke-dashoffset:0;filter:none}
+@keyframes ekg{0%{stroke-dashoffset:60}55%{stroke-dashoffset:0}100%{stroke-dashoffset:-60}}
+@media (prefers-reduced-motion:reduce){.live .ekg path{animation:none;stroke-dashoffset:0}}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -2298,7 +2318,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
  <div id="floaty" aria-hidden="true"></div>
  <svg class="hwave front" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M3 9c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0"/><path d="M3 15c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0" opacity=".6"/></svg></div><div>Millennial Pools<small>Fleet</small></div></div>
- <div class="live" id="live"><span class="dot"></span><span id="upd">Connecting to Azuga...</span></div>
+ <div class="live" id="live"><span class="dot"></span><svg class="ekg" viewBox="0 0 40 14" aria-hidden="true"><path d="M0 7h12l3-5 4 10 3-8 2 3h16"/></svg><span id="upd">Connecting to Azuga...</span></div>
  <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Live map</button><button data-v="vEdit"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l2-5h11l3 5v4H3z"/><circle cx="7" cy="17" r="2"/><circle cx="16" cy="17" r="2"/></svg>Edit vehicles</button><button data-v="vDrv"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><circle cx="17" cy="9" r="2.4"/><path d="M15.5 14.6c2.8.2 5 2.1 5 5.4"/></svg>Drivers</button><button data-v="vPom"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M2 19.5c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M8 12V5a2 2 0 0 1 4 0M14 12V5a2 2 0 0 1 4 0M8 8h6"/></svg>Pools</button><button data-v="vChk"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12l2 2 4-4M9 17h6"/></svg>Truck check-ups</button><button data-v="vCam"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3z"/></svg>Cameras</button><a class="reptab" href="/report" target="_blank" rel="noopener"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Score report</a></nav>
 </header>
 <div class="bar"><div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search trucks or drivers" aria-label="Search trucks or drivers"></div><nav class="sum" id="sum" aria-label="Filter vehicles"></nav>
