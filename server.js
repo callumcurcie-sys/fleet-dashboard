@@ -170,7 +170,8 @@ const routes = {
     return out; },
   '/api/pom/checkup-plan': () => checkupPlan(),
   '/api/repairs': async () => { if (!AIRTABLE_TOKEN) return { connected: false };
-    const at = await atData(); return { connected: true, trucks: at.trucks.filter(t => t.notes).map(t => ({ id: t.id, truckNo: t.truckNo, desc: [t.year, t.make, t.model].filter(Boolean).join(' '),
+    const at = await atData(), ramp = RAMP_CLIENT_ID && RAMP_CLIENT_SECRET ? await rampRepairs().catch(e => ({ error: e.message })) : null;
+    return { connected: true, ramp, trucks: at.trucks.map(t => ({ id: t.id, truckNo: t.truckNo, desc: [t.year, t.make, t.model].filter(Boolean).join(' '),
       driver: t.driver ? t.driver.name : '', notes: t.notes })) }; },
   '/api/pom/stops': async () => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
     return { connected: true, day: etDay().ymd, stops: (await pomToday()).map(pomStop).filter(s => s.tech && !pomCheckup(s) && s.lat && s.lng) }; },
@@ -632,12 +633,13 @@ async function addTruckNote(b) {
   const txt = text(b.text, 500, 'Note').replace(/\s+/g, ' ');
   if (!txt) throw new Error('Write a note first.');
   const src = clean(b.source).replace(/\s+/g, ' ').slice(0, 120);
-  const day = new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium' });
+  const ymd = /^\d{4}-\d{2}-\d{2}$/.test(b.day || '') ? b.day : '';
+  const day = ymd ? new Date(ymd + 'T12:00:00').toLocaleDateString('en-US', { dateStyle: 'medium' }) : new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium' });
   const when = l => { const m = /^([A-Z][a-z]{2} \d{1,2}, \d{4}) · /.exec(l); return m ? Date.parse(m[1]) : 0 };
   const notes = [day + ' · ' + (src ? src + ': ' : '') + txt].concat(t.notes ? t.notes.split('\n') : [])
     .map((l, i) => [l, i]).sort((a, b) => when(b[0]) - when(a[0]) || a[1] - b[1]).map(x => x[0]).join('\n').slice(0, 90000);
   const fields = { [F.notes]: notes };
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }), oil = oilFrom(txt, today);
+  const today = ymd || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }), oil = oilFrom(txt, today);
   if (oil && (!t.oilDate || oil.date >= t.oilDate)) { fields[F.oilDate] = oil.date; if (oil.miles) fields[F.oilMiles] = oil.miles; }
   await airtable(AT_TRUCKS, { method: 'PATCH', body: JSON.stringify({ records: [{ id: t.id, fields }] }) });
   cache.delete('airtable');
@@ -661,6 +663,28 @@ function oilFrom(txt, today) {
   if (mm && (mm[1] || mm[3])) miles = Math.round(/^k/i.test(mm[3] || '') ? parseFloat(mm[2].replace(/,/g, '')) * 1000 : +mm[2].replace(/,/g, ''));
   if (miles != null && (miles < 1000 || miles > 2e6)) miles = null;
   return { date, miles };
+}
+// Invoice from the Repairs tab (often a phone photo): the photo goes into the truck's files, the details into its notes
+async function addRepair(b) {
+  const at = await atData(), t = at.trucks.find(x => x.id === String(b.truckId || ''));
+  if (!t) throw new Error('Pick the truck this invoice is for.');
+  const ymd = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') && b.date <= new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) ? b.date : new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const shop = clean(b.shop).replace(/[:·\n]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'Shop';
+  const work = clean(b.work).replace(/\s+/g, ' ').trim().replace(/\.+$/, '').slice(0, 300);
+  const raw = String(b.total ?? '').replace(/[$,\s]/g, ''), total = raw === '' ? null : Number(raw);
+  if (total !== null && !(total >= 0 && total < 1e6)) throw new Error('Total should be a dollar amount, like 249.99.');
+  const photo = okPhoto(b.photo) ? b.photo : null;
+  if (!photo && !work) throw new Error('Take a photo or write what was done.');
+  if (photo) {
+    const up = await fetch('https://content.airtable.com/v0/' + AT_BASE + '/' + t.id + '/' + F.files + '/uploadAttachment', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + AIRTABLE_TOKEN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contentType: photo.type, file: photo.data, filename: 'invoice-' + ymd + '-' + (shop.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'shop') + '.jpg' }) });
+    if (!up.ok) throw new Error('Could not save the photo to Airtable (' + up.status + '). Try again.');
+  }
+  const amt = total === null ? 'Total not entered' : total === 0 ? 'No charge shown' : 'Total $' + total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const r = await addTruckNote({ truckId: t.id, day: ymd, source: 'From ' + shop + (b.estimate === true ? ' estimate' : ' invoice'), text: (work || 'Invoice photo added, details to fill in') + '. ' + amt });
+  console.log(new Date().toISOString(), 'Invoice added', t.truckNo || t.id, shop, amt, photo ? 'with photo' : '');
+  return r;
 }
 async function deleteTruckNote(b) {
   const at = await atData(), t = at.trucks.find(x => x.id === String(b.truckId || ''));
@@ -1228,6 +1252,31 @@ function rampMatch(people, name) {
     return t.length > 1 && sameFirst(w[0], t[0]) && w.slice(1).some(x => x === last || (x.length >= 4 && near(x, last))); });
   return hits.length === 1 ? hits[0] : null;
 }
+// Ramp card payments to mechanics, tire and tow shops (or with a truck-repair memo), for the Repairs tab.
+// Car washes and tire air don't count. Truck: from the memo ("truck 1", "#13") or else the cardholder's own truck in Airtable.
+const REPAIR_MCC = new Set(['7538', '7531', '7549', '5532', '7534', '7535', '5533']);
+const REPAIR_WORDS = /\b(truck|vehicle|oil change|brakes?|tires?|tow(ing)?|mechanic|alignment|transmission|inspection|battery|muffler|exhaust|radiator|alternator|starter)\b/i;
+const AUTO_SHOP = /auto|repair|motor|tire|lube|valvoline|vioc|jiffy|midas|meineke|pep boys|firestone|goodyear|towing|transmission|brake|muffler/i;
+const rampRepairs = () => cached('rampRepairs', 3600, async () => {
+  const since = new Date(Date.now() - 400 * 864e5), at = await atData(), out = [];
+  const money = a => typeof a === 'number' ? a : Number(a && a.amount) / 100 || 0;
+  const drivers = at.trucks.filter(t => t.driver && !['District', 'Regional', 'Owner', 'Staffer'].includes(t.driver.role)).map(t => ({ name: t.driver.name, t }));
+  const truckFor = (memo, who) => { const m = /\btruck\s*#?\s*(\d{1,2})\b|#\s?(\d{1,2})\b/i.exec(memo || '');
+    if (m) { const n = m[1] || m[2], t = at.trucks.find(x => parseInt(x.truckNo) === +n); if (t) return { truckId: t.id, how: 'memo' }; }
+    const d = who && matchPerson(drivers, who); return d ? { truckId: d.t.id, how: 'driver' } : { truckId: null, how: '' }; };
+  for (const t of await rampAll('transactions', { from_date: since.toISOString() })) {
+    if (/DECLINED|ERROR/i.test(t.state || '')) continue;
+    const merchant = clean(t.merchant_name || (t.merchant_descriptor || '')), memo = clean(t.memo || ''), amt = money(t.amount), cat = String(t.sk_category_name || '');
+    const mcc = String(t.merchant_category_code || (t.merchant_data && t.merchant_data.mcc) || '');
+    const carSvc = /car service|automotive|auto repair/i.test(cat) || REPAIR_MCC.has(mcc);
+    if (!(amt >= 10) || !(carSvc || (REPAIR_WORDS.test(memo) && AUTO_SHOP.test(merchant)))) continue;
+    if (/wash/i.test(merchant + ' ' + memo) && !/oil|repair|brake|tire|service/i.test(memo)) continue;
+    const h = t.card_holder || {}, who = [h.first_name, h.last_name].filter(Boolean).join(' ');
+    out.push({ id: t.id, date: (t.user_transaction_time || t.settlement_date || '').slice(0, 10), amount: amt, merchant, memo, who, ...truckFor(memo, who),
+      link: 'https://app.ramp.com/business-overview/transactions/' + t.id });
+  }
+  return out;
+});
 async function rampFor(name) {
   if (!RAMP_CLIENT_ID || !RAMP_CLIENT_SECRET) return { connected: false };
   const c = cache.get('ramp'); if (c && c.data && c.data.v !== 2) cache.delete('ramp');   // old saved copy: refetch
@@ -1455,7 +1504,7 @@ const { DASHBOARD_PASSWORD } = process.env;
 const crypto = require('crypto');
 const SHARE_DAYS = 30;
 const shareKey = () => process.env.SHARE_SECRET || DASHBOARD_PASSWORD || '';
-const signShare = obj => { const b = Buffer.from(JSON.stringify({ ...obj, x: Date.now() + SHARE_DAYS * 864e5 })).toString('base64url');
+const signShare = (obj, days = SHARE_DAYS) => { const b = Buffer.from(JSON.stringify({ ...obj, x: Date.now() + days * 864e5 })).toString('base64url');
   return b + '.' + crypto.createHmac('sha256', shareKey()).update(b).digest('base64url').slice(0, 32); };
 function readShare(tok) {
   const [b, sig] = String(tok || '').split('.');
@@ -1658,6 +1707,40 @@ async function serveReport(res, kind, name, base, publicView, tok) {
     return send(fleetHtml(rows, publicView ? null : share({ k: 'f' }), n => publicView ? share({ k: 'd', n }) : '/report?driver=' + encodeURIComponent(n)));
   } catch (e) { res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(pageShell('Report not ready', `<div class="card">${H(e.message)}</div>`)); }
 }
+// Shared invoice upload page (/r/<token> with k:'i'): anyone with the link can add an invoice to a truck, nothing else
+const INVOICE_PAGE_JS = String.raw`
+const $=id=>document.getElementById(id);let photo=null;
+const shrink=(file,max)=>new Promise((ok,no)=>{const img=new Image();img.onload=()=>{const k=Math.min(1,max/Math.max(img.width,img.height)),c=document.createElement('canvas');c.width=Math.round(img.width*k);c.height=Math.round(img.height*k);const g=c.getContext('2d');g.fillStyle='#fff';g.fillRect(0,0,c.width,c.height);g.drawImage(img,0,0,c.width,c.height);ok(c)};img.onerror=()=>no(new Error('That file is not an image.'));img.src=URL.createObjectURL(file)});
+$('date').value=new Date().toLocaleDateString('en-CA');$('date').max=$('date').value;
+$('cam').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{const c=await shrink(f,2000),u=c.toDataURL('image/jpeg',.82);photo={type:'image/jpeg',data:u.split(',')[1]};$('prev').src=u;$('prev').hidden=false;$('camt').textContent='Retake photo'}catch(err){$('msg').textContent='Could not read that photo. Try again.'}};
+$('save').onclick=async()=>{const m=$('msg');m.className='msg';m.textContent='';
+  if(!$('truck').value){m.textContent='Pick the truck first.';return}if(!photo&&!$('work').value.trim()){m.textContent='Take a photo or write what was done.';return}
+  $('save').disabled=true;$('save').textContent='Saving...';
+  try{const r=await fetch(location.pathname.replace(/\/$/,'')+'/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({truckId:$('truck').value,date:$('date').value,shop:$('shop').value,total:$('tot').value,work:$('work').value,estimate:$('est').checked,photo})}),j=await r.json();
+    if(!r.ok)throw new Error(j.error||'Could not save');
+    m.className='msg ok';m.textContent='Saved. Thank you! You can add another one.';photo=null;$('prev').hidden=true;$('camt').textContent='📷 Take a photo of the invoice';['cam','shop','tot','work'].forEach(i=>$(i).value='');$('est').checked=false;scrollTo({top:0,behavior:'smooth'})}
+  catch(err){m.textContent=err.message}$('save').disabled=false;$('save').textContent='Save invoice'};`;
+function invoicePage(trucks) {
+  const opts = trucks.slice().sort((a, b) => (parseInt(a.truckNo) || 999) - (parseInt(b.truckNo) || 999))
+    .map(t => '<option value="' + H(t.id) + '">' + H((t.truckNo ? '#' + t.truckNo.split(/[ ~(]/)[0] + ' ' : '') + [t.year, t.make, t.model].filter(Boolean).join(' ') + (t.driver ? ' · ' + t.driver.name : '')) + '</option>').join('');
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Add a truck invoice · Millennial Pools</title><style>'
+    + 'body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:linear-gradient(180deg,#0a4660 0,#0e7490 180px,#f0f9fb 180px);color:#0f172a;min-height:100vh}'
+    + '.w{max-width:520px;margin:0 auto;padding:22px 16px 40px}h1{color:#fff;font-size:22px;margin:0 0 4px}.sub{color:#cffafe;font-size:14px;margin:0 0 18px}'
+    + '.card{background:#fff;border-radius:18px;padding:16px;box-shadow:0 14px 34px -18px rgba(8,74,99,.6)}'
+    + '.cam{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;min-height:140px;border:2px dashed #67e8f9;border-radius:14px;background:#ecfeff;color:#0e7490;font-weight:700;cursor:pointer;padding:10px;text-align:center;font-size:16px}'
+    + '.cam input{position:absolute;width:1px;height:1px;opacity:0}.cam img{max-width:100%;max-height:300px;border-radius:10px}'
+    + 'label{display:flex;flex-direction:column;gap:5px;font-size:13px;font-weight:700;color:#475569;margin-top:12px}input,select{font:inherit;font-size:16px;font-weight:400;padding:11px;border:1px solid #cbd5e1;border-radius:11px;min-height:46px;box-sizing:border-box;width:100%;background:#fff;color:#0f172a}'
+    + '.chk{flex-direction:row;align-items:center;gap:10px;font-weight:600}.chk input{width:22px;min-height:22px}.hint{font-size:12.5px;color:#64748b;margin:12px 0}'
+    + 'button{width:100%;font:inherit;font-size:17px;font-weight:800;color:#fff;background:linear-gradient(135deg,#0891b2,#0e7490);border:0;border-radius:13px;min-height:52px;cursor:pointer}button:disabled{opacity:.6}'
+    + '.msg{margin-top:10px;font-size:14px;color:#b45309;min-height:20px}.msg.ok{color:#15803d;font-weight:700}</style></head><body><div class="w">'
+    + '<h1>Add a truck invoice</h1><p class="sub">Millennial Pools · photos go straight to the truck’s file</p><div class="card">'
+    + '<label class="cam" style="margin:0"><input type="file" accept="image/*" capture="environment" id="cam"><img id="prev" alt="" hidden><span id="camt">📷 Take a photo of the invoice</span></label>'
+    + '<label>Truck<select id="truck"><option value="">Pick the truck...</option>' + opts + '</select></label>'
+    + '<label>Date<input type="date" id="date"></label><label>Shop<input id="shop" maxlength="60" placeholder="e.g. Steve’s Auto Body"></label>'
+    + '<label>Total<input id="tot" inputmode="decimal" placeholder="$0.00"></label><label>Work done<input id="work" maxlength="300" placeholder="e.g. Oil change, front brake pads"></label>'
+    + '<label class="chk"><input type="checkbox" id="est"> This is an estimate, not a final invoice</label>'
+    + '<p class="hint">Only the photo and truck are needed.</p><button id="save">Save invoice</button><div class="msg" id="msg"></div></div></div><script>' + INVOICE_PAGE_JS + '</script></body></html>';
+}
 // Azuga's camera storage only serves files to pages on azuga.com, so the server fetches them
 // and passes them through. Locked to Azuga's recording bucket so it can't fetch anything else.
 async function media(u, req, res) {
@@ -1680,6 +1763,20 @@ http.createServer(async (req, res) => {
   if (req.url.startsWith('/r/')) {   // shared report: no login, but only with a valid signed link
     const [tok, sub] = req.url.slice(3).split('?')[0].split('/'), o = readShare(tok);
     if (!o) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('This report link is invalid or has expired. Ask for a new one.'); }
+    if (o.k === 'i') {   // invoice upload link: can add invoices, can't see anything else
+      try {
+        if (sub === 'add') {
+          if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
+          const out = await addRepair(await readJson(req, 8e6));
+          console.log(new Date().toISOString(), 'Invoice added through the shared upload link');
+          res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: true, oil: !!out.oil }));
+        }
+        if (sub) { res.writeHead(404); return res.end(); }
+        const at = await atData();
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }); return res.end(invoicePage(at.trucks));
+      } catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: e.message })); }
+    }
+    if (o.k !== 'd' && o.k !== 'f') { res.writeHead(404); return res.end(); }
     if (sub === 'm') return media(new URL(req.url, 'http://x').searchParams.get('u'), req, res);   // camera clip/photo for this shared report (Azuga's bucket only)
     return serveReport(res, o.k === 'd' ? 'driver' : 'fleet', o.n, base, true, tok);
   }
@@ -1690,14 +1787,14 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/truck/note': addTruckNote, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/repair/add': addRepair, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   if (POSTS[url.pathname]) {
     // JSON-only + POST-only, so another website can't trigger a change with a plain form
     if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
     try {
-      const b = await readJson(req, /^\/api\/driver\/(create|update)$/.test(url.pathname) ? 8e6 : 10000);  // room for a license photo
+      const b = await readJson(req, /^\/api\/(driver\/(create|update)|repair\/add)$/.test(url.pathname) ? 8e6 : 10000);  // room for a license photo
       const out = await POSTS[url.pathname](b);
       res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(out));
     } catch (e) {
@@ -2451,6 +2548,17 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 @keyframes wavey{to{background-position:40px 0}}@media (prefers-reduced-motion:reduce){.crewhead h2::after{animation:none}}
 
 /* vehicle notes */
+.rp-ramp{font-size:10.5px;font-weight:800;color:#047857;background:#d1fae5;border-radius:6px;padding:1px 7px;text-decoration:none}.rp-ramp:hover{background:#a7f3d0}.rp-chip.unk{background:#94a3b8}
+.pbs{position:relative;overflow:hidden}.pbs::after{content:'';position:absolute;top:0;bottom:0;left:-40%;width:30%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.22),transparent);transform:skewX(-18deg);animation:pbsheen 5.5s ease-in-out infinite;pointer-events:none}@keyframes pbsheen{0%,55%{left:-40%}100%{left:130%}}
+.tabs a.reptab{background:linear-gradient(90deg,#e4f222,#fde68a,#facc15,#e4f222);background-size:300% 100%;-webkit-background-clip:text;background-clip:text;color:transparent!important;animation:goldrun 4s linear infinite}.tabs a.reptab .ti{color:#e4f222}@keyframes goldrun{to{background-position:300% 0}}
+.rp-add{padding:14px 16px;margin-bottom:14px;animation:vnin .3s ease-out}.rp-addh{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.rp-addh b{font-size:15px}
+.rp-cam{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;min-height:120px;border:2px dashed #67e8f9;border-radius:14px;background:#ecfeff;color:#0e7490;font-weight:700;cursor:pointer;padding:10px;text-align:center}
+.rp-cam input{position:absolute;width:1px;height:1px;opacity:0}.rp-cam img{max-width:100%;max-height:260px;border-radius:10px;box-shadow:0 6px 16px -8px rgba(0,0,0,.4)}
+.rp-f{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}.rp-f label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:700;color:#475569}
+.rp-f input,.rp-f select{font:inherit;font-size:16px;font-weight:400;padding:10px;border:1px solid #cbd5e1;border-radius:10px;min-height:44px;width:100%;box-sizing:border-box;background:#fff}.rp-f .rp-wide,.rp-f .rp-chk{grid-column:1/-1}
+.rp-f .rp-chk{flex-direction:row;align-items:center;gap:8px;font-weight:600}.rp-f .rp-chk input{width:20px;min-height:20px}
+@media(max-width:600px){.rp-f{grid-template-columns:1fr}#repAdd{width:100%;order:9}}
+
 #vRep{padding:14px 24px 24px;max-width:1240px;margin:0 auto;animation:fadein .3s ease-out}body[data-v=vRep] .vopt{display:none}body[data-v=vRep] .bar{max-width:1240px;margin:0 auto}
 #repMiss[aria-pressed=true]{background:#f59e0b;color:#fff;border-color:#f59e0b}
 .rp-grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;align-items:start}@media(max-width:900px){#vRep{padding:12px 16px}.rp-grid{grid-template-columns:1fr}}
@@ -2590,7 +2698,8 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
  <div id="chkSum"></div><div id="chkPlan"></div><div id="chkGrid"></div>
 </div>
 <div id="vRep" hidden>
- <div class="crewhead"><div><h2>Repairs</h2><p id="repCount" class="muted">Loading repairs from Airtable...</p></div><span style="flex:1"></span><button class="btn2" id="repMiss" aria-pressed="false">Missing a total</button></div>
+ <div class="crewhead"><div><h2>Repairs</h2><p id="repCount" class="muted">Loading repairs from Airtable...</p></div><span style="flex:1"></span><button class="btn2" id="repMiss" aria-pressed="false">Missing a total</button><button class="btn2" id="repLink">🔗 Share upload link</button><button class="btn2 pri" id="repAdd">📷 Add invoice</button></div>
+ <div id="repNew"></div>
  <div id="repSum"></div><div class="rp-grid"><div id="repList"></div><aside id="repSide"></aside></div>
 </div>
 <div id="vCam" hidden>
@@ -3562,24 +3671,68 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   if(b.dataset.v!=='vMap')loadSync();if(b.dataset.v==='vEdit')renderEdit();else if(b.dataset.v==='vDrv'){if(!PEOPLE)loadPeople();else renderDrivers()}else map.invalidateSize();
 });
 $('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();if(!$('vPom').hidden)renderPom();if(!$('vCam').hidden)renderCamTab();if(!$('vChk').hidden)renderChk();if(!$('vRep').hidden)renderRep();};
+/*repadd*/
+document.addEventListener('click',async e=>{if(!e.target.closest('#repLink'))return;try{const r=await post('/api/repair/link',{}),u=location.origin+r.url;
+  $('repNew').innerHTML='<div class="panel rp-add"><div class="rp-addh"><b>Invoice upload link</b><button class="btn2" id="repX">Close</button></div><p class="muted" style="font-size:13px;margin:0 0 10px">Anyone with this link can take a photo and add an invoice to a truck. They can\u2019t see or change anything else. It works for 1 year.</p><div class="lnk"><input readonly value="'+esc(u)+'" id="repLinkU" style="flex:1;font:inherit;padding:10px;border:1px solid #cbd5e1;border-radius:10px;min-width:0"><button class="btn2 pri" id="repCopy">Copy</button></div>'+(navigator.share?'<button class="btn2" id="repShare" style="width:100%;margin-top:8px">Send link...</button>':'')+'</div>';
+  $('repCopy').onclick=()=>{navigator.clipboard.writeText(u).then(()=>toast('Link copied'),()=>{$('repLinkU').select()})};if($('repShare'))$('repShare').onclick=()=>navigator.share({title:'Add a truck invoice',url:u}).catch(()=>{})}catch(err){toast(err.message,'bad')}});
+// Add an invoice from a phone: photo goes to the truck's files in Airtable, details become a repair note
+let repPhoto=null;
+function repForm(){const tr=(REP&&REP.trucks||[]).slice().sort((a,b)=>(parseInt(a.truckNo)||999)-(parseInt(b.truckNo)||999)||repName(a).localeCompare(repName(b)));
+  const shops=[...new Set(repParse(REP&&REP.trucks||[]).map(r=>r.shop))].sort();
+  return '<div class="panel rp-add"><div class="rp-addh"><b>Add an invoice</b><button class="btn2" id="repX" aria-label="Close">Close</button></div>'
+   +'<label class="rp-cam" id="repCamL"><input type="file" accept="image/*" capture="environment" id="repCam"><img id="repPrev" alt="" hidden><span id="repCamT">📷 Take a photo of the invoice</span></label>'
+   +'<div class="rp-f"><label>Truck<select id="repTruck"><option value="">Pick the truck...</option>'+tr.map(t=>'<option value="'+esc(t.id)+'">'+esc(repName(t))+(t.driver?' · '+esc(t.driver):'')+'</option>').join('')+'</select></label>'
+   +'<label>Date<input type="date" id="repDate" value="'+new Date().toLocaleDateString('en-CA')+'"></label>'
+   +'<label>Shop<input id="repShop" list="repShops" placeholder="e.g. Steve’s Auto Body" maxlength="60"><datalist id="repShops">'+shops.map(s=>'<option value="'+esc(s)+'">').join('')+'</datalist></label>'
+   +'<label>Total<input id="repTot" inputmode="decimal" placeholder="$0.00"></label>'
+   +'<label class="rp-wide">Work done<input id="repWork" maxlength="300" placeholder="e.g. Oil change, front brake pads"></label>'
+   +'<label class="rp-chk"><input type="checkbox" id="repEst"> This is an estimate, not a final invoice</label></div>'
+   +'<p class="muted" style="font-size:12px;margin:8px 0">Only the photo and truck are needed. Leave the rest blank and Claude can read the photo later.</p>'
+   +'<button class="btn2 pri" id="repSave" style="width:100%">Save invoice</button><div class="note" id="repMsg"></div></div>'}
+document.addEventListener('click',async e=>{
+  if(e.target.closest('#repAdd')){repPhoto=null;$('repNew').innerHTML=repForm();$('repNew').scrollIntoView({behavior:'smooth',block:'start'});return}
+  if(e.target.closest('#repX')){$('repNew').innerHTML='';return}
+  if(!e.target.closest('#repSave'))return;const b=$('repSave'),m=$('repMsg');
+  if(!$('repTruck').value){m.textContent='Pick the truck first.';return}if(!repPhoto&&!$('repWork').value.trim()){m.textContent='Take a photo or write what was done.';return}
+  m.textContent='';b.disabled=true;b.textContent='Saving...';
+  try{const r=await post('/api/repair/add',{truckId:$('repTruck').value,date:$('repDate').value,shop:$('repShop').value,total:$('repTot').value,work:$('repWork').value,estimate:$('repEst').checked,photo:repPhoto});
+    toast(r.oil?'Invoice saved · oil change logged':'Invoice saved to the truck');$('repNew').innerHTML='';REP=null;await loadRep()}
+  catch(err){m.textContent=err.message;b.disabled=false;b.textContent='Save invoice'}});
+document.addEventListener('change',async e=>{if(e.target.id!=='repCam')return;const f=e.target.files[0];if(!f)return;
+  try{const c=await shrink(f,2000),url=c.toDataURL('image/jpeg',.82);repPhoto={type:'image/jpeg',data:url.split(',')[1]};$('repPrev').src=url;$('repPrev').hidden=false;$('repCamT').textContent='Retake photo'}
+  catch(err){$('repMsg').textContent='Could not read that photo. Try again.'}});
+
 $('repMiss').onclick=e=>{const b=e.currentTarget;b.setAttribute('aria-pressed',b.getAttribute('aria-pressed')==='true'?'false':'true');renderRep()};
 // ===== Repairs tab: every shop invoice saved as a vehicle note, with totals =====
 let REP=null,REPT='';
+// Ramp payments: a payment that matches an invoice (same week, same amount or amount + 3% card fee) just marks it paid
+// and fills in a missing total; anything else is its own row, so nothing is counted twice.
+function repMerge(all,ramp,trucks){if(!Array.isArray(ramp))return all;const byId=Object.fromEntries(trucks.map(t=>[t.id,t]));
+  const words=s=>String(s).toLowerCase().replace(/[^a-z ]/g,' ').split(/\\s+/).filter(w=>w.length>3&&!/^(auto|repair|body|shop|center|centre|service|services|invoice|estimate|motors?)$/.test(w));
+  ramp.slice().sort((a,b)=>b.amount-a.amount).forEach(p=>{const ts=Date.parse(p.date+'T12:00:00'),near=all.filter(r=>!r.ramp&&!r.rampOnly&&Math.abs(r.ts-ts)<=6*864e5);
+    const amt=r=>r.total>0&&(Math.abs(p.amount-r.total)<=Math.max(.02,r.total*.005)||Math.abs(p.amount-r.total*1.03)<=Math.max(.03,r.total*.005));
+    const shop=r=>words(r.shop).some(w=>words(p.merchant).includes(w));
+    const hit=near.find(amt)||near.find(r=>r.missing&&shop(r)&&(!p.truckId||p.truckId===r.t.id))||near.find(r=>r.missing&&shop(r));
+    if(hit){hit.ramp=p;if(hit.missing){hit.total=p.amount;hit.missing=false;hit.fromRamp=true}return}
+    all.push({t:byId[p.truckId]||{id:'',truckNo:'',desc:'Truck not known',driver:''},rampOnly:true,ramp:p,ts,date:new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}),
+      shop:p.merchant,est:false,paid:true,work:p.memo||'Paid in Ramp',total:p.amount,missing:false})});
+  return all.sort((a,b)=>b.ts-a.ts)}
+
 const REP_RE=/^([A-Z][a-z]{2} \\d{1,2}, \\d{4}) · From (.+?) (invoice|estimate)([^:]*): (.*)$/;
 function repParse(trucks){const out=[];trucks.forEach(t=>String(t.notes||'').split('\\n').forEach(line=>{const m=REP_RE.exec(line);if(!m)return;
   const tm=/Total \\$([\\d,]+\\.\\d\\d)/.exec(m[5]),noc=/No charge/i.test(m[5]);
-  out.push({t,line,date:m[1],ts:Date.parse(m[1]),shop:m[2],est:m[3]==='estimate',paid:/paid/i.test(m[4]),work:m[5].replace(/\\.? ?(Total \\$[\\d,]+\\.\\d\\d|Total not shown on photo|No charge shown)[^]*$/,'').replace(/\\.$/,''),total:tm?+tm[1].replace(/,/g,''):noc?0:null,missing:!tm&&!noc})}));
+  out.push({t,line,date:m[1],ts:Date.parse(m[1]),shop:m[2],est:m[3]==='estimate',paid:/paid/i.test(m[4]),work:m[5].replace(/\\.? ?(Total \\$[\\d,]+\\.\\d\\d|Total not shown on photo|Total not entered|No charge shown)[^]*$/,'').replace(/\\.$/,''),total:tm?+tm[1].replace(/,/g,''):noc?0:null,missing:!tm&&!noc})}));
   return out.sort((a,b)=>b.ts-a.ts)}
 const repName=t=>(t.truckNo?'#'+t.truckNo.split(/[ ~(]/)[0]+' ':'')+(t.desc||'Truck');
 const money=n=>'$'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 async function loadRep(){if(!REP)$('repCount').textContent='Loading repairs from Airtable...';try{REP=await get('/api/repairs')}catch(e){$('repCount').textContent='Could not load repairs: '+e.message;return}renderRep()}
 function renderRep(){if(!REP)return;if(!REP.connected){$('repCount').textContent='Airtable is not connected.';return}
-  const all=repParse(REP.trucks),q=$('q').value.trim().toLowerCase(),miss=$('repMiss').getAttribute('aria-pressed')==='true';
-  const rows=all.filter(r=>(!REPT||r.t.id===REPT)&&(!miss||r.missing)&&(!q||(repName(r.t)+' '+(r.t.driver||'')+' '+r.shop+' '+r.work).toLowerCase().includes(q)));
+  const all=repMerge(repParse(REP.trucks),REP.ramp,REP.trucks),q=$('q').value.trim().toLowerCase(),miss=$('repMiss').getAttribute('aria-pressed')==='true';
+  const rows=all.filter(r=>(!REPT||(r.t.id||'none')===REPT)&&(!miss||r.missing)&&(!q||(repName(r.t)+' '+(r.t.driver||'')+' '+r.shop+' '+r.work+' '+(r.ramp?r.ramp.who+' '+r.ramp.memo:'')).toLowerCase().includes(q)));
   const sum=a=>a.reduce((s,r)=>s+(r.total||0),0),yr=new Date().getFullYear(),thisYr=all.filter(r=>new Date(r.ts).getFullYear()===yr);
-  $('repCount').textContent=all.length+' repairs on '+new Set(all.map(r=>r.t.id)).size+' trucks · from invoices saved to each truck in Airtable';
+  const rc=all.filter(r=>r.ramp).length;$('repCount').textContent=all.length+' repairs · from invoices saved to each truck in Airtable'+(Array.isArray(REP.ramp)?' and '+rc+' repair payment'+(rc===1?'':'s')+' in Ramp':REP.ramp&&REP.ramp.error?' · Ramp could not be read: '+REP.ramp.error:'');
   // per truck
-  const by={};all.forEach(r=>{const k=r.t.id;(by[k]=by[k]||{t:r.t,n:0,sum:0,miss:0});by[k].n++;by[k].sum+=r.total||0;if(r.missing)by[k].miss++});
+  const by={};all.forEach(r=>{const k=r.t.id||'none';(by[k]=by[k]||{t:r.t,n:0,sum:0,miss:0});by[k].n++;by[k].sum+=r.total||0;if(r.missing)by[k].miss++});
   const tr=Object.values(by).sort((a,b)=>b.sum-a.sum),top=tr[0],max=top?top.sum:1;
   $('repSum').innerHTML='<div class="pbs"><div><b>'+money(sum(all))+'</b><span>spent on repairs</span></div><div><b>'+money(sum(thisYr))+'</b><span>in '+yr+'</span></div><div><b>'+all.length+'</b><span>invoices</span></div>'
     +(top?'<div><b>'+esc(repName(top.t))+'</b><span>costs the most · '+money(top.sum)+'</span></div>':'')
@@ -3588,10 +3741,10 @@ function renderRep(){if(!REP)return;if(!REP.connected){$('repCount').textContent
   const mo=[];for(let i=11;i>=0;i--){const d=new Date();d.setDate(1);d.setMonth(d.getMonth()-i);mo.push({k:d.getFullYear()+'-'+d.getMonth(),l:d.toLocaleDateString('en-US',{month:'short'}),v:0})}
   all.forEach(r=>{const d=new Date(r.ts),m=mo.find(x=>x.k===d.getFullYear()+'-'+d.getMonth());if(m)m.v+=r.total||0});const mm=Math.max(1,...mo.map(m=>m.v));
   $('repSide').innerHTML='<div class="panel rp-pan"><h3>Spend by month</h3><div class="rp-mo">'+mo.map(m=>'<div title="'+m.l+': '+money(m.v)+'"><i style="height:'+Math.max(2,m.v/mm*100)+'%"></i><span>'+m.l+'</span></div>').join('')+'</div></div>'
-    +'<div class="panel rp-pan"><h3>By truck</h3><p class="muted" style="font-size:12px;margin:-4px 0 8px">Click a truck to see only its repairs</p>'+tr.map(x=>'<button class="rp-tk'+(REPT===x.t.id?' on':'')+'" data-rt="'+esc(x.t.id)+'"><span><b>'+esc(repName(x.t))+'</b><small>'+esc(x.t.driver||'No driver')+' · '+x.n+' invoice'+(x.n>1?'s':'')+(x.miss?' · '+x.miss+' no total':'')+'</small></span><em>'+money(x.sum)+'</em><i style="width:'+(x.sum/max*100)+'%"></i></button>').join('')+'</div>';
+    +'<div class="panel rp-pan"><h3>By truck</h3><p class="muted" style="font-size:12px;margin:-4px 0 8px">Click a truck to see only its repairs</p>'+tr.map(x=>'<button class="rp-tk'+(REPT===x.t.id?' on':'')+'" data-rt="'+esc(x.t.id||'none')+'"><span><b>'+esc(repName(x.t))+'</b><small>'+esc(x.t.driver||'No driver')+' · '+x.n+' invoice'+(x.n>1?'s':'')+(x.miss?' · '+x.miss+' no total':'')+'</small></span><em>'+money(x.sum)+'</em><i style="width:'+(x.sum/max*100)+'%"></i></button>').join('')+'</div>';
   $('repList').innerHTML=(REPT?'<div class="rp-fil">Showing <b>'+esc(repName(by[REPT].t))+'</b> · '+money(sum(rows))+' <button class="btn2" data-rt="">Show all trucks</button></div>':'')
     +(rows.length?'<div class="panel rp-list">'+rows.map((r,i)=>'<div class="rp-row" style="--i:'+Math.min(i,20)+'"><div class="rp-dt"><b>'+esc(r.date.replace(/, \\d{4}$/,''))+'</b><small>'+new Date(r.ts).getFullYear()+'</small></div>'
-      +'<div class="rp-body"><div class="rp-top"><button class="rp-chip" data-rt="'+esc(r.t.id)+'">'+esc(repName(r.t))+'</button><span class="rp-shop">'+esc(r.shop)+'</span>'+(r.est?'<span class="rp-tag">'+(r.paid?'Estimate, paid':'Estimate')+'</span>':'')+'</div><div class="rp-work">'+esc(r.work)+'</div></div>'
+      +'<div class="rp-body"><div class="rp-top"><button class="rp-chip'+(r.t.id?'':' unk')+'" data-rt="'+esc(r.t.id||'none')+'">'+esc(repName(r.t))+'</button><span class="rp-shop">'+esc(r.shop)+'</span>'+(r.ramp?'<a class="rp-ramp" href="'+esc(r.ramp.link)+'" target="_blank" rel="noopener" title="'+esc((r.ramp.who?r.ramp.who+'\u2019s card · ':'')+'$'+r.ramp.amount.toFixed(2)+(r.ramp.memo?' · '+r.ramp.memo:''))+'">'+(r.rampOnly?'Ramp only':r.fromRamp?'Total from Ramp':'Paid in Ramp ✓')+'</a>':'')+(r.est?'<span class="rp-tag">'+(r.paid?'Estimate, paid':'Estimate')+'</span>':'')+'</div><div class="rp-work">'+esc(r.work)+(r.rampOnly&&r.ramp.who?' <span class="muted">· '+esc(r.ramp.who)+(r.ramp.how==='driver'?', matched to their truck':'')+'</span>':'')+'</div></div>'
       +'<div class="rp-amt'+(r.missing?' miss':'')+'">'+(r.missing?'No total':r.total===0?'No charge':money(r.total))+'</div></div>').join('')+'</div>'
      :'<div class="empty">'+(all.length?'No repairs match.':'No repair invoices saved yet. Send invoice photos to Claude and they show up here.')+'</div>')}
 document.addEventListener('click',e=>{const b=e.target.closest('#vRep [data-rt]');if(!b)return;REPT=REPT===b.dataset.rt?'':b.dataset.rt;renderRep();$('vRep').scrollIntoView({behavior:'smooth',block:'start'})});
