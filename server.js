@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail']);
+const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -171,7 +171,9 @@ const routes = {
     if (cid) await tryIt('services', `query($c: String!) { infiniteServices(selector: {filters: {customerId: {equals: $c}}}, first: 3, sort: {field: startTime, order: DESC}) { edges { node { ${POM_SVC_FIELDS} } } } }`, { c: cid });
     return out; },
   '/api/pom/checkup-plan': () => checkupPlan(),
-  '/api/mail/status': () => { const st = mailState(); return { ready: mailReady(), from: mailFrom(), auto: !!st.auto, week: st.week, sent: st.sent || [] }; },
+  '/api/truck/swaps': () => swapLog(),
+  '/api/truck/history': q => truckHistory(q),
+  '/api/mail/status': () => { const st = mailState(); return { ready: mailReady(), from: mailFrom(), auto: !!st.auto, week: st.week, sent: st.sent || [], bounced: st.bounced || [], bounceErr: st.bounceErr || '' }; },
   '/api/repairs': async () => { if (!AIRTABLE_TOKEN) return { connected: false };
     const at = await atData(), ramp = RAMP_CLIENT_ID && RAMP_CLIENT_SECRET ? await rampRepairs().catch(e => ({ error: e.message })) : null;
     return { connected: true, ramp, trucks: at.trucks.map(t => ({ id: t.id, truckNo: t.truckNo, desc: [t.year, t.make, t.model].filter(Boolean).join(' '),
@@ -777,6 +779,35 @@ const azIso = d => d.toISOString();   // Azuga's example: 2022-10-16T04:00:00.00
 const scoreRows = () => cached('scores', 1800, async () => list(await azuga('https://services.azuga.com/reports/v3/reports/score?appId=FLEET',
   { startDate: azIso(daysAgo(30)), endDate: azIso(new Date()), browserTimezone: 'US/Eastern', reportFilter: 'default', index: 0, size: 500, desc: false, filter: { orFilter: {}, matchFilter: {} } }))
   .map(r => ({ userId: r.userId, firstName: r.firstName, lastName: r.lastName, vehicleId: r.vehicleId, score: r.score, distanceTravelled: r.distanceTravelled })));
+// Past drivers per truck: Azuga's Scores report month by month for the last 12 months shows who drove each
+// tracker and how far. Sticker sign-ins (truckSwap) add to it from now on. Trucks with no tracker only have sign-ins.
+const drvHistory = () => cached('drvHist', 12 * 3600, async () => {
+  const by = {};   // trackeeId -> { nameKey: { name, from, to, miles } }
+  for (let m = 0; m < 12; m++) {
+    const start = daysAgo(30 * (m + 1)), end = daysAgo(30 * m);
+    const rows = list(await azuga('https://services.azuga.com/reports/v3/reports/score?appId=FLEET', { startDate: azIso(start), endDate: azIso(end), browserTimezone: 'US/Eastern', reportFilter: 'default', index: 0, size: 500, desc: false, filter: { orFilter: {}, matchFilter: {} } }));
+    for (const r of rows) {
+      const name = [r.firstName, r.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, ''), mi = +r.distanceTravelled || 0;
+      if (!name || !r.vehicleId || mi < 1) continue;
+      const tv = by[r.vehicleId] = by[r.vehicleId] || {}, h = tv[dupeName(name)] = tv[dupeName(name)] || { name, from: +start, to: +end, miles: 0 };
+      h.from = Math.min(h.from, +start); h.to = Math.max(h.to, +end); h.miles += mi;
+    }
+    await sleep(1500);
+  }
+  return by;
+});
+async function truckHistory(q) {
+  const v = clean(q.get('v')), tid = clean(q.get('t')), out = {};
+  const add = (name, from, to, extra) => { const k = dupeName(name); if (!k) return; const h = out[k] = out[k] || { name, from, to, miles: 0, signIns: 0 };
+    h.from = Math.min(h.from, from); h.to = Math.max(h.to, to); Object.keys(extra).forEach(x => h[x] += extra[x]); };
+  if (v) Object.values((await drvHistory())[v] || {}).forEach(h => add(h.name, h.from, h.to, { miles: Math.round(h.miles) }));
+  const yr = Date.now() - 365 * 864e5;
+  if (tid) swapLog().filter(x => x.tid === tid && x.at > yr).forEach(x => add(x.who, x.at, x.at, { signIns: x.out ? 0 : 1 }));
+  const t = tid && (await atData()).trucks.find(x => x.id === tid), now = t && t.driver ? dupeName(t.driver.name) : '';
+  if (now) add(t.driver.name, Date.now(), Date.now(), {});
+  return Object.entries(out).map(([k, h]) => ({ ...h, now: k === now })).sort((a, b) => b.now - a.now || b.to - a.to);
+}
+if (process.argv[2] !== 'test') setTimeout(() => drvHistory().catch(e => console.error('Driver history:', e.message)), 5 * 60e3);
 const SCORE_PARTS = [   // [label, sub-score field, count field, what the count means]
   ['Phone use', 'distractedDrivingScore', 'distractedDrivingCount', 'distraction'],
   ['Speeding', 'speedingScore', 'overSpeedingCount', 'speeding'],
@@ -1174,10 +1205,10 @@ async function oneOffCheckups(b) {
   const plan = await checkupPlan(); if (!plan.connected) throw new Error('Pool Office Manager is not connected.');
   if (!plan.customer || !plan.serviceType) throw new Error('Could not find an existing truck check-up in POM to copy the customer and service type from.');
   const when = etAt(ymd, CHK_HOUR), at = await atData(), users = await pomUsers();
-  const day = await pomRange(new Date(+when - 12 * 36e5), new Date(+when + 12 * 36e5)), has = day.map(pomStop).filter(pomCheckup).map(x => x.tech);
+  const wk0 = etAt(ymd, 0), day = await pomRange(wk0, new Date(+wk0 + 7 * 864e5 - 1)), has = day.map(pomStop).filter(pomCheckup).map(x => x.tech);   // any check-up that week counts
   const people = at.drivers.filter(d => d.name && d.status !== 'Inactive' && CHECKUP_ROLES.includes(d.role)), out = { date: ymd, create: [], skip: [], done: [], failed: [] };
   for (const d of people) {
-    if (has.some(n => sameName(n, d.name) || dupeName(n) === dupeName(d.name))) { out.skip.push({ name: d.name, why: 'already has one that day' }); continue; }
+    if (has.some(n => sameName(n, d.name) || dupeName(n) === dupeName(d.name))) { out.skip.push({ name: d.name, why: 'already has one that week' }); continue; }
     const u = matchPerson(users, d.name); if (!u) { out.skip.push({ name: d.name, why: 'no POM user' }); continue; }
     out.create.push({ name: d.name, workerId: u.id });
   }
@@ -1224,14 +1255,15 @@ const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com', SMTP_USER = clean(p
 const MS = { tenant: clean(process.env.MS_TENANT_ID || ''), id: clean(process.env.MS_CLIENT_ID || ''), secret: String(process.env.MS_CLIENT_SECRET || '').trim(), from: clean(process.env.MAIL_FROM || '') };
 const msReady = () => !!(MS.tenant && MS.id && MS.secret && MS.from);
 let msTok = null, msExp = 0;
-async function graphSend(to, subject, text) {
-  if (!msTok || Date.now() > msExp) {
+async function msLogin() {
     const r = await fetch('https://login.microsoftonline.com/' + encodeURIComponent(MS.tenant) + '/oauth2/v2.0/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ client_id: MS.id, client_secret: MS.secret, scope: 'https://graph.microsoft.com/.default', grant_type: 'client_credentials' }) });
     const j = await r.json().catch(() => ({}));
     if (!j.access_token) throw new Error('Microsoft sign-in failed: ' + (j.error_description || j.error || r.status).toString().split('\r')[0].slice(0, 200));
     msTok = j.access_token; msExp = Date.now() + ((j.expires_in || 3600) - 300) * 1000;
-  }
+}
+async function graphSend(to, subject, text) {
+  if (!msTok || Date.now() > msExp) await msLogin();
   const r = await fetch('https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(MS.from) + '/sendMail', { method: 'POST', headers: { Authorization: 'Bearer ' + msTok, 'Content-Type': 'application/json' },
     body: JSON.stringify({ message: { subject, body: { contentType: 'Text', content: text }, toRecipients: [{ emailAddress: { address: to } }] }, saveToSentItems: true }) });
   if (r.status === 401 || r.status === 403) msTok = null;   // new sign-in next time, so a just-granted permission is picked up
@@ -1261,10 +1293,29 @@ function smtpSend(to, subject, text) {
         s.write(steps[i][0] + '\r\n'); } });
   });
 }
+const swapLog = () => (cache.get('swaps') || {}).data || [];   // truck sticker sign-ins, newest first
 const mailState = () => (cache.get('mail') || {}).data || { auto: false, week: '', sent: [] };
 const saveMail = d => { cache.set('mail', { data: d, t: Date.now() }); saveSnap('mail', d); };
 // Reminder times (Eastern): Mon-Wed at noon, Thu-Sun at 9 AM and 3 PM. Each run emails everyone who still hasn't
 // submitted this week's check-up; it stops for a person once they submit. Only the latest due time runs, once.
+// Bounces: Outlook drops an "Undeliverable" notice in contact@'s inbox. Those addresses are never emailed again.
+// Reading the inbox needs the Mail.Read application permission (with admin consent) on the same Entra app.
+async function checkBounces(st) {
+  st.bounced = st.bounced || [];
+  if (!msReady()) return st.bounced;
+  try {
+    if (!msTok || Date.now() > msExp) await msLogin();
+    const r = await fetch('https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(MS.from) + "/messages?$search=%22subject:Undeliverable%22&$select=subject,bodyPreview&$top=100", { headers: { Authorization: 'Bearer ' + msTok } });
+    if (!r.ok) { if (r.status === 401 || r.status === 403) msTok = null; st.bounceErr = r.status === 403 ? 'Add the Mail.Read application permission so bounced emails are caught.' : 'Could not check for bounces (' + r.status + ').'; return st.bounced; }
+    st.bounceErr = '';
+    for (const m of (await r.json()).value || []) {
+      if (!/check-up missed/i.test(m.subject || '')) continue;
+      const a = ((m.bodyPreview || '').match(/message to (\S+@\S+?) (?:couldn|could not|wasn)/i) || [])[1];
+      if (a && !st.bounced.includes(a.toLowerCase())) { st.bounced.push(a.toLowerCase()); console.log(new Date().toISOString(), 'Bounced, will not email again:', a); }
+    }
+  } catch (e) { console.error('Bounce check:', e.message); }
+  return st.bounced;
+}
 const MAIL_SLOTS = d => d >= 1 && d <= 3 ? [12] : [9, 15];
 async function autoMail() {
   const st = mailState(); if (!st.auto || !mailReady()) return;
@@ -1274,8 +1325,8 @@ async function autoMail() {
   const slot = et.toLocaleDateString('en-CA') + ' ' + due;
   if (st.week !== week) { st.week = week; st.sent = []; st.slots = {}; }
   st.slots = st.slots || {}; if (st.slots[slot]) return;
-  try { const r = await routes['/api/texts/missed-checkups'](), done = [];
-    for (const t of r.texts || []) { if (!t.email) continue;
+  try { const r = await routes['/api/texts/missed-checkups'](), done = [], bad = await checkBounces(st);
+    for (const t of r.texts || []) { if (!t.email || bad.includes(t.email.toLowerCase())) continue;
       try { await sendMail(t.email, t.subject, t.body); done.push(t.name); if (!st.sent.includes(t.name)) st.sent.push(t.name); console.log(new Date().toISOString(), 'Check-up email sent to', t.name); }
       catch (e) { console.error('Check-up email to', t.name, 'failed:', e.message); } }
     st.slots[slot] = done; saveMail(st);
@@ -1284,8 +1335,9 @@ async function autoMail() {
 // Send a round right now (button on the Check-ups tab), counted as the current reminder time
 async function mailNow() {
   if (!mailReady()) throw new Error('Email is not set up yet.');
-  const r = await routes['/api/texts/missed-checkups'](), st = mailState(), sent = [], failed = [];
+  const r = await routes['/api/texts/missed-checkups'](), st = mailState(), sent = [], failed = [], bad = await checkBounces(st);
   for (const t of r.texts || []) { if (!t.email) continue;
+    if (bad.includes(t.email.toLowerCase())) { failed.push({ name: t.name, error: 'email bounced before, not sent' }); continue; }
     try { await sendMail(t.email, t.subject, t.body); sent.push(t.name); } catch (e) { failed.push({ name: t.name, error: e.message }); } }
   const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })), mon = new Date(et); mon.setDate(mon.getDate() - ((et.getDay() + 6) % 7));
   const week = mon.toLocaleDateString('en-CA'); if (st.week !== week) { st.week = week; st.sent = []; st.slots = {}; }
@@ -1867,6 +1919,96 @@ function invoicePage(trucks) {
     + '<label class="chk"><input type="checkbox" id="est"> This is an estimate, not a final invoice</label>'
     + '<p class="hint">Only the photo and truck are needed.</p><button id="save">Save invoice</button><div class="msg" id="msg"></div></div></div><script>' + INVOICE_PAGE_JS + '</script></body></html>';
 }
+// ---------------- Truck sign-in stickers (QR code in every truck) ----------------
+// Each Airtable truck gets a permanent signed link (/r/<token>) printed as a QR sticker. Scanning it lets a driver
+// sign into that truck (and out of any truck they had) or sign out. Airtable's Driver field is the record; Azuga's
+// assigned driver follows for trucks with a tracker. No login, so every swap is logged and shown on Edit vehicles.
+// ponytail: no per-driver PIN (only 1 driver has a phone in Airtable); add one if stickers get abused.
+// Stickers are signed with SHARE_SECRET (or the dashboard password): changing that voids every sticker.
+const STICKER_DAYS = 3650;
+const truckLabelOf = t => (t.truckNo ? '#' + t.truckNo.split(/[ ~(]/)[0] + ' ' : '') + ([t.year, t.make, t.model].filter(Boolean).join(' ') || 'Truck');
+const swapDrivers = at => at.drivers.filter(d => d.name && d.status !== 'Inactive').sort((a, b) => a.name.localeCompare(b.name));
+async function truckSwap(truckId, b, out) {
+  const at = await atData(), t = at.trucks.find(x => x.id === truckId);
+  if (!t) throw new Error('This truck is no longer in the system. Tell the office.');
+  const d = swapDrivers(at).find(x => x.id === String(b.driverId || ''));
+  if (!d) throw new Error('Pick your name first.');
+  const patch = (id, fields) => airtable(AT_TRUCKS + '/' + id, { method: 'PATCH', body: JSON.stringify({ fields }) });
+  const left = [];
+  if (out) {
+    if (!t.driver || t.driver.id !== d.id) throw new Error('You are not signed into this truck.');
+    await patch(t.id, { [F.driver]: [] });
+  } else {
+    // Rule: one person per truck, one truck per person. A taken truck has to be signed out first (or changed on the dashboard).
+    if (t.driver && t.driver.id !== d.id) throw new Error(t.driver.name + ' is signed into this truck. They need to sign out of it first, or ask the office to switch it.');
+    for (const o of at.trucks) if (o.id !== t.id && o.driver && o.driver.id === d.id) { await patch(o.id, { [F.driver]: [] }); left.push(truckLabelOf(o)); }
+    if (!t.driver || t.driver.id !== d.id) await patch(t.id, { [F.driver]: [d.id] });
+  }
+  cache.delete('airtable'); cache.delete('truckDrivers');
+  let azuga = '';
+  if (!out) try {
+    const vs = await freshVehicles(), m = matchAll(vs, (await atData()).trucks), id = Object.keys(m).find(k => m[k].truck && m[k].truck.id === t.id);
+    if (id) { const r = await syncOne(id); if (!r.skipped) azuga = 'Azuga updated too.'; }
+  } catch (e) { azuga = 'Azuga was not updated (' + e.message + ').'; console.error('Truck sign-in, Azuga:', e.message); }
+  const was = t.driver && t.driver.id !== d.id ? t.driver.name : '';
+  const log = [{ at: Date.now(), who: d.name, tid: t.id, truck: truckLabelOf(t), out: !!out, was, left }, ...swapLog()].slice(0, 200);
+  cache.set('swaps', { data: log, t: Date.now() }); saveSnap('swaps', log);
+  console.log(new Date().toISOString(), 'Truck', out ? 'sign-out:' : 'sign-in:', d.name, truckLabelOf(t), left.length ? '(left ' + left.join(', ') + ')' : '');
+  return { ok: true, truck: truckLabelOf(t), who: d.name, out: !!out, was, left, azuga };
+}
+const TRUCK_PAGE_JS = `const $=i=>document.getElementById(i),me=$('me'),msg=$('msg');
+try{const s=localStorage.getItem('mp_me');if(s&&[...me.options].some(o=>o.value===s))me.value=s}catch(e){}
+function paint(){const mine=me.value&&me.value===CUR;$('in').hidden=mine;$('out').hidden=!mine;$('mine').hidden=!mine}
+me.onchange=()=>{try{localStorage.setItem('mp_me',me.value)}catch(e){}paint()};paint();
+async function go(kind){if(!me.value){msg.textContent='Pick your name first.';return}msg.className='msg';msg.textContent='Saving...';
+  document.querySelectorAll('button').forEach(b=>b.disabled=true);
+  try{const r=await fetch(location.pathname.replace(/\\/$/,'')+'/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({driverId:me.value})});const j=await r.json();if(!r.ok)throw new Error(j.error||'Could not save');
+    msg.className='msg ok';msg.textContent=j.out?'Signed out of '+j.truck+'.':'You are signed into '+j.truck+'.'+(j.left.length?' Signed out of '+j.left.join(', ')+'.':'');
+    CUR=j.out?'':me.value;$('who').textContent=j.out?'Nobody':j.who;paint()}
+  catch(e){msg.textContent=e.message}document.querySelectorAll('button').forEach(b=>b.disabled=false)}
+$('in').onclick=()=>go('in');$('out').onclick=()=>go('out');`;
+const MINI_CSS = 'body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:linear-gradient(180deg,#0a4660 0,#0e7490 200px,#f0f9fb 200px);color:#0f172a;min-height:100vh}'
+  + '.w{max-width:480px;margin:0 auto;padding:22px 16px 40px}h1{color:#fff;font-size:26px;margin:0 0 2px}.sub{color:#cffafe;font-size:14px;margin:0 0 18px}'
+  + '.card{background:#fff;border-radius:18px;padding:18px;box-shadow:0 14px 34px -18px rgba(8,74,99,.6)}.now{font-size:14px;color:#475569;margin:0 0 4px}.now b{display:block;font-size:22px;color:#0f172a}'
+  + 'label{display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:700;color:#475569;margin:16px 0}select{font:inherit;font-size:17px;padding:12px;border:1px solid #cbd5e1;border-radius:12px;min-height:50px;background:#fff;color:#0f172a}'
+  + 'button{width:100%;font:inherit;font-size:18px;font-weight:800;color:#fff;background:linear-gradient(135deg,#0891b2,#0e7490);border:0;border-radius:14px;min-height:56px;cursor:pointer}button:disabled{opacity:.6}#out{background:#fff;color:#b91c1c;border:2px solid #fecaca}'
+  + '.mine{background:#ecfeff;color:#0e7490;border-radius:10px;padding:8px 10px;font-size:14px;font-weight:700;margin:0 0 12px}.msg{margin-top:12px;font-size:15px;color:#b45309;min-height:20px}.msg.ok{color:#15803d;font-weight:700}';
+function truckPage(t, at) {
+  const ds = swapDrivers(at), cur = t.driver ? t.driver.id : '';
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>' + H(truckLabelOf(t)) + ' · Sign in</title><style>' + MINI_CSS + '</style></head><body><div class="w">'
+    + '<h1>' + H(truckLabelOf(t)) + '</h1><p class="sub">Millennial Pools · sign in or out of this truck' + (t.plate ? ' · plate ' + H(t.plate.trim()) : '') + '</p><div class="card">'
+    + '<p class="now">Signed in now<b id="who">' + H(t.driver ? t.driver.name : 'Nobody') + '</b></p>'
+    + '<label>Who are you?<select id="me"><option value="">Pick your name...</option>' + ds.map(d => '<option value="' + H(d.id) + '">' + H(d.name) + '</option>').join('') + '</select></label>'
+    + '<p class="mine" id="mine" hidden>This is your truck.</p><button id="in">Sign in to this truck</button><button id="out" hidden>Sign out of this truck</button><div class="msg" id="msg"></div>'
+    + '<p style="font-size:12.5px;color:#64748b;margin:14px 0 0">One person per truck: if someone else is signed in, they sign out first. Signing in here signs you out of any other truck. Your phone remembers your name for next time.</p></div></div>'
+    + '<script>let CUR=' + JSON.stringify(cur) + ';' + TRUCK_PAGE_JS + '</script></body></html>';
+}
+// Round 1.5" stickers, 20 per letter sheet (4 x 5), same positions as the "Matt Stickers" label sheet:
+// circles start 0.5" from the left and 0.75" from the top, 2" apart. Print at 100% scale, margins "None".
+const STICKERS_JS = `const grid=document.getElementById('pages'),list=document.getElementById('list');
+list.innerHTML=T.map((t,i)=>'<label><input type="checkbox" data-i="'+i+'"'+(t.on?' checked':'')+'> '+t.no+' <small>'+t.mdl+'</small></label>').join('');
+function draw(){const sel=T.filter((t,i)=>list.querySelector('[data-i="'+i+'"]').checked);grid.innerHTML='';
+  for(let p=0;p<Math.max(1,Math.ceil(sel.length/20));p++){const pg=document.createElement('div');pg.className='pg';
+    sel.slice(p*20,p*20+20).forEach((t,k)=>{const c=document.createElement('div');c.className='rc';c.style.left=(0.5+2*(k%4))+'in';c.style.top=(0.751+2*Math.floor(k/4))+'in';
+      c.innerHTML='<div class="rq"></div><div class="rn">'+t.no+'</div>';new QRCode(c.querySelector('.rq'),{text:t.u,width:300,height:300,correctLevel:QRCode.CorrectLevel.M});pg.appendChild(c)});
+    grid.appendChild(pg)}
+  document.getElementById('cnt').textContent=sel.length+' stickers · '+Math.max(1,Math.ceil(sel.length/20))+' sheet'+(sel.length>20?'s':'')}
+list.onchange=draw;draw();`;
+function stickersPage(at, base) {
+  const ts = at.trucks.slice().sort((a, b) => (b.active - a.active) || (parseInt(a.truckNo) || 999) - (parseInt(b.truckNo) || 999));
+  const T = ts.map(t => ({ no: H(t.truckNo ? '#' + t.truckNo.split(/[ ~(]/)[0] : 'Truck'), mdl: H([t.year, t.make, t.model].filter(Boolean).join(' ')), on: t.active, u: base + '/r/' + signShare({ k: 't', t: t.id }, STICKER_DAYS) }));
+  return '<!doctype html><html><head><meta charset="utf-8"><title>Truck QR stickers</title><style>'
+    + 'body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#e2e8f0;color:#0f172a}.bar{position:sticky;top:0;background:#0b4a63;color:#fff;padding:12px 18px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;z-index:2}'
+    + '.bar button{font:inherit;font-weight:800;background:#22d3ee;color:#083344;border:0;border-radius:10px;padding:9px 16px;cursor:pointer}.bar span{font-size:13px;color:#cffafe}'
+    + '#list{display:flex;flex-wrap:wrap;gap:6px 14px;padding:10px 18px;background:#fff;border-bottom:1px solid #cbd5e1;font-size:13px}#list small{color:#64748b}'
+    + '.pg{width:8.5in;height:11in;background:#fff;position:relative;margin:.3in auto;box-shadow:0 6px 20px rgba(0,0,0,.15);overflow:hidden}'
+    + '.rc{position:absolute;width:1.5in;height:1.5in;border-radius:50%;outline:1px dashed #94a3b8;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}'
+    + '.rn{position:absolute;bottom:-.24in;font-size:9pt;font-weight:800;color:#0e7490}.rq img,.rq canvas{width:1in!important;height:1in!important;display:block}'
+    + '@media print{body{background:#fff}.bar,#list,.rn{display:none}.pg{margin:0;box-shadow:none;break-after:page}.rc{outline:0}@page{size:letter;margin:0}}</style>'
+    + '<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script></head><body>'
+    + '<div class="bar"><b>Truck QR stickers</b><button onclick="print()">Print</button><b id="cnt"></b><span>Round 1.5" labels, 20 per sheet. Only the QR code prints; the blue truck number under each circle is just so you know which truck it goes in. In the print box set Scale 100% (not "Fit") and Margins: None. Untick trucks to leave them out.</span></div>'
+    + '<div id="list"></div><div id="pages"></div><script>const T=' + JSON.stringify(T).replace(/</g, '\\u003c') + ';' + STICKERS_JS + '</script></body></html>';
+}
 // Azuga's camera storage only serves files to pages on azuga.com, so the server fetches them
 // and passes them through. Locked to Azuga's recording bucket so it can't fetch anything else.
 async function media(u, req, res) {
@@ -1902,6 +2044,19 @@ http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }); return res.end(invoicePage(at.trucks));
       } catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: e.message })); }
     }
+    if (o.k === 't') {   // truck sticker: sign in or out of this one truck
+      try {
+        if (sub === 'in' || sub === 'out') {
+          if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
+          const out = await truckSwap(o.t, await readJson(req), sub === 'out');
+          res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(out));
+        }
+        if (sub) { res.writeHead(404); return res.end(); }
+        const at = await atData(), t = at.trucks.find(x => x.id === o.t);
+        if (!t) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('This truck is no longer in the system. Tell the office.'); }
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }); return res.end(truckPage(t, at));
+      } catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: e.message })); }
+    }
     if (o.k !== 'd' && o.k !== 'f') { res.writeHead(404); return res.end(); }
     if (sub === 'm') return media(new URL(req.url, 'http://x').searchParams.get('u'), req, res);   // camera clip/photo for this shared report (Azuga's bucket only)
     return serveReport(res, o.k === 'd' ? 'driver' : 'fleet', o.n, base, true, tok);
@@ -1929,6 +2084,7 @@ http.createServer(async (req, res) => {
     }
   }
   if (url.pathname === '/api/media') return media(url.searchParams.get('u'), req, res);
+  if (url.pathname === '/stickers') { try { const at = await atData(); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); return res.end(stickersPage(at, base)); } catch (e) { res.writeHead(502); return res.end(e.message); } }
   if (url.pathname === '/checkup') return serveCheckup(res, url.searchParams.get('id'));
   if (url.pathname === '/report') return serveReport(res, url.searchParams.get('driver') ? 'driver' : 'fleet', url.searchParams.get('driver'), base, false);
   const route = routes[url.pathname];
@@ -2678,7 +2834,10 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .role{transition:transform .18s cubic-bezier(.2,1.4,.4,1)}tr:hover .role,.drow:hover .role{transform:scale(1.08) rotate(-2deg)}
 .tchip{transition:transform .18s cubic-bezier(.2,1.4,.4,1),box-shadow .18s}.tchip:hover{transform:translateY(-2px);box-shadow:0 6px 14px -6px rgba(8,145,178,.7)}
 .panel{transition:box-shadow .25s,transform .25s}.panel:hover{box-shadow:0 18px 40px -22px rgba(14,116,144,.55)}
-.cm-auto{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:12px 16px;margin-bottom:12px}.cm-auto>div{display:flex;flex-direction:column;flex:1;min-width:240px}.cm-auto>div b{font-size:14px}.cm-auto>div .muted{font-size:12.5px}
+.cm-auto{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:12px 16px;margin-bottom:12px}.cm-auto>div{display:flex;flex-direction:column;flex:1;min-width:240px}.cm-auto>div b{font-size:14px}.cm-auto>div .muted{font-size:12.5px}.qrbtn{display:flex;justify-content:center;margin-top:10px;text-decoration:none;background:linear-gradient(135deg,#ecfeff,#cffafe);border-color:#67e8f9;color:#0e7490;font-weight:700;transition:transform .2s,box-shadow .2s}.qrbtn:hover{transform:translateY(-2px) rotate(-.6deg);box-shadow:0 8px 18px -10px rgba(8,145,178,.7)}
+.hist{margin-top:10px;border-top:1px solid #e2e8f0;padding-top:8px}.hist summary{cursor:pointer;font-weight:700;color:#0b4a63;font-size:13.5px}.hl{margin-top:6px}.hrow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:7px 10px;border-radius:10px;font-size:13px;transition:background .2s}.hrow:hover{background:#f0f9ff}.hrow small{color:#64748b;width:100%}.hrow.now{background:linear-gradient(90deg,#ecfeff,transparent)}.hnow{background:#0891b2;color:#fff;border-radius:99px;padding:1px 8px;font-size:11px;font-weight:700;animation:hnowP 2s ease-in-out infinite}@keyframes hnowP{50%{box-shadow:0 0 0 4px rgba(8,145,178,.15)}}
+.swaps{margin-top:10px;font-size:12.5px}.swaps summary{cursor:pointer;font-weight:700;color:#0b4a63}.swaps summary span{background:#0891b2;color:#fff;border-radius:99px;padding:0 7px;margin-left:4px;font-size:11px}.swp{display:flex;flex-wrap:wrap;gap:4px;padding:6px 0;border-bottom:1px dashed #e2e8f0;animation:swpIn .35s ease both}.swp small{color:#64748b;width:100%}.swp.o b{color:#b91c1c}@keyframes swpIn{from{opacity:0;transform:translateX(-6px)}}
+.cm-bounce{margin-top:6px;font-size:12.5px;color:#b45309;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:4px 8px;animation:cmPulse 2.4s ease-in-out infinite}@keyframes cmPulse{50%{box-shadow:0 0 0 4px rgba(251,146,60,.18)}}
 .btn2.pri{position:relative;overflow:hidden}.btn2.pri::after{content:'';position:absolute;top:0;bottom:0;left:-60%;width:40%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.45),transparent);transform:skewX(-20deg);transition:left .5s ease}.btn2.pri:hover::after{left:120%}
 .cm-list{list-style:none;margin:0;padding:0}.cm-list li{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid #eef2f7;flex-wrap:wrap}.cm-list li b{min-width:150px}.cm-list li .muted{flex:1;font-size:13px}.cm-list .btn2{text-decoration:none}
 .ctypes button{transition:transform .18s cubic-bezier(.2,1.4,.4,1),box-shadow .18s}.ctypes button:hover{transform:translateY(-3px) scale(1.04);box-shadow:0 8px 18px -8px rgba(14,116,144,.6)}
@@ -2843,7 +3002,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
  <div id="camTypes" class="ctypes"></div><div id="cgrid" class="cboard"></div>
 </div>
 <div id="vEdit" hidden><div class="ed">
- <aside class="panel edl"><div class="edf"><label><input type="checkbox" id="needs"> Only show trucks that need attention</label><div id="syncBar" style="margin-top:10px"></div><div class="syncp sm" id="syncE"></div></div><div id="edList"></div></aside>
+ <aside class="panel edl"><div class="edf"><label><input type="checkbox" id="needs"> Only show trucks that need attention</label><div id="syncBar" style="margin-top:10px"></div><div class="syncp sm" id="syncE"></div><a class="btn2 qrbtn" href="/stickers" target="_blank" rel="noopener">▦ Print truck QR stickers</a><div id="swapBox"></div></div><div id="edList"></div></aside>
  <section class="panel edc" id="edCard"><div class="empty">Pick a truck on the left to edit it.</div></section>
 </div></div>
 <script>
@@ -3095,7 +3254,15 @@ $('media').addEventListener('close',()=>$('mbody').querySelectorAll('video').for
 const retried=new Set();function retry(id){if(retried.has(id))return;retried.add(id);setTimeout(()=>{if(sel==id)select(id)},30000)}
 // ---- Airtable (source of truth) ----
 let AT=null;
-async function loadAT(){try{AT=await get('/api/airtable')}catch(e){AT={connected:true,error:e.message,links:{}}}if(!$('vEdit').hidden)renderEdit();if(vehicles.length||locs.length)render()}
+// Past drivers (last 12 months): Azuga driving + sticker sign-ins. Filled in after the card draws.
+function histBox(v,t){return '<details class="hist" data-v="'+esc(v)+'" data-t="'+esc(t)+'"><summary>Past drivers · last 12 months</summary><div class="hl muted">Loading...</div></details>'}
+document.addEventListener('toggle',async e=>{const d=e.target;if(!d.classList||!d.classList.contains('hist')||!d.open||d.dataset.done)return;d.dataset.done=1;const box=d.querySelector('.hl');
+  try{const l=await get('/api/truck/history?v='+encodeURIComponent(d.dataset.v)+'&t='+encodeURIComponent(d.dataset.t));const f=x=>new Date(x).toLocaleDateString('en-US',{month:'short',year:'numeric'});
+    box.className='hl';box.innerHTML=l.length?l.map(h=>'<div class="hrow'+(h.now?' now':'')+'"><b>'+esc(h.name)+'</b>'+(h.now?'<span class="hnow">Now</span>':'')+'<small>'+(f(h.from)===f(h.to)?f(h.to):f(h.from)+' – '+f(h.to))+(h.miles?' · '+h.miles.toLocaleString()+' mi':'')+(h.signIns?' · '+h.signIns+' sign-in'+(h.signIns>1?'s':''):'')+'</small></div>').join(''):'<span class="muted">No drivers on record yet. Sticker sign-ins will show here.</span>'}
+  catch(err){box.textContent=err.message}},true);
+async function swapPanel(){const el=$('swapBox');if(!el)return;let l=[];try{l=await get('/api/truck/swaps')}catch(e){}
+  el.innerHTML=l.length?'<details class="swaps"><summary>Recent truck sign-ins <span>'+l.length+'</span></summary>'+l.slice(0,25).map(x=>'<div class="swp'+(x.out?' o':'')+'"><b>'+esc(x.who)+'</b> '+(x.out?'signed out of':'→')+' '+esc(x.truck)+(x.was?' <small>('+esc(x.was)+' bumped)</small>':'')+'<small>'+new Date(x.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+'</small></div>').join('')+'</details>':''}
+async function loadAT(){swapPanel();try{AT=await get('/api/airtable')}catch(e){AT={connected:true,error:e.message,links:{}}}if(!$('vEdit').hidden)renderEdit();if(vehicles.length||locs.length)render()}
 const link=id=>AT&&AT.links&&AT.links[id];
 const docBtns=t=>{const d=[...t.insCard.map(f=>['Insurance card',f]),...t.files.map(f=>[f.name,f])];return d.length?'<div class="docs">'+d.map(([n,f])=>'<a class="btn" target="_blank" rel="noopener" href="'+esc(f.url)+'">'+ICON.file+esc(n)+'</a>').join('')+'</div>':'<div class="muted" style="margin-top:8px">No insurance card or other files in Airtable yet.</div>'};
 const drvLine=d=>d?esc(d.name)+(d.license?' · License '+esc(d.state?d.state+' ':'')+esc(d.license):''):'None';
@@ -3165,7 +3332,7 @@ function renderEdit(){
   // Trucks that are in Airtable but have no Azuga tracker, so they still show up here
   const q=$('q').value.toLowerCase(),na=(AT&&AT.notInAzuga||[]).filter(t=>!q||[t.truckNo,t.desc,t.driverName,t.plate].join(' ').toLowerCase().includes(q)).sort((a,b)=>(parseInt(a.truckNo)||999)-(parseInt(b.truckNo)||999)||a.desc.localeCompare(b.desc));
   if(na.length)$('edList').insertAdjacentHTML('beforeend','<div class="nah">In Airtable, no Azuga tracker <span>'+na.length+'</span></div>'+na.map(t=>'<details class="eli nai"><summary><div><b>'+(t.truckNo?'<span class="tno">#'+esc(t.truckNo.split(/[ ~(]/)[0])+'</span>':'')+esc(t.desc||'Truck')+'</b><small>'+esc(t.driverName||'No driver')+(t.plate?' · '+esc(t.plate.trim()):'')+'</small></div><span class="pill nat">No tracker</span></summary>'
-    +'<div class="naw">'+(!t.vinOk?'<div class="note">The VIN in Airtable doesn’t look right ('+esc(t.vin||'empty')+'). Fix it there so a tracker can link.</div>':t.dupVin?'<div class="note">Another Airtable truck has the same VIN ('+esc(t.vin)+'). One of them is wrong.</div>':'<div class="muted" style="font-size:12.5px">VIN '+esc(t.vin)+'. If one of the unnamed trackers above is in this truck, open that tracker and link it to #'+esc(t.truckNo||'this truck')+'.</div>')+notesBox(t)+'</div></details>').join(''));
+    +'<div class="naw">'+(!t.vinOk?'<div class="note">The VIN in Airtable doesn’t look right ('+esc(t.vin||'empty')+'). Fix it there so a tracker can link.</div>':t.dupVin?'<div class="note">Another Airtable truck has the same VIN ('+esc(t.vin)+'). One of them is wrong.</div>':'<div class="muted" style="font-size:12.5px">VIN '+esc(t.vin)+'. If one of the unnamed trackers above is in this truck, open that tracker and link it to #'+esc(t.truckNo||'this truck')+'.</div>')+notesBox(t)+histBox('',t.id)+'</div></details>').join(''));
   document.querySelectorAll('.eli[data-id]').forEach(e=>e.onclick=()=>openEd(e.dataset.id));
   const n=vehicles.filter(outOfSync).length;
   if(!syncing)$('syncBar').innerHTML=!AT?'':!AT.connected?'<span class="muted">Airtable not connected</span>':AT.error?'<span class="muted">Airtable unavailable</span>':n?'<button class="btn2 pri" id="syncAll" style="width:100%">Sync '+n+' truck'+(n>1?'s':'')+' from Airtable → Azuga</button>':'<span style="color:var(--go);display:inline-flex;gap:6px;align-items:center">'+ICON.check+'Azuga matches Airtable</span>';
@@ -3210,7 +3377,7 @@ async function openEd(id){
 
    +(lk?'<div class="at"><h4>Linked to Airtable'+(L.truck.truckNo?' truck #'+esc(L.truck.truckNo):'')+' · matched by '+esc(L.how)+'</h4>'
       +(Object.keys(L.changes).length?'Fields marked <span class="fromAt">FROM AIRTABLE</span> have newer info in Airtable. Click Save to update Azuga.':'Azuga matches Airtable.')
-      +(L.notes||[]).map(n=>'<div class="note">'+esc(n)+'</div>').join('')+'<div style="margin-top:6px"><b>Driver in Airtable:</b> '+drvLine(L.truck.driver)+'</div>'+docBtns(L.truck)+notesBox(L.truck)+'</div>'
+      +(L.notes||[]).map(n=>'<div class="note">'+esc(n)+'</div>').join('')+'<div style="margin-top:6px"><b>Driver in Airtable:</b> '+drvLine(L.truck.driver)+'</div>'+docBtns(L.truck)+notesBox(L.truck)+histBox(vid(v),L.truck.id)+'</div>'
      :linkBox(v))
    +[...FIELDS,...(lk?[AT_FIELDS]:[])].map(([g,fs])=>'<fieldset><legend>'+g+'</legend><div class="fg">'+fs.map(input).join('')+'</div></fieldset>').join('')
    +'<div class="edb"><button class="btn2" id="edPrev"'+(i>0?'':' disabled')+'>← Previous</button><button class="btn2" id="edNext"'+(i<rs.length-1?'':' disabled')+'>Next →</button><span style="flex:1"></span><span id="edMsg"></span><button class="btn2" id="edSave">Save</button><button class="btn2 pri" id="edSaveNext">Save &amp; next →</button></div>';
@@ -3845,7 +4012,7 @@ $('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hi
 /*repadd*/
 // Automatic emails: setup status, a test send to Callum, and the Monday switch
 async function mailPanel(){const el=$('chkMailAuto');if(!el)return;let st;try{st=await get('/api/mail/status')}catch(e){el.innerHTML='';return}
-  el.innerHTML='<div class="cm-auto"><div><b>Automatic emails</b><span class="muted">'+(st.ready?'Sent from '+esc(st.from)+' to anyone who hasn’t submitted: Mon–Wed at noon, Thu–Sun at 9 AM and 3 PM, until they do.'+(st.sent&&st.sent.length?' This week: '+st.sent.map(esc).join(', ')+'.':''):'Not set up yet: add the Outlook settings in Render (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, MAIL_FROM).')+'</span></div>'
+  el.innerHTML='<div class="cm-auto"><div><b>Automatic emails</b><span class="muted">'+(st.ready?'Sent from '+esc(st.from)+' to anyone who hasn’t submitted: Mon–Wed at noon, Thu–Sun at 9 AM and 3 PM, until they do.'+(st.sent&&st.sent.length?' This week: '+st.sent.map(esc).join(', ')+'.':'')+(st.bounced&&st.bounced.length?'</span><span class="cm-bounce">Bounced, not emailed again: '+st.bounced.map(esc).join(', ')+'. Fix the address in Airtable.':'')+(st.bounceErr?'</span><span class="cm-bounce">'+esc(st.bounceErr):''):'Not set up yet: add the Outlook settings in Render (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, MAIL_FROM).')+'</span></div>'
     +'<button class="btn2" id="mailTest"'+(st.ready?'':' disabled')+'>Send test email to me</button><label class="cauto"><input type="checkbox" id="mailAuto"'+(st.auto?' checked':'')+(st.ready?'':' disabled')+'> Email automatically</label><button class="btn2 pri" id="mailNow"'+(st.ready?'':' disabled')+'>Send reminders now</button><span class="muted" id="mailMsg" style="width:100%;font-size:12.5px"></span></div>';
   $('mailTest').onclick=async e=>{const b=e.currentTarget;b.disabled=true;$('mailMsg').textContent='Sending...';try{const r=await post('/api/mail/test',{});$('mailMsg').textContent='Test email sent to '+r.to+'. Check that inbox (and spam).'}catch(err){$('mailMsg').textContent=err.message}b.disabled=false};
   $('mailNow').onclick=async e=>{if(!confirm('Email everyone who hasn\u2019t submitted this week\u2019s check-up right now?'))return;const b=e.currentTarget;b.disabled=true;$('mailMsg').textContent='Sending...';try{const r=await post('/api/mail/now',{confirm:'SEND'});$('mailMsg').textContent='Sent to '+r.sent.length+(r.sent.length?': '+r.sent.join(', '):'')+'.'+(r.failed.length?' Failed: '+r.failed.map(f=>f.name+' ('+f.error+')').join('; '):'')+(r.noEmail.length?' No email: '+r.noEmail.join(', '):'');mailPanel()}catch(err){$('mailMsg').textContent=err.message;b.disabled=false}};
