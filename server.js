@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv']);
+const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv', 'upkeep', 'gasChk', 'geo']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -313,7 +313,7 @@ const { AIRTABLE_TOKEN } = process.env;
 const AT_BASE = 'appxOcqhRSdoWgHE3', AT_TRUCKS = 'tbl3aU0dRPvn79Ba1', AT_DRIVERS = 'tbl9oEuseNwk23jdg';
 const F = { vin: 'fldT4fSSnXnZuj2Jr', year: 'fldqjqyAK1ZJfn0oT', make: 'fldOhan3is4yEhucl', model: 'fldM01jCShSILujYB',
   truckNo: 'fldYmYqWTfoYoRvjB', policy: 'fldWlS28YbpsipR7r', driver: 'fldEO66ezgMWnguAu', plate: 'fldLGLwnLOAfpw88W',
-  insCard: 'fldH0Pe6EKyQEBmMR', files: 'fldS5YJgDrLDbxSiK', regRenew: 'fldjFFBZ0UoO4SUXV', ezpass: 'fld1utE81nDdDiqgi', active: 'fldBpQ0MA5cD9YJ06', snap: 'fldOaFfl7ZzS72xLK', notes: 'fldkWorOJHdYaLCy5', oilDate: 'fldGdTd6Vk2w7lyrn', oilMiles: 'fldKXcXo3MPHkkfC4' };
+  insCard: 'fldH0Pe6EKyQEBmMR', files: 'fldS5YJgDrLDbxSiK', regRenew: 'fldjFFBZ0UoO4SUXV', ezpass: 'fld1utE81nDdDiqgi', active: 'fldBpQ0MA5cD9YJ06', snap: 'fldOaFfl7ZzS72xLK', notes: 'fldkWorOJHdYaLCy5', oilDate: 'fldGdTd6Vk2w7lyrn', oilMiles: 'fldKXcXo3MPHkkfC4', insExp: 'fldITfdiPBIa3oMd8', regExp: 'fldjZ4AIbigbm6PPX' };
 // Drivers. Date of birth is only ever written (new driver form), never read or shown.
 const D = { name: 'fldMrVtrXN6WDaOjj', license: 'fldcSIYqy5FCEC0Xn', state: 'fld1NdVP4v6QcckK2', pic: 'fldZeCHS22kI7Ythi',
   policy: 'fldVo5IrWedsKvumK', trucks: 'fld47HPqHRrw9GUL7', notes: 'fldSnexzpxIG22gF0', status: 'fldVuSDYSZVHk0fWN',
@@ -361,7 +361,7 @@ const atData = () => cached('airtable', 60, async () => {
       truckNo: clean(f[F.truckNo]), policy: clean(f[F.policy]?.name ?? f[F.policy]), plate: clean(f[F.plate]),
       regRenew: clean(f[F.regRenew]), ezpass: clean(f[F.ezpass]), active: !!f[F.active],
       driver: (f[F.driver] || []).map(id => byId[id]).filter(Boolean)[0] || null, snap: parseSnap(f[F.snap]),
-      insCard: att(f[F.insCard]), files: att(f[F.files]), notes: String(f[F.notes] || ''), oilDate: f[F.oilDate] || '', oilMiles: f[F.oilMiles] || null,
+      insCard: att(f[F.insCard]), files: att(f[F.files]), notes: String(f[F.notes] || ''), oilDate: f[F.oilDate] || '', oilMiles: f[F.oilMiles] || null, insExp: f[F.insExp] || '', regExp: f[F.regExp] || '',
     }; }),
   };
 });
@@ -1268,16 +1268,17 @@ async function msLogin() {
     if (!j.access_token) throw new Error('Microsoft sign-in failed: ' + (j.error_description || j.error || r.status).toString().split('\r')[0].slice(0, 200));
     msTok = j.access_token; msExp = Date.now() + ((j.expires_in || 3600) - 300) * 1000;
 }
-async function graphSend(to, subject, text) {
+async function graphSend(to, subject, text, files) {
   if (!msTok || Date.now() > msExp) await msLogin();
   const r = await fetch('https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(MS.from) + '/sendMail', { method: 'POST', headers: { Authorization: 'Bearer ' + msTok, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: { subject, body: { contentType: 'Text', content: text }, toRecipients: [{ emailAddress: { address: to } }] }, saveToSentItems: true }) });
+    body: JSON.stringify({ message: { subject, body: { contentType: 'Text', content: text }, toRecipients: [{ emailAddress: { address: to } }],
+      ...(files && files.length ? { attachments: files.map(f => ({ '@odata.type': '#microsoft.graph.fileAttachment', name: f.name, contentType: f.type || 'application/octet-stream', contentBytes: f.data })) } : {}) }, saveToSentItems: true }) });
   if (r.status === 401 || r.status === 403) msTok = null;   // new sign-in next time, so a just-granted permission is picked up
   if (!r.ok) { const t = await r.text(); throw new Error('Outlook would not send (' + r.status + '): ' + (/Authorization_RequestDenied|ErrorAccessDenied|403/.test(t + r.status) ? 'the app needs the Mail.Send application permission with admin consent.' : t.slice(0, 200))); }
 }
 const mailFrom = () => msReady() ? MS.from : SMTP_USER;
 const mailReady = () => msReady() || !!(SMTP_USER && SMTP_PASS);
-function sendMail(to, subject, text) { return msReady() ? graphSend(to, subject, text) : smtpSend(to, subject, text); }
+function sendMail(to, subject, text, files) { return msReady() ? graphSend(to, subject, text, files) : smtpSend(to, subject, text); }   // attachments: Outlook only
 function smtpSend(to, subject, text) {
   if (!mailReady()) return Promise.reject(new Error('Email is not set up yet: add the Outlook settings (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, MAIL_FROM) in Render.'));
   if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(to)) return Promise.reject(new Error('Bad email address: ' + to));
@@ -1606,11 +1607,17 @@ async function setItemStatus(b) {
 }
 // ---------------- Ramp tab: the last 12 months of card spend and reimbursements ----------------
 const gasRx = () => (cache.get('gasRx') || {}).data || {};   // first 10 chars of a Ramp id -> [gallons, $/gal, grade] (0 = unreadable)
+// Where a card purchase happened: Ramp's merchant location if it sends one, else the "CITY ST" at the end of the card descriptor
+const stationLoc = t => { const l = t.merchant_location || (t.merchant_data && (t.merchant_data.location || t.merchant_data)) || {};
+  const city = clean(l.city || l.locality), state = clean(l.state || l.region || l.state_code), zip = clean(l.postal_code || l.zip || l.postcode).slice(0, 5);
+  if (city || zip) return { city, state, zip };
+  const m = /\s([A-Z][A-Z .'-]{2,24}?)\s+([A-Z]{2})\s*$/.exec(clean(t.merchant_descriptor).toUpperCase());
+  return m ? { city: m[1].trim(), state: m[2], zip: '' } : null; };
 const rampYear = () => cached('rampYear', 3600, async () => {
   const since = new Date(Date.now() - 365 * 864e5), money = a => typeof a === 'number' ? a : Number(a && a.amount) / 100 || 0;
   const card = (await rampAll('transactions', { from_date: since.toISOString() })).filter(t => !/DECLINED|ERROR/i.test(t.state || '')).map(t => { const h = t.card_holder || {};
     return { id: t.id, at: t.user_transaction_time || t.settlement_date || '', who: [h.first_name, h.last_name].filter(Boolean).join(' '), merchant: clean(t.merchant_name || t.merchant_descriptor), cat: clean(t.sk_category_name) || 'Other',
-      amount: money(t.amount), gas: isGas(t), receipts: t.receipts || [], memo: clean(t.memo || '') }; });
+      amount: money(t.amount), gas: isGas(t), receipts: t.receipts || [], memo: clean(t.memo || ''), loc: stationLoc(t) }; });
   let reimb = [];
   if (/reimbursements/.test(rampScopes)) try {
     const users = Object.fromEntries((/users/.test(rampScopes) ? await rampAll('users', {}).catch(() => []) : []).map(u => [u.id, [u.first_name, u.last_name].filter(Boolean).join(' ')]));
@@ -2236,6 +2243,267 @@ function stickersPage(at, base) {
     + '<span>Every sticker is the same code, so any sticker goes in any truck. It opens <a href="' + H(u) + '" target="_blank">the sign in / out page</a>. Print at Scale 100% with Margins: None on round 1.5" labels (20 per sheet).</span></div>'
     + '<div id="pages"></div><script>const U=' + JSON.stringify(u) + ';' + STICKERS_JS + '</script></body></html>';
 }
+// ---------------- Upkeep tab: cost per truck, gas vs GPS, oil due, renewals, weekly safety email ----------------
+let lastBase = clean(process.env.PUBLIC_URL).replace(/\/$/, '');   // background emails need the site's address for links
+const upState = () => (cache.get('upkeep') || {}).data || { safety: false, oil: false, renew: true, sent: {}, read: {}, src: {} };
+const saveUp = d => { cache.set('upkeep', { data: d, t: Date.now() }); saveSnap('upkeep', d); };
+const etNow = () => new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+const weekKey = () => { const d = etNow(); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.toLocaleDateString('en-CA'); };
+const tname = t => (t.truckNo ? '#' + t.truckNo.split(/[ ~(]/)[0] + ' ' : '') + ([t.year, t.make, t.model].filter(Boolean).join(' ') || 'Truck');
+const vOdo = r => Math.round((r.odo_support && +r.vehicleSupportedOdoValue) || +r.vehicleDeviceCurrentodoReading || +r.totalDistanceTravelled || +r.odometerReading || 0);
+const fleetPairs = async () => { const [vs, L] = await Promise.all([routes['/api/vehicles']().then(list), atLinks()]);
+  return vs.map(v => { const l = L.links && L.links[v.trackeeId]; return l && l.linked ? { v, t: l.truck, odo: vOdo(v) } : null; }).filter(Boolean); };
+async function myEmail() {
+  const at = await atData(), d = at.drivers.find(x => dupeName(x.name) === dupeName('Callum Curcie'));
+  if (d && d.email) return d.email;
+  const u = (await pomUsers().catch(() => [])).find(x => dupeName(x.name) === dupeName('Callum Curcie'));
+  if (u && u.email) return u.email;
+  throw new Error('Could not find an email for Callum Curcie (Drivers table in Airtable).');
+}
+const emailOf = async name => { const at = await atData(), d = at.drivers.find(x => dupeName(x.name) === dupeName(name)); return d && d.status !== 'Inactive' ? d.email : ''; };
+
+// Cost per truck (last 12 months): invoices saved in the truck's notes + Ramp repair payments not already in the notes,
+// gas = each person's Ramp gas split over the trucks they drove by Azuga miles, miles = Azuga's monthly score report.
+const REP_LINE = /^([A-Z][a-z]{2} \d{1,2}, \d{4}) · From (.+?) (invoice|estimate)([^:]*): (.*)$/;
+const noteRepairs = t => String(t.notes || '').split('\n').map(l => REP_LINE.exec(l)).filter(m => m && m[3] === 'invoice')
+  .map(m => { const tm = /Total \$([\d,]+\.\d\d)/.exec(m[5]); return { ts: Date.parse(m[1]), amount: tm ? +tm[1].replace(/,/g, '') : 0 }; });
+const truckCost = () => cached('truckCost', 3600, async () => {
+  const yr = Date.now() - 365 * 864e5;
+  const [at, pairs, hist, rr, y] = await Promise.all([atData(), fleetPairs().catch(() => []), drvHistory().catch(() => ({})), rampRepairs().catch(() => []), rampYear().catch(() => ({ card: [], reimb: [] }))]);
+  const byT = Object.fromEntries(pairs.map(p => [p.t.id, p])), rows = {};
+  at.trucks.forEach(t => rows[t.id] = { id: t.id, name: tname(t), year: +t.year || null, driver: t.driver ? t.driver.name : '', active: t.active, odo: byT[t.id] ? byT[t.id].odo : 0, repairs: 0, nRep: 0, gas: 0, miles: 0 });
+  for (const t of at.trucks) {
+    const nr = noteRepairs(t).filter(r => r.ts > yr), row = rows[t.id];
+    nr.forEach(r => { row.repairs += r.amount; row.nRep++; });
+    rr.filter(x => x.truckId === t.id && Date.parse(x.date) > yr && !nr.some(n => Math.abs(n.amount - x.amount) <= x.amount * 0.03 && Math.abs(n.ts - Date.parse(x.date)) < 6 * 864e5))
+      .forEach(x => { row.repairs += x.amount; row.nRep++; });
+  }
+  const share = {};   // person -> { truckId: miles }
+  for (const p of pairs) for (const h of Object.values(hist[p.v.trackeeId] || {})) {
+    rows[p.t.id].miles += h.miles; const s = share[dupeName(h.name)] = share[dupeName(h.name)] || {}; s[p.t.id] = (s[p.t.id] || 0) + h.miles; }
+  const cur = {}; at.trucks.forEach(t => t.driver && (cur[dupeName(t.driver.name)] = t.id));
+  let unassigned = 0;
+  for (const g of y.card.concat(y.reimb).filter(x => x.gas && x.amount > 0)) {
+    const k = dupeName(g.who), s = share[k], tot = s ? Object.values(s).reduce((a, b) => a + b, 0) : 0;
+    if (tot) Object.entries(s).forEach(([id, m]) => rows[id].gas += g.amount * m / tot); else if (cur[k]) rows[cur[k]].gas += g.amount; else unassigned += g.amount;
+  }
+  const out = Object.values(rows).map(r => ({ ...r, miles: Math.round(r.miles), repairs: Math.round(r.repairs), gas: Math.round(r.gas), total: Math.round(r.repairs + r.gas),
+    cpm: r.miles >= 100 ? Math.round((r.repairs + r.gas) / r.miles * 100) / 100 : null, age: r.year ? new Date().getFullYear() - r.year : null }))
+    .filter(r => r.total || r.miles).sort((a, b) => (b.cpm ?? -1) - (a.cpm ?? -1) || b.total - a.total);
+  return { rows: out, unassignedGas: Math.round(unassigned) };
+});
+
+// Gas fill-ups checked against GPS: was the person's truck stopped near that station within 30 minutes of the charge?
+// Also flags more gallons than the tank holds and a 2nd fill-up within 24 hours with little driving between.
+// Tank sizes by model (Azuga doesn't report them); the biggest tank option is used so only clear overfills show.
+const TANKS = [[/ranger/i, 21], [/maverick/i, 13.8], [/colorado|canyon/i, 21], [/tacoma/i, 21], [/frontier/i, 21], [/f-?150/i, 36], [/silverado|sierra/i, 28], [/\bram\b|1500/i, 33], [/transit/i, 31], [/ridgeline/i, 19.5], [/gladiator/i, 22]];
+const tankOf = t => { const h = t && TANKS.find(([re]) => re.test(t.make + ' ' + t.model)); return h ? h[1] : 0; };
+const gasChk = () => (cache.get('gasChk') || {}).data || {};
+const geoCache = () => (cache.get('geo') || {}).data || {};
+async function geocode(loc) {
+  const q = loc.zip ? loc.zip + ', USA' : loc.city + ', ' + loc.state + ', USA', g = geoCache();
+  if (q in g) return g[q];
+  await sleep(1100);   // Nominatim allows 1 lookup a second
+  const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=' + encodeURIComponent(q), { headers: { 'User-Agent': 'MillennialPools-FleetDashboard/1.0' } });
+  const j = r.ok ? await r.json() : []; g[q] = j[0] ? { lat: +j[0].lat, lng: +j[0].lon } : null;
+  cache.set('geo', { data: g, t: Date.now() }); saveSnap('geo', g); return g[q];
+}
+const trailMiles = pts => pts.reduce((s, p, i) => i ? s + miles(pts[i - 1], p) : 0, 0);
+let gasBusy = false;
+async function checkGas(max = 30) {
+  if (gasBusy || !RAMP_CLIENT_ID) return; gasBusy = true;
+  try {
+    const [y, pairs, hist, at] = await Promise.all([rampYear(), fleetPairs(), drvHistory().catch(() => ({})), atData()]), done = gasChk(), gx = gasRx();
+    const since = Date.now() - 60 * 864e5, byTruck = Object.fromEntries(pairs.map(p => [p.t.id, p]));
+    const trucksOf = who => { const k = dupeName(who), c = {};   // the person's Airtable truck first, then trucks they drove most (Azuga)
+      at.trucks.filter(t => t.driver && dupeName(t.driver.name) === k).forEach(t => c[t.id] = 1e9);
+      pairs.forEach(p => { const h = (hist[p.v.trackeeId] || {})[k]; if (h) c[p.t.id] = (c[p.t.id] || 0) + h.miles; });
+      return Object.entries(c).sort((a, b) => b[1] - a[1]).map(x => byTruck[x[0]]).filter(Boolean).slice(0, 2); };
+    const gas = y.card.filter(t => t.gas && t.amount >= 10 && Date.parse(t.at) > since).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    let n = 0;
+    for (const t of gas) {
+      if ((done[t.id] && done[t.id].v2) || n >= max) continue; n++;
+      const ts = Date.parse(t.at), rx = gx[t.id.slice(0, 10)], r = { v2: 1, at: t.at, who: t.who, merchant: t.merchant, amount: t.amount, gal: rx && rx[0] || 0, flags: [] };
+      const cands = trucksOf(t.who);
+      if (!cands.length) { r.verdict = 'notruck'; r.unverified = 'No truck found for ' + (t.who || 'this card'); done[t.id] = r; continue; }
+      const here = t.loc && await geocode(t.loc).catch(() => null);
+      let best = null;
+      for (const p of cands) {
+        let pts = await trailRange(p.v.trackeeId, new Date(ts - 30 * 6e4), new Date(ts + 30 * 6e4), true).catch(() => []), parked = false;
+        if (!pts.length) {   // engine off the whole hour: use where the truck was parked (last point before the charge, else first after)
+          const wide = await trailRange(p.v.trackeeId, new Date(ts - 12 * 36e5), new Date(ts + 2 * 36e5), true).catch(() => []);
+          const at = wide.filter(x => x.t <= ts).pop() || wide.find(x => x.t > ts);
+          if (at) { pts = [{ ...at, mph: 0 }]; parked = true; }
+        }
+        if (!pts.length) { best = best || { p, nogps: true }; continue; }
+        const stopped = pts.filter(x => x.mph < 3), look = stopped.length ? stopped : pts;
+        const byText = t.loc && look.some(x => (t.loc.zip && x.addr.includes(t.loc.zip)) || (t.loc.city && x.addr.toUpperCase().includes(t.loc.city)));
+        const mi = here ? Math.min(...look.map(x => miles(x, here))) : null;
+        const c = { p, mi, parked, ok: byText || (mi !== null && mi <= 5), stopped: stopped.length > 0 };
+        if (!best || best.nogps || c.ok && !best.ok || (!best.ok && mi !== null && (best.mi === null || mi < best.mi))) best = c;
+        if (c.ok) break;
+      }
+      r.truck = tname(best.p.t); r.truckId = best.p.t.id;
+      if (best.nogps) { r.verdict = 'nogps'; r.unverified = 'No GPS from the truck in the 12 hours before'; }
+      else if (!t.loc) { r.verdict = 'noloc'; r.unverified = 'Ramp gave no station location'; }
+      else if (best.ok) r.verdict = best.stopped ? 'ok' : 'moving';
+      else { r.verdict = 'far'; r.mi = best.mi !== null ? Math.round(best.mi) : null;
+        r.flags.push((best.parked ? 'Truck was parked ' : 'Truck was ') + (r.mi !== null ? r.mi + ' miles from the station' : 'not in ' + t.loc.city + ', ' + t.loc.state)); }
+      if (r.verdict === 'moving') r.flags.push('Truck was driving, never stopped near the station');
+      const tank = tankOf(best.p.t); r.tank = tank;
+      if (r.gal && tank && r.gal > tank * 1.05) r.flags.push(r.gal.toFixed(1) + ' gal into a ' + tank + ' gal tank');
+      const prev = Object.entries(done).map(([id, x]) => ({ id, ...x })).filter(x => x.who === t.who && x.truckId === r.truckId && ts - Date.parse(x.at) > 0 && ts - Date.parse(x.at) < 24 * 36e5).pop();
+      if (prev && !best.nogps) {
+        const d = trailMiles(await trailRange(best.p.v.trackeeId, new Date(Date.parse(prev.at)), new Date(ts), true).catch(() => []));
+        if (d < 60) r.flags.push('2nd fill-up in ' + Math.round((ts - Date.parse(prev.at)) / 36e5) + ' h with only ' + Math.round(d) + ' miles driven');
+      }
+      done[t.id] = r;
+      await sleep(1500);
+    }
+    Object.keys(done).forEach(id => { if (Date.parse(done[id].at) < Date.now() - 120 * 864e5) delete done[id]; });
+    cache.set('gasChk', { data: done, t: Date.now() }); saveSnap('gasChk', done);
+  } catch (e) { console.error('Gas check:', e.message); } finally { gasBusy = false; }
+}
+
+// Oil changes due: Azuga odometer now minus the miles on the last oil-change invoice (Airtable), or 6 months
+const OIL_MI = +process.env.OIL_MILES || 5000, OIL_DAYS = 183;
+async function oilList() {
+  return (await fleetPairs()).map(p => {
+    const since = p.t.oilMiles && p.odo ? p.odo - p.t.oilMiles : null, days = p.t.oilDate ? Math.round((Date.now() - Date.parse(p.t.oilDate + 'T12:00')) / 864e5) : null;
+    const ok = since !== null && since >= 0 ? since : null;   // a negative gap means Azuga's odometer doesn't match the invoice
+    const st = !p.t.oilDate ? 'unknown' : (ok !== null && ok >= OIL_MI) || days >= OIL_DAYS ? 'due' : (ok !== null && ok >= OIL_MI - 700) || days >= OIL_DAYS - 21 ? 'soon' : 'ok';
+    return { id: p.t.id, name: tname(p.t), driver: p.t.driver ? p.t.driver.name : '', odo: p.odo, oilDate: p.t.oilDate, oilMiles: p.t.oilMiles, since: ok, days, status: st, odoMismatch: since !== null && since < 0 };
+  }).sort((a, b) => ['due', 'soon', 'unknown', 'ok'].indexOf(a.status) - ['due', 'soon', 'unknown', 'ok'].indexOf(b.status) || (b.since || 0) - (a.since || 0));
+}
+const oilText = o => ({ subject: 'Oil change due: ' + o.name, body: 'Hi ' + o.driver.split(' ')[0] + ',\n\nYour truck (' + o.name + ') is due for an oil change: ' +
+  (o.since !== null ? o.since.toLocaleString() + ' miles' : o.days + ' days') + ' since the last one (' + new Date(o.oilDate + 'T12:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + ').\n\nPlease get it booked this week and send the invoice in when it\'s done.\n\nThanks,\nMillennial Pools' });
+
+// Insurance and registration renewals: dates read from the insurance card / registration files by Claude, editable on the tab
+async function readExpiry(f) {
+  const r = await fetch(f.url); if (!r.ok) throw new Error('Download ' + r.status);
+  const buf = Buffer.from(await r.arrayBuffer());
+  let type = (f.type || r.headers.get('content-type') || '').split(';')[0];
+  if (!/^image\/(jpeg|png|gif|webp)$|^application\/pdf$/.test(type)) type = buf.slice(0, 4).toString() === '%PDF' ? 'application/pdf' : buf[0] === 0x89 ? 'image/png' : 'image/jpeg';
+  const part = { type: type === 'application/pdf' ? 'document' : 'image', source: { type: 'base64', media_type: type, data: buf.toString('base64') } };
+  const a = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': AI_KEY(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    body: JSON.stringify({ model: AI_MODEL, max_tokens: 300, messages: [{ role: 'user', content: [part, { type: 'text', text: 'Is this a vehicle insurance ID card or a vehicle registration? Reply with JSON only: {"kind":"insurance|registration|other","expires":"YYYY-MM-DD or empty","vin":"VIN if printed"}. expires is the policy expiration / registration expiration date.' }] }] }) });
+  const j = await a.json().catch(() => ({})); if (!a.ok) throw new Error('Claude ' + a.status);
+  const m = (((j.content || [])[0] || {}).text || '').match(/\{[\s\S]*\}/), o = m ? JSON.parse(m[0]) : {};
+  return { kind: String(o.kind || ''), expires: /^\d{4}-\d{2}-\d{2}$/.test(o.expires || '') ? o.expires : '' };
+}
+let renewBusy = false;
+async function readRenewals(max = 15) {
+  if (renewBusy || !AI_KEY()) return { started: false }; renewBusy = true; let n = 0;
+  try {
+    const at = await atData(), st = upState();
+    for (const t of at.trucks) {
+      const docs = t.insCard.map(f => ({ ...f, hint: 'insurance' })).concat(t.files.filter(f => /reg|insur|card|id/i.test(f.name) || t.files.length <= 3));
+      const fields = {};
+      for (const f of docs) {
+        const key = t.id + ':' + f.name; if (st.read[key] || n >= max) continue; n++;
+        try { const r = await readExpiry(f); st.read[key] = r.kind || 'other';
+          const fld = r.kind === 'insurance' ? 'ins' : r.kind === 'registration' ? 'reg' : '', cur = fld === 'ins' ? t.insExp : t.regExp;
+          if (fld && r.expires && (!cur || r.expires > cur)) { fields[fld === 'ins' ? F.insExp : F.regExp] = r.expires; (st.src[t.id] = st.src[t.id] || {})[fld] = f.name; }
+        } catch (e) { st.read[key] = 'error'; console.error('Renewal read', tname(t), f.name, e.message); }
+      }
+      if (Object.keys(fields).length) await airtable(AT_TRUCKS, { method: 'PATCH', body: JSON.stringify({ records: [{ id: t.id, fields }] }) });
+    }
+    saveUp(st); cache.delete('airtable');
+  } finally { renewBusy = false; }
+  return { read: n };
+}
+async function setRenewal(b) {
+  const id = clean(b.id), f = {}, ok = v => v === '' || /^\d{4}-\d{2}-\d{2}$/.test(v);
+  if ('ins' in b) { if (!ok(b.ins)) throw new Error('Bad date'); f[F.insExp] = b.ins || null; }
+  if ('reg' in b) { if (!ok(b.reg)) throw new Error('Bad date'); f[F.regExp] = b.reg || null; }
+  if (!(await atData()).trucks.some(t => t.id === id)) throw new Error('Unknown truck');
+  await airtable(AT_TRUCKS, { method: 'PATCH', body: JSON.stringify({ records: [{ id, fields: f }] }) }); cache.delete('airtable'); return { ok: true };
+}
+const daysTo = d => d ? Math.round((Date.parse(d + 'T12:00') - Date.now()) / 864e5) : null;
+async function attach(t, kind) {   // the card the date came from, else the first insurance card
+  const st = upState(), name = (st.src[t.id] || {})[kind], f = t.insCard.concat(t.files).find(x => x.name === name) || (kind === 'ins' ? t.insCard[0] : t.files.find(x => /reg/i.test(x.name)));
+  if (!f) return [];
+  const r = await fetch(f.url); return r.ok ? [{ name: f.name, type: f.type, data: Buffer.from(await r.arrayBuffer()).toString('base64') }] : [];
+}
+async function renewalMail(force) {
+  const st = upState(), at = await atData(), to = await myEmail(), sent = [];
+  for (const t of at.trucks) for (const [kind, d, label] of [['ins', t.insExp, 'Insurance'], ['reg', t.regExp, 'Registration']]) {
+    const left = daysTo(d), key = 'renew:' + t.id + ':' + kind + ':' + d;
+    if (left === null || left > 30 || left < -30 || (st.sent[key] && !force)) continue;
+    await sendMail(to, label + (left < 0 ? ' expired' : ' renews in ' + left + ' day' + (left === 1 ? '' : 's')) + ': ' + tname(t),
+      'Hi Callum,\n\n' + label + ' for ' + tname(t) + (t.plate ? ' (plate ' + t.plate + ')' : '') + (left < 0 ? ' expired on ' : ' expires on ') + new Date(d + 'T12:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) + '.' +
+      (kind === 'ins' && t.policy ? '\nPolicy: ' + t.policy : '') + (t.driver ? '\nDriver: ' + t.driver.name : '') + '\n\nThe current card from Airtable is attached.\n\nFleet dashboard', await attach(t, kind).catch(() => []));
+    st.sent[key] = Date.now(); sent.push(tname(t) + ' ' + label.toLowerCase());
+  }
+  saveUp(st); return { sent };
+}
+
+// Weekly safety email: score, rank, worst camera event this week, and the private report link with the clips
+async function safetyText(name, fleet) {
+  fleet = fleet || await fleetReport(); const me = fleet.find(x => dupeName(x.name) === dupeName(name));
+  if (!me) return null;
+  const td = await truckDrivers(), wk = Date.now() - 7 * 864e5;
+  const ev = (await events30()).filter(x => (x.t || evTime(x)) > wk && dupeName(eventOwner(x, td)) === dupeName(name)).map(x => ({ x, k: eventKind(x.eventType), t: x.t || evTime(x) })).filter(e => e.k.pts)
+    .sort((a, b) => b.k.pts - a.k.pts || b.t - a.t);
+  const link = (lastBase || 'https://fleet-dashboard-oxei.onrender.com') + '/r/' + signShare({ k: 'd', n: me.name }, 14), first = me.name.split(' ')[0];
+  const when = t => new Date(t).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  return { name: me.name, subject: 'Your driving this week: ' + me.r.score + '/100', body: 'Hi ' + first + ',\n\nYour driver score: ' + me.r.score + ' out of 100, #' + me.r.rank + ' of ' + fleet.length + ' drivers.\n\n' +
+    (ev.length ? 'Your worst camera event this week: ' + ev[0].k.label + ' on ' + when(ev[0].t) + (ev.length > 1 ? ' (' + ev.length + ' events in all)' : '') + '.' : 'No camera events this week. Nice work.') +
+    '\n\nWatch the clip and see your full report (private to you, link works for 2 weeks):\n' + link + '\n\nThanks,\nMillennial Pools', events: ev.length };
+}
+async function safetyMail() {
+  const st = upState(), fleet = await fleetReport(), sent = [], skipped = [];
+  for (const row of fleet) { const key = 'safety:' + weekKey() + ':' + dupeName(row.name); if (st.sent[key]) continue;
+    const to = await emailOf(row.name), bad = ((mailState().bounced) || []);
+    if (!to || bad.includes(to.toLowerCase())) { skipped.push(row.name); continue; }
+    const m = await safetyText(row.name, fleet);
+    try { await sendMail(to, m.subject, m.body); st.sent[key] = Date.now(); sent.push(row.name); } catch (e) { console.error('Safety email', row.name, e.message); }
+  }
+  saveUp(st); return { sent, skipped };
+}
+async function oilMail() {
+  const st = upState(), sent = [];
+  for (const o of (await oilList()).filter(x => x.status === 'due' && x.driver)) { const key = 'oil:' + weekKey() + ':' + o.id, to = await emailOf(o.driver);
+    if (st.sent[key] || !to) continue; const m = oilText(o);
+    try { await sendMail(to, m.subject, m.body); st.sent[key] = Date.now(); sent.push(o.name); } catch (e) { console.error('Oil email', o.name, e.message); } }
+  saveUp(st); return { sent };
+}
+// Hourly: renewals (daily, 8 AM+), and on Mondays from 8 AM the safety + oil emails (each once a week)
+async function upkeepTick() {
+  const st = upState(), et = etNow(); if (et.getHours() < 8 || !mailReady()) return;
+  const day = et.toLocaleDateString('en-CA');
+  if (st.renew && st.lastRenew !== day) { st.lastRenew = day; saveUp(st); await renewalMail().catch(e => console.error('Renewal emails:', e.message)); }
+  if (et.getDay() === 1) {
+    if (st.safety && st.lastSafety !== weekKey()) { st.lastSafety = weekKey(); saveUp(st); await safetyMail().catch(e => console.error('Safety emails:', e.message)); }
+    if (st.oil && st.lastOil !== weekKey()) { st.lastOil = weekKey(); saveUp(st); await oilMail().catch(e => console.error('Oil emails:', e.message)); }
+  }
+}
+if (process.argv[2] !== 'test') {
+  setInterval(upkeepTick, 60 * 60e3); setTimeout(upkeepTick, 6 * 60e3);
+  setInterval(() => checkGas(), 30 * 60e3); setTimeout(() => checkGas(), 8 * 60e3);
+  setInterval(() => readRenewals().catch(() => {}), 12 * 3600e3); setTimeout(() => readRenewals().catch(() => {}), 10 * 60e3);
+}
+routes['/api/upkeep'] = async () => {
+  const st = upState(), at = await atData(), done = gasChk();
+  const [cost, oil] = await Promise.all([truckCost().catch(e => ({ error: e.message })), oilList().catch(e => ({ error: e.message }))]);
+  const gas = Object.entries(done).map(([id, x]) => ({ id, ...x, link: 'https://app.ramp.com/business-overview/transactions/' + id })).sort((a, b) => b.flags.length - a.flags.length || Date.parse(b.at) - Date.parse(a.at));
+  const renew = at.trucks.map(t => ({ id: t.id, name: tname(t), plate: t.plate, policy: t.policy, ins: t.insExp, reg: t.regExp, insLeft: daysTo(t.insExp), regLeft: daysTo(t.regExp), card: (t.insCard[0] || {}).url || '' }));
+  return { cost, oil, oilMiles: OIL_MI, gas, gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew }, mail: mailReady(), ai: !!AI_KEY() };
+};
+routes['/api/upkeep/flags'] = () => ({ gas: Object.values(gasChk()).filter(x => x.verdict === 'far').length });
+routes['/api/upkeep/safety-preview'] = async q => (await safetyText(q.get('name') || 'Callum Curcie')) || { error: 'No score for that name yet.' };
+const UPKEEP_POSTS = {
+  '/api/upkeep/settings': b => { const st = upState(); ['safety', 'oil', 'renew'].forEach(k => { if (k in b) st[k] = b[k] === true; }); saveUp(st); return { safety: st.safety, oil: st.oil, renew: st.renew }; },
+  '/api/upkeep/renewal': setRenewal,
+  '/api/upkeep/read-cards': () => { readRenewals(40).catch(e => console.error('Renewals:', e.message)); return { started: true }; },
+  '/api/upkeep/gas-check': () => { checkGas(40); return { started: true }; },
+  '/api/upkeep/safety-sample': async b => { const m = await safetyText(clean(b.name) || 'Callum Curcie'); if (!m) throw new Error('No score for that name yet.');
+    const to = await myEmail(); await sendMail(to, 'SAMPLE · ' + m.subject, m.body + '\n\n(Sample of the weekly email ' + m.name + ' would get.)'); return { to, name: m.name }; },
+  '/api/upkeep/oil-sample': async () => { const o = (await oilList()).find(x => x.status === 'due') || (await oilList())[0]; if (!o) throw new Error('No trucks');
+    const m = oilText({ ...o, driver: o.driver || 'Driver' }), to = await myEmail(); await sendMail(to, 'SAMPLE · ' + m.subject, m.body); return { to, name: o.name }; },
+  '/api/upkeep/renewal-test': async () => renewalMail(true),
+};
+
 // Azuga's camera storage only serves files to pages on azuga.com, so the server fetches them
 // and passes them through. Locked to Azuga's recording bucket so it can't fetch anything else.
 async function media(u, req, res) {
@@ -2255,6 +2523,7 @@ async function media(u, req, res) {
 
 http.createServer(async (req, res) => {
   const base = (req.headers['x-forwarded-proto'] || 'http') + '://' + (req.headers.host || 'localhost');
+  if (!process.env.PUBLIC_URL && req.headers.host && !/localhost|127\.0\.0\.1/.test(req.headers.host)) lastBase = base;
   if (req.url.startsWith('/r/')) {   // shared report: no login, but only with a valid signed link
     const [tok, sub] = req.url.slice(3).split('?')[0].split('/'), o = readShare(tok);
     if (!o) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('This report link is invalid or has expired. Ask for a new one.'); }
@@ -2296,6 +2565,7 @@ http.createServer(async (req, res) => {
   const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
+  Object.assign(POSTS, UPKEEP_POSTS);
   if (POSTS[url.pathname]) {
     // JSON-only + POST-only, so another website can't trigger a change with a plain form
     if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
@@ -3067,6 +3337,15 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .rbars>div{position:relative}.rbars>div em{position:absolute;top:-16px;left:50%;transform:translateX(-50%);font-size:9.5px;font-style:normal;color:#64748b;white-space:nowrap;opacity:0;transition:opacity .2s}.rbars>div:hover em,.rbars>div.hi em,.rbars>div.cur em{opacity:1}.rbars>div.hi i{background:linear-gradient(180deg,#f59e0b,#ea580c)!important}.rbars>div.cur i{outline:2px dashed #0891b2;outline-offset:1px}
 .rpl{position:relative;display:flex;align-items:center;gap:8px;padding:8px 6px;border-top:1px solid #f1f5f9;font-size:13px;overflow:hidden}.rpl>div{flex:1;min-width:0;position:relative;z-index:1}.rpl small{display:block;color:#64748b;font-size:11.5px}.rpl>span{font-weight:700;position:relative;z-index:1}.rpl>i{position:absolute;left:0;bottom:0;height:3px;background:linear-gradient(90deg,#22d3ee,#0e7490);border-radius:2px}.rwarn{color:#b45309;font-weight:700}
 .rfl{display:flex;align-items:center;gap:8px;padding:8px 4px;border-top:1px dashed #e2e8f0;font-size:13px}.rfl>div{flex:1}.rfl small{display:block;color:#b45309;font-size:12px}.rfl .btn2{padding:4px 9px;font-size:12px;text-decoration:none}.rgnote{font-size:12.5px;margin:-4px 0 12px}
+#vUp{padding:14px 24px 24px;max-width:1240px;margin:0 auto;animation:fadein .3s ease-out}#usBody{overflow-x:auto}#upNav{flex-wrap:wrap;max-width:100%}body[data-v=vUp] .vopt{display:none}@media(max-width:900px){#vUp{padding:12px 16px}}
+.gflag{color:#b91c1c}.gwarn{color:#c2410c;font-size:12.5px}.tabs .gbadge{background:#ef4444;animation:gbPulse 2s ease-in-out infinite}@keyframes gbPulse{50%{box-shadow:0 0 0 5px rgba(239,68,68,.25)}}
+.newpill{font-style:normal;font-size:9px;font-weight:800;letter-spacing:.06em;padding:2px 5px;border-radius:6px;color:#fff;background:linear-gradient(90deg,#f472b6,#a78bfa,#22d3ee,#f472b6);background-size:300% 100%;animation:tabflow 3s linear infinite}
+.utab{width:100%;border-collapse:separate;border-spacing:0 6px;font-size:13.5px}.utab th{text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;padding:0 10px}.utab td{background:#fff;padding:10px;vertical-align:middle}.utab td:first-child{border-radius:12px 0 0 12px}.utab td:last-child{border-radius:0 12px 12px 0}
+.utab tr.hot td{background:#fff1f2}.utab tr.warm td{background:#fff7ed}.cpm{display:flex;align-items:center;gap:8px;min-width:150px}.cpm i{flex:1;height:8px;border-radius:6px;background:#e2e8f0;overflow:hidden;position:relative}.cpm i b{position:absolute;inset:0 auto 0 0;border-radius:6px;background:linear-gradient(90deg,#22c55e,#facc15,#ef4444);background-size:300px 100%;transition:width .6s cubic-bezier(.2,.9,.3,1)}
+.upill{display:inline-block;font-size:11.5px;font-weight:700;padding:3px 9px;border-radius:20px}.upill.due,.upill.far{background:#fee2e2;color:#b91c1c}.upill.soon,.upill.moving{background:#ffedd5;color:#c2410c}.upill.ok{background:#dcfce7;color:#15803d}.upill.unknown,.upill.nogps,.upill.noloc,.upill.notruck{background:#f1f5f9;color:#475569}
+.utog{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 12px}.utog label{display:inline-flex;gap:8px;align-items:center;font-weight:700}.upre{white-space:pre-wrap;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:14px;font:13.5px/1.5 system-ui,sans-serif}
+.utab input[type=date]{font:inherit;border:1px solid #cbd5e1;border-radius:8px;padding:4px 6px}
+.panel{transition:transform .2s ease,box-shadow .2s ease}.panel:hover{transform:translateY(-2px);box-shadow:0 12px 28px -14px rgba(14,116,144,.45)}
 #vBuy{padding:14px 24px 24px;max-width:1240px;margin:0 auto;animation:fadein .3s ease-out}body[data-v=vBuy] .vopt{display:none}@media(max-width:900px){#vBuy{padding:12px 16px}}
 .bsum{display:flex;flex-wrap:wrap;gap:12px;background:linear-gradient(135deg,#0b4a63,#0e7490 60%,#14b8a6);color:#fff;border-radius:16px;padding:16px 20px;margin-bottom:12px;position:relative;overflow:hidden}.bsum::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.14) 50%,transparent 70%);animation:bsumSheen 5s ease-in-out infinite}@keyframes bsumSheen{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
 .bsum>div{flex:1;min-width:120px}.bsum b{display:block;font-size:26px;font-weight:800}.bsum span{font-size:12.5px;color:#cffafe}.bnote{margin-bottom:10px}
@@ -3149,7 +3428,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
  <svg class="hwave front" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M3 9c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0"/><path d="M3 15c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0" opacity=".6"/></svg></div><div>Millennial Pools<small>Fleet</small></div></div>
  <div class="live" id="live"><span class="dot"></span><svg class="ekg" viewBox="0 0 40 14" aria-hidden="true"><path d="M0 7h12l3-5 4 10 3-8 2 3h16"/></svg><span id="upd">Connecting to Azuga...</span></div>
- <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Live map</button><button data-v="vEdit"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l2-5h11l3 5v4H3z"/><circle cx="7" cy="17" r="2"/><circle cx="16" cy="17" r="2"/></svg>Edit vehicles</button><button data-v="vDrv"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><circle cx="17" cy="9" r="2.4"/><path d="M15.5 14.6c2.8.2 5 2.1 5 5.4"/></svg>Drivers</button><button data-v="vPom"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M2 19.5c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M8 12V5a2 2 0 0 1 4 0M14 12V5a2 2 0 0 1 4 0M8 8h6"/></svg>Pools</button><button data-v="vChk"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12l2 2 4-4M9 17h6"/></svg>Truck check-ups</button><button data-v="vRep"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z"/></svg>Repairs</button><button data-v="vBuy"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>Ramp</button><button data-v="vCam"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3z"/></svg>Cameras</button><a class="reptab" href="/report" target="_blank" rel="noopener"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Score report</a></nav>
+ <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Live map</button><button data-v="vEdit"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l2-5h11l3 5v4H3z"/><circle cx="7" cy="17" r="2"/><circle cx="16" cy="17" r="2"/></svg>Edit vehicles</button><button data-v="vDrv"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><circle cx="17" cy="9" r="2.4"/><path d="M15.5 14.6c2.8.2 5 2.1 5 5.4"/></svg>Drivers</button><button data-v="vPom"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M2 19.5c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M8 12V5a2 2 0 0 1 4 0M14 12V5a2 2 0 0 1 4 0M8 8h6"/></svg>Pools</button><button data-v="vChk"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12l2 2 4-4M9 17h6"/></svg>Truck check-ups</button><button data-v="vRep"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z"/></svg>Repairs</button><button data-v="vBuy"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>Ramp</button><button data-v="vUp"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="5"/><path d="M12 9.5V12l1.8 1.2"/></svg>Upkeep<i class="newpill">NEW</i></button><button data-v="vCam"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3z"/></svg>Cameras</button><a class="reptab" href="/report" target="_blank" rel="noopener"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Score report</a></nav>
 </header>
 <div class="bar"><div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search trucks or drivers" aria-label="Search trucks or drivers"></div><nav class="sum" id="sum" aria-label="Filter vehicles"></nav>
  <div class="vopt"><button id="voBtn" aria-expanded="false" aria-controls="voPop"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>View<span id="voHid"></span></button>
@@ -3243,6 +3522,10 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
  <div id="rsGas" hidden></div>
  <div id="rsItems" hidden><div class="crewhead" style="margin-top:4px"><p id="buyCount" class="muted">Loading Ramp purchases...</p><span style="flex:1"></span><select id="buyWho" aria-label="Filter by person"><option value="">Everyone</option></select><button class="btn2" id="buyRead">Read new receipts now</button></div>
  <div id="buySum"></div><div class="bchips" id="buyChips"></div><div class="rp-grid"><div id="buyList"></div><aside id="buySide"></aside></div></div>
+</div>
+<div id="vUp" hidden>
+ <div class="crewhead"><div><h2>Upkeep</h2><p id="upCount" class="muted">Cost per truck, gas checks, oil changes, renewals and safety emails</p></div><span style="flex:1"></span><div class="rnav" id="upNav"><button data-us="cost" class="on">Cost per truck</button><button data-us="gas">Gas vs GPS</button><button data-us="oil">Oil changes</button><button data-us="ren">Renewals</button><button data-us="saf">Safety emails</button></div></div>
+ <div id="usBody"><div class="empty">Loading...</div></div>
 </div>
 <div id="vCam" hidden>
  <div class="crewhead"><div><h2>Camera events</h2><p id="camCount" class="muted">Loading the last 7 days from Azuga...</p></div><span style="flex:1"></span>
@@ -3513,6 +3796,8 @@ async function swapPanel(){const el=$('swapBox');if(!el)return;let l=[],rq=[];tr
   el.innerHTML=(rq.length?'<div class="rqbox"><b>Sign-in requests <span>'+rq.length+'</span></b>'+rq.map(r=>'<div class="rqi"><div><b>'+esc(r.who)+'</b> wants '+esc(r.truck)+'<small>'+new Date(r.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+'</small></div><button class="btn2 pri" data-rq="'+esc(r.id)+'" data-ok="1">Approve</button><button class="btn2" data-rq="'+esc(r.id)+'">Deny</button></div>').join('')+'<div id="rqMsg" class="muted" style="font-size:12px"></div></div>':'')+(l.length?'<details class="swaps"><summary>Recent truck sign-ins <span>'+l.length+'</span></summary>'+l.slice(0,25).map(x=>'<div class="swp'+(x.out?' o':'')+'"><b>'+esc(x.who)+'</b> '+(x.denied?'denied for':x.out?'signed out of':'→')+' '+esc(x.truck)+(x.was?' <small>('+esc(x.was)+' bumped)</small>':'')+'<small>'+new Date(x.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+'</small></div>').join('')+'</details>':'');
   el.querySelectorAll('[data-rq]').forEach(b=>b.onclick=async()=>{el.querySelectorAll('[data-rq]').forEach(x=>x.disabled=true);try{const r=await post('/api/truck/request',{id:b.dataset.rq,approve:!!b.dataset.ok});if(r.who)toast(r.who+' is now in '+r.truck+(r.left&&r.left.length?' (moved off '+r.left.join(', ')+')':''));await loadAT()}catch(err){$('rqMsg').textContent=err.message;el.querySelectorAll('[data-rq]').forEach(x=>x.disabled=false)}})}
 setInterval(swapPanel,60000);
+async function upBadge(){try{const r=await get('/api/upkeep/flags'),tab=document.querySelector('.tabs button[data-v=vUp]');if(!tab)return;let b=tab.querySelector('.gbadge');if(!b){b=document.createElement('span');b.className='rqb gbadge';b.title='Fill-ups where the truck was not near the card';tab.appendChild(b)}b.textContent=r.gas;b.hidden=!r.gas}catch(e){}}
+setTimeout(upBadge,3000);setInterval(upBadge,5*60e3);
 async function loadAT(){swapPanel();try{AT=await get('/api/airtable')}catch(e){AT={connected:true,error:e.message,links:{}}}if(!$('vEdit').hidden)renderEdit();if(vehicles.length||locs.length)render()}
 const link=id=>AT&&AT.links&&AT.links[id];
 const docBtns=t=>{const d=[...t.insCard.map(f=>['Insurance card',f]),...t.files.map(f=>[f.name,f])];return d.length?'<div class="docs">'+d.map(([n,f])=>'<a class="btn" target="_blank" rel="noopener" href="'+esc(f.url)+'">'+ICON.file+esc(n)+'</a>').join('')+'</div>':'<div class="muted" style="margin-top:8px">No insurance card or other files in Airtable yet.</div>'};
@@ -4256,10 +4541,10 @@ function moveTab(){const b=document.querySelector('.tabs button.on'),i=document.
 addEventListener('resize',moveTab);(document.fonts&&document.fonts.ready||Promise.resolve()).then(moveTab);setTimeout(moveTab,50);
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));moveTab();
-  ['vMap','vEdit','vDrv','vPom','vCam','vChk','vRep','vBuy'].forEach(v=>$(v).hidden=b.dataset.v!==v);if(b.dataset.v==='vBuy')loadRampTab();if(b.dataset.v==='vChk'){loadChk();mailPanel()}if(b.dataset.v==='vRep')loadRep();if(b.dataset.v==='vPom')loadPomBoard();if(b.dataset.v==='vCam')loadCamTab();if(b.dataset.v==='vMap'&&sel&&TRUCKV.length)drawCams();document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
+  ['vMap','vEdit','vDrv','vPom','vCam','vChk','vRep','vBuy','vUp'].forEach(v=>$(v).hidden=b.dataset.v!==v);if(b.dataset.v==='vBuy')loadRampTab();if(b.dataset.v==='vUp')loadUp();if(b.dataset.v==='vChk'){loadChk();mailPanel()}if(b.dataset.v==='vRep')loadRep();if(b.dataset.v==='vPom')loadPomBoard();if(b.dataset.v==='vCam')loadCamTab();if(b.dataset.v==='vMap'&&sel&&TRUCKV.length)drawCams();document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
   if(b.dataset.v!=='vMap')loadSync();if(b.dataset.v==='vEdit')renderEdit();else if(b.dataset.v==='vDrv'){if(!PEOPLE)loadPeople();else renderDrivers()}else map.invalidateSize();
 });
-$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();if(!$('vPom').hidden)renderPom();if(!$('vCam').hidden)renderCamTab();if(!$('vChk').hidden)renderChk();if(!$('vRep').hidden)renderRep();if(!$('vBuy').hidden){renderBuy();renderRampOv()}};
+$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();if(!$('vPom').hidden)renderPom();if(!$('vCam').hidden)renderCamTab();if(!$('vChk').hidden)renderChk();if(!$('vRep').hidden)renderRep();if(!$('vBuy').hidden){renderBuy();renderRampOv()}if(!$('vUp').hidden)renderUp()};
 /*repadd*/
 // Automatic emails: setup status, a test send to Callum, and the Monday switch
 async function mailPanel(){const el=$('chkMailAuto');if(!el)return;let st;try{st=await get('/api/mail/status')}catch(e){el.innerHTML='';return}
@@ -4368,6 +4653,51 @@ function renderRampOv(){const r=ROV;if(!r)return;if(r.connected===false){$('rsOv
 }
 document.addEventListener('click',e=>{const b=e.target.closest('#rampNav [data-rs]');if(!b)return;RSEC=b.dataset.rs;document.querySelectorAll('#rampNav button').forEach(x=>x.classList.toggle('on',x===b));
   $('rsOv').hidden=RSEC!=='ov';$('rsGas').hidden=RSEC!=='gas';$('rsItems').hidden=RSEC!=='items'});
+
+// ---- Upkeep tab ----
+let UP=null,USEC='cost';
+async function loadUp(){if(!UP)$('usBody').innerHTML='<div class="empty">Loading costs, oil changes and renewals... (the first load can take a minute)</div>';try{UP=await get('/api/upkeep')}catch(e){$('usBody').innerHTML='<div class="empty">Could not load: '+esc(e.message)+'</div>';return}renderUp()}
+const d0=n=>'$'+Math.round(n||0).toLocaleString(),fdate=d=>d?new Date(d+'T12:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):'–';
+const leftTxt=n=>n===null?'':n<0?'expired '+(-n)+' d ago':n===0?'today':'in '+n+' d';
+function renderUp(){const u=UP;if(!u)return;const q=$('q').value.trim().toLowerCase(),f=x=>!q||(x.name+' '+(x.driver||x.who||'')).toLowerCase().includes(q);let h='';
+  if(USEC==='cost'){const c=u.cost;if(c.error){h='<div class="empty">'+esc(c.error)+'</div>'}else{const rows=c.rows.filter(f),w=rows.filter(r=>r.cpm!==null),mx=Math.max(0.01,...w.map(r=>r.cpm)),tot=rows.reduce((a,r)=>a+r.total,0),mi=rows.reduce((a,r)=>a+r.miles,0);
+    $('upCount').textContent='Last 12 months · repairs from invoices and Ramp, gas from Ramp split by who drove which truck, miles from Azuga';
+    h='<div class="bsum"><div><b>'+d0(tot)+'</b><span>repairs + gas, 12 months</span></div><div><b>'+(mi?'$'+(tot/mi).toFixed(2):'–')+'</b><span>fleet cost per mile</span></div><div><b>'+mi.toLocaleString()+'</b><span>miles driven</span></div>'+(c.unassignedGas?'<div><b>'+d0(c.unassignedGas)+'</b><span>gas not matched to a truck</span></div>':'')+'</div>'
+     +'<table class="utab"><tr><th>Truck</th><th>Age</th><th>Odometer</th><th>Repairs</th><th>Gas</th><th>Miles</th><th>Cost per mile</th></tr>'
+     +rows.map((r,i)=>'<tr class="'+(r.cpm!==null&&i<3?'hot':r.cpm!==null&&r.cpm>=mx*0.6?'warm':'')+'"><td><b>'+esc(r.name)+'</b><div class="muted">'+esc(r.driver||'No driver')+'</div></td><td>'+(r.age!==null?r.age+' yr':'–')+'</td><td>'+(r.odo?r.odo.toLocaleString():'–')+'</td><td>'+d0(r.repairs)+(r.nRep?' <span class="muted">('+r.nRep+')</span>':'')+'</td><td>'+d0(r.gas)+'</td><td>'+r.miles.toLocaleString()+'</td><td>'+(r.cpm!==null?'<div class="cpm"><b>$'+r.cpm.toFixed(2)+'</b><i><b style="width:'+Math.round(r.cpm/mx*100)+'%"></b></i></div>':'<span class="muted">under 100 mi</span>')+'</td></tr>').join('')+'</table>'}}
+  if(USEC==='gas'){const g=u.gas.filter(f),bad=g.filter(x=>x.flags.length),lab={ok:'At the station',moving:'Driving past',far:'Not near',nogps:'No GPS',noloc:'No station location',notruck:'No truck found'};
+    $('upCount').textContent='Card fill-ups from the last 60 days, each checked against where the truck was (Azuga) within 30 minutes';
+    h='<div class="bsum"><div><b>'+g.length+'</b><span>fill-ups checked</span></div><div><b>'+g.filter(x=>x.verdict==='far').length+'</b><span>truck not near the card</span></div><div><b>'+bad.length+'</b><span>flagged in all</span></div><div><b>'+g.filter(x=>x.unverified).length+'</b><span>could not be checked</span></div><div><b>'+g.filter(x=>x.verdict==='ok').length+'</b><span>truck was at the station</span></div></div>'
+     +'<div class="utog"><button class="btn2" id="upGasRun">'+(u.gasBusy?'Checking...':'Check new fill-ups now')+'</button><span class="muted">New fill-ups are checked every 30 minutes.</span></div>'
+     +(g.length?'<table class="utab"><tr><th>Who</th><th>When</th><th>Station</th><th>Truck</th><th>GPS</th><th>Flags</th><th></th></tr>'+g.slice(0,200).map(x=>'<tr class="'+(x.flags.length?'hot':x.unverified?'warm':'')+'"><td><b>'+esc(x.who)+'</b></td><td>'+esc(new Date(x.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}))+'</td><td>'+esc(x.merchant)+'<div class="muted">'+money(x.amount)+(x.gal?' · '+x.gal.toFixed(1)+' gal':'')+'</div></td><td>'+esc(x.truck||'–')+(x.tank?'<div class="muted">'+x.tank+' gal tank</div>':'')+'</td><td><span class="upill '+x.verdict+'">'+lab[x.verdict]+'</span></td><td>'+(x.flags.map(f=>'<b class="gflag">'+esc(f)+'</b>').join('<br>')||(x.unverified?'<span class="gwarn">Could not check: '+esc(x.unverified)+'</span>':'<span class="muted">–</span>'))+'</td><td><a class="btn2" href="'+esc(x.link)+'" target="_blank" rel="noopener">Ramp ↗</a></td></tr>').join('')+'</table>':'<div class="empty">No fill-ups checked yet. The first check runs a few minutes after the server starts.</div>')}
+  if(USEC==='oil'){const o=Array.isArray(u.oil)?u.oil.filter(f):[];const lab={due:'Due',soon:'Soon',ok:'OK',unknown:'No record'};
+    $('upCount').textContent='Due every '+u.oilMiles.toLocaleString()+' miles or 6 months · last oil change comes from invoices saved in the truck notes';
+    h=(u.oil.error?'<div class="empty">'+esc(u.oil.error)+'</div>':'')+'<div class="bsum"><div><b>'+o.filter(x=>x.status==='due').length+'</b><span>due now</span></div><div><b>'+o.filter(x=>x.status==='soon').length+'</b><span>due soon</span></div><div><b>'+o.filter(x=>x.status==='unknown').length+'</b><span>no oil change on record</span></div></div>'
+     +'<div class="utog"><label><input type="checkbox" id="upOilOn"'+(u.settings.oil?' checked':'')+'> Email the driver every Monday when their truck is due</label><button class="btn2" id="upOilTest">Send me a sample</button></div>'
+     +'<table class="utab"><tr><th>Truck</th><th>Status</th><th>Since last change</th><th>Last change</th><th>Odometer</th></tr>'+o.map(x=>'<tr class="'+(x.status==='due'?'hot':x.status==='soon'?'warm':'')+'"><td><b>'+esc(x.name)+'</b><div class="muted">'+esc(x.driver||'No driver')+'</div></td><td><span class="upill '+x.status+'">'+lab[x.status]+'</span></td><td>'+(x.since!==null?x.since.toLocaleString()+' mi':x.odoMismatch?'<span class="muted">odometer doesn\\'t match invoice</span>':'–')+(x.days!==null?'<div class="muted">'+x.days+' days</div>':'')+'</td><td>'+fdate(x.oilDate)+(x.oilMiles?'<div class="muted">at '+Number(x.oilMiles).toLocaleString()+' mi</div>':'')+'</td><td>'+(x.odo?x.odo.toLocaleString():'–')+'</td></tr>').join('')+'</table>'}
+  if(USEC==='ren'){const r=u.renew.filter(f),soon=x=>x!==null&&x<=30;
+    $('upCount').textContent='Dates are read from the insurance cards and registration files in Airtable; fix any date right here';
+    h='<div class="bsum"><div><b>'+r.filter(x=>soon(x.insLeft)).length+'</b><span>insurance due in 30 days</span></div><div><b>'+r.filter(x=>soon(x.regLeft)).length+'</b><span>registrations due in 30 days</span></div><div><b>'+r.filter(x=>!x.ins||!x.reg).length+'</b><span>trucks missing a date</span></div></div>'
+     +'<div class="utog"><label><input type="checkbox" id="upRenOn"'+(u.settings.renew?' checked':'')+'> Email me 30 days before each one, with the card attached</label><button class="btn2" id="upRenRead"'+(u.ai?'':' disabled title="Needs ANTHROPIC_API_KEY"')+'>Read cards now</button><button class="btn2" id="upRenTest">Send due reminders now</button></div>'
+     +'<table class="utab"><tr><th>Truck</th><th>Insurance expires</th><th>Registration expires</th><th>Card</th></tr>'+r.map(x=>'<tr class="'+(soon(x.insLeft)||soon(x.regLeft)?'hot':'')+'"><td><b>'+esc(x.name)+'</b><div class="muted">'+esc(x.plate||'')+(x.policy?' · '+esc(x.policy):'')+'</div></td>'
+       +'<td><input type="date" data-ren="ins" data-id="'+x.id+'" value="'+esc(x.ins||'')+'"> <span class="muted">'+leftTxt(x.insLeft)+'</span></td><td><input type="date" data-ren="reg" data-id="'+x.id+'" value="'+esc(x.reg||'')+'"> <span class="muted">'+leftTxt(x.regLeft)+'</span></td><td>'+(x.card?'<a class="btn2" href="'+esc(x.card)+'" target="_blank" rel="noopener">Open ↗</a>':'<span class="muted">none</span>')+'</td></tr>').join('')+'</table>'}
+  if(USEC==='saf'){$('upCount').textContent='Every Monday each driver gets their own score, rank and worst camera event of the week';
+    h='<div class="utog"><label><input type="checkbox" id="upSafOn"'+(u.settings.safety?' checked':'')+'> Send the weekly safety email to every driver (Mondays, 8 AM)</label></div>'
+     +'<div class="utog"><input id="upSafName" placeholder="Driver name" value="Callum Curcie" style="font:inherit;padding:8px 10px;border:1px solid #cbd5e1;border-radius:10px"><button class="btn2" id="upSafPrev">Preview</button><button class="btn2" id="upSafTest">Send this to me</button><span id="upSafMsg" class="muted"></span></div><div id="upSafOut"></div>'}
+  if(!u.mail&&USEC!=='cost'&&USEC!=='gas')h='<p class="muted">Email isn\\'t set up in Render yet, so nothing will be sent.</p>'+h;
+  $('usBody').innerHTML=h}
+document.addEventListener('click',async e=>{const n=e.target.closest('#upNav [data-us]');if(n){USEC=n.dataset.us;document.querySelectorAll('#upNav button').forEach(x=>x.classList.toggle('on',x===n));renderUp();return}
+  const id=e.target.id,go=async(u,b,ok)=>{e.target.disabled=true;try{const r=await post(u,b||{});if(ok)ok(r)}catch(err){alert(err.message)}e.target.disabled=false};
+  if(id==='upGasRun')go('/api/upkeep/gas-check',{},()=>{e.target.textContent='Checking... refresh in a few minutes';setTimeout(loadUp,90e3)});
+  if(id==='upOilTest')go('/api/upkeep/oil-sample',{},r=>{e.target.textContent='Sent to '+r.to});
+  if(id==='upRenRead')go('/api/upkeep/read-cards',{},()=>{e.target.textContent='Reading... check back in a few minutes';setTimeout(()=>{UP=null;loadUp()},120e3)});
+  if(id==='upRenTest')go('/api/upkeep/renewal-test',{},r=>{e.target.textContent=r.sent.length?'Sent: '+r.sent.length:'Nothing due in 30 days'});
+  if(id==='upSafPrev'){const v=$('upSafName').value.trim();try{const r=await get('/api/upkeep/safety-preview?name='+encodeURIComponent(v));$('upSafOut').innerHTML=r.error?'<div class="empty">'+esc(r.error)+'</div>':'<div class="upre"><b>'+esc(r.subject)+'</b>\\n\\n'+esc(r.body)+'</div>'}catch(err){$('upSafOut').textContent=err.message}}
+  if(id==='upSafTest')go('/api/upkeep/safety-sample',{name:$('upSafName').value.trim()},r=>{$('upSafMsg').textContent='Sent '+r.name+'\\'s email to '+r.to});
+});
+document.addEventListener('change',async e=>{const t=e.target,map={upOilOn:'oil',upRenOn:'renew',upSafOn:'safety'};
+  if(map[t.id]){try{UP.settings=await post('/api/upkeep/settings',{[map[t.id]]:t.checked})}catch(err){alert(err.message);t.checked=!t.checked}return}
+  if(t.dataset&&t.dataset.ren){try{await post('/api/upkeep/renewal',{id:t.dataset.id,[t.dataset.ren]:t.value});const x=UP.renew.find(r=>r.id===t.dataset.id);x[t.dataset.ren]=t.value;x[t.dataset.ren+'Left']=t.value?Math.round((Date.parse(t.value+'T12:00')-Date.now())/864e5):null;t.style.background='#dcfce7';setTimeout(renderUp,600)}catch(err){alert(err.message)}}});
 // ---- Purchases tab: hardware-store receipts from Ramp, item by item, with season-end return status ----
 let BUY=null,BUYF='Out';
 async function loadBuy(){if(!BUY)$('buyCount').textContent='Loading Ramp purchases...';try{BUY=await get('/api/purchases')}catch(e){$('buyCount').textContent='Could not load purchases: '+e.message;return}renderBuy()}
