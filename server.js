@@ -1507,6 +1507,44 @@ async function readReceipt(id, gas) {
   if (gas) return [Math.round((+out.gallons || 0) * 1000) / 1000, Math.round((+out.price_per_gallon || 0) * 1000) / 1000, String(out.grade || '').toLowerCase().slice(0, 1)];
   return (out.items || []).filter(x => x && x.name).slice(0, 80).map(x => ({ name: clean(x.name).slice(0, 200), sku: clean(x.sku).replace(/\s+/g, '').slice(0, 40), qty: Math.max(1, Math.round(+x.qty || 1)), price: Math.round((+x.price || 0) * 100) / 100 }));
 }
+async function saveItems(t, lines, st) {
+  const recs = lines.map(x => ({ fields: { [IT.item]: x.name, [IT.txn]: t.id, [IT.date]: t.date || null, [IT.store]: t.store, [IT.person]: t.who, [IT.memo]: t.memo, [IT.sku]: x.sku,
+    [IT.qty]: x.qty, [IT.price]: x.price, [IT.link]: itemLink(t.store, x.sku, x.name), [IT.ramp]: t.link, [IT.status]: 'Out' } }));
+  for (let i = 0; i < recs.length; i += 10) await airtable(AT_ITEMS, { method: 'POST', body: JSON.stringify({ records: recs.slice(i, i + 10), typecast: true }) });
+  st.done[t.id] = recs.length || 'none'; return recs.length;
+}
+// Reading by hand (until ANTHROPIC_API_KEY is set): /receipts shows the waiting receipts, and the items read
+// from them are saved with POST /api/purchase/items (or /api/purchase/gas for fuel receipts).
+async function saveItemsByHand(b) {
+  const t = (await hwPurchases()).find(x => x.id === String(b.txn || ''));
+  if (!t) throw new Error('Not a hardware-store purchase: ' + b.txn);
+  const st = itemsState(); if (st.done[t.id] && !b.again) throw new Error('This receipt was already read.');
+  const lines = (Array.isArray(b.items) ? b.items : []).filter(x => x && x.name).slice(0, 80).map(x => ({ name: clean(x.name).slice(0, 200), sku: clean(x.sku || '').replace(/\s+/g, '').slice(0, 40), qty: Math.max(1, Math.round(+x.qty || 1)), price: Math.round((+x.price || 0) * 100) / 100 }));
+  const n = await saveItems(t, lines, st); saveItemsState(st); cache.delete('itemsAT');
+  console.log(new Date().toISOString(), 'Receipt read by hand:', t.store, t.date, t.who, n, 'items'); return { ok: true, n };
+}
+async function saveGasByHand(b) {
+  const t = (await rampYear()).card.find(x => x.id === String(b.txn || '') && x.gas); if (!t) throw new Error('Not a gas purchase: ' + b.txn);
+  const gx = gasRx(); gx[t.id.slice(0, 10)] = [Math.round((+b.gal || 0) * 1000) / 1000, Math.round((+b.ppg || 0) * 1000) / 1000, String(b.grade || '').toLowerCase().slice(0, 1)];
+  cache.set('gasRx', { data: gx, t: Date.now() }); saveSnap('gasRx', gx); cache.delete('rampOv'); return { ok: true };
+}
+async function receiptFile(id, res) {
+  if (!/^[0-9a-f-]{36}$/i.test(id || '')) { res.writeHead(400); return res.end(); }
+  try { const r = await ramp('https://api.ramp.com/developer/v1/receipts/' + id), f = await fetch(r.receipt_url);
+    res.writeHead(f.status, { 'Content-Type': f.headers.get('content-type') || 'application/octet-stream', 'Cache-Control': 'private, max-age=3600' }); res.end(Buffer.from(await f.arrayBuffer())); }
+  catch (e) { res.writeHead(502, { 'Content-Type': 'text/plain' }); res.end(e.message); }
+}
+async function receiptsPage(gas) {
+  const h = v => String(v ?? '').replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';');
+  const st = itemsState(), gx = gasRx();
+  const list = gas ? (await rampYear()).card.filter(t => t.gas && t.receipts.length && !(t.id.slice(0, 10) in gx)).map(t => ({ ...t, date: t.at.slice(0, 10), store: t.merchant }))
+    : (await hwPurchases()).filter(t => t.receipts.length && !st.done[t.id]);
+  const show = list.slice(0, 8);
+  return '<!doctype html><html><head><meta charset="utf-8"><title>Receipts to read</title><style>body{font-family:system-ui,Arial,sans-serif;background:#f1f5f9;margin:0;padding:16px}h1{font-size:18px;margin:0 0 12px}.r{background:#fff;border-radius:12px;padding:12px;margin-bottom:16px}.r b{font-size:15px}.r code{font-size:12px;color:#475569}.r img,.r object{display:block;max-width:900px;width:100%;margin-top:8px;border:1px solid #e2e8f0}</style></head><body>'
+    + '<h1>' + list.length + ' ' + (gas ? 'gas' : 'hardware-store') + ' receipts waiting · showing ' + show.length + '</h1>'
+    + show.map(t => '<div class="r" data-txn="' + h(t.id) + '"><b>' + h(t.store) + ' · ' + h(t.who) + ' · ' + h(t.date) + ' · ' + '$' + (+t.amount || 0).toFixed(2) + '</b><br><code>' + h(t.id) + '</code>' + (t.memo ? '<div>' + h(t.memo) + '</div>' : '')
+      + t.receipts.slice(0, 3).map(r => '<object data="/api/purchase/receipt?id=' + h(r) + '"><img src="/api/purchase/receipt?id=' + h(r) + '" alt="receipt"></object>').join('') + '</div>').join('') + '</body></html>';
+}
 let itemsBusy = false;
 async function readReceipts(max = 15) {
   if (itemsBusy) return { busy: true };
@@ -1520,10 +1558,7 @@ async function readReceipts(max = 15) {
       try {
         let lines = [];
         for (const rid of t.receipts.slice(0, 4)) lines = lines.concat(await readReceipt(rid));
-        const recs = lines.map(x => ({ fields: { [IT.item]: x.name, [IT.txn]: t.id, [IT.date]: t.date || null, [IT.store]: t.store, [IT.person]: t.who, [IT.memo]: t.memo, [IT.sku]: x.sku,
-          [IT.qty]: x.qty, [IT.price]: x.price, [IT.link]: itemLink(t.store, x.sku, x.name), [IT.ramp]: t.link, [IT.status]: 'Out' } }));
-        for (let i = 0; i < recs.length; i += 10) await airtable(AT_ITEMS, { method: 'POST', body: JSON.stringify({ records: recs.slice(i, i + 10), typecast: true }) });
-        st.done[t.id] = recs.length || 'none'; made += recs.length; st.err = '';
+        made += await saveItems(t, lines, st); st.err = '';
       } catch (e) {
         if (e.fatal || /Ramp 40[13]/.test(e.message)) { st.err = /Ramp 40[13]/.test(e.message) ? 'The Ramp app needs the receipts:read permission.' : e.message; break; }
         console.error('Receipt for', t.store, t.date, t.who, 'failed:', e.message); st.done[t.id] = 'err: ' + e.message.slice(0, 80);
@@ -2250,7 +2285,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   if (POSTS[url.pathname]) {
@@ -2266,6 +2301,8 @@ http.createServer(async (req, res) => {
     }
   }
   if (url.pathname === '/api/media') return media(url.searchParams.get('u'), req, res);
+  if (url.pathname === '/receipts') { try { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); return res.end(await receiptsPage(url.searchParams.get('gas') === '1')); } catch (e) { res.writeHead(502); return res.end(e.message); } }
+  if (url.pathname === '/api/purchase/receipt') return receiptFile(url.searchParams.get('id'), res);
   if (url.pathname === '/stickers') { try { const at = await atData(); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); return res.end(stickersPage(at, base)); } catch (e) { res.writeHead(502); return res.end(e.message); } }
   if (url.pathname === '/checkup') return serveCheckup(res, url.searchParams.get('id'));
   if (url.pathname === '/report') return serveReport(res, url.searchParams.get('driver') ? 'driver' : 'fleet', url.searchParams.get('driver'), base, false);
@@ -4335,7 +4372,7 @@ function renderBuy(){const r=BUY;if(!r)return;
   const sum=st=>it.filter(x=>x.status===st).reduce((a,x)=>[a[0]+1,a[1]+x.price],[0,0]),o=sum('Out'),rt=sum('Returned'),u=sum('Used up');
   const wait=r.txns.filter(t=>t.state==='waiting').length,nor=r.txns.filter(t=>t.state==='noReceipt').length,bad=r.txns.filter(t=>t.state==='error').length;
   $('buyCount').textContent=r.txns.length+' hardware-store purchases since '+r.since+' · '+r.items.length+' items read'+(r.last?' · last check '+new Date(r.last).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}):'');
-  $('buySum').innerHTML=(r.err||!r.ai?'<div class="note bnote">'+esc(r.err||'Add ANTHROPIC_API_KEY in Render so receipts can be read.')+'</div>':'')
+  $('buySum').innerHTML=(r.err||!r.ai?'<div class="note bnote">'+esc(r.err||'Receipts are read by hand until ANTHROPIC_API_KEY is added in Render. Ask Claude to read the waiting ones.')+'</div>':'')
     +'<div class="bsum"><div><b>'+o[0]+'</b><span>still out · '+money(o[1])+'</span></div><div><b>'+rt[0]+'</b><span>returned</span></div><div><b>'+u[0]+'</b><span>used up</span></div><div><b>'+wait+'</b><span>receipts waiting to be read</span></div><div><b>'+nor+'</b><span>purchases with no receipt</span></div>'+(bad?'<div><b>'+bad+'</b><span>receipts unreadable</span></div>':'')+'</div>';
   $('buyChips').innerHTML=['Out','Returned','Used up','All'].map(k=>'<button class="bchip'+(BUYF===k?' on':'')+'" data-bf="'+k+'">'+(k==='Out'?'Still out':k)+'</button>').join('');
   const show=it.filter(x=>BUYF==='All'||x.status===BUYF),by={};show.forEach(x=>(by[x.txn]=by[x.txn]||[]).push(x));
