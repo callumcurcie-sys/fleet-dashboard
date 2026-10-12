@@ -1472,14 +1472,20 @@ const AT_ITEMS = 'tbl6f6FmKPRdie2uK', IT = { item: 'fldfmOGrz3tAqyezP', txn: 'fl
 const HW_STORE = /home ?depot|lowe'?s|harbor ?freight|amazon|amzn|tractor supply|\bace\b|menards|northern tool|grainger|true value|leslie'?s|pinch a penny|sherwin|walmart|target|costco|sam'?s club|staples|best buy|autozone|advance auto|o'?reilly|napa/i;
 const ITEMS_SINCE = process.env.ITEMS_SINCE || '2026-03-01';
 const AI_KEY = () => clean(process.env.ANTHROPIC_API_KEY || ''), AI_MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
+// Product link for a receipt line. Receipts mostly print UPC barcodes (12-13 digits), which store sites can't search,
+// so those go by the item name. Only real store item numbers (Home Depot internet #/store SKU, Lowe's item #,
+// Harbor Freight item #, Amazon ASIN) are used directly. Short register codes ("1/4XCBRPPNPL") go to a Google search.
 const itemLink = (store, sku, name) => {
-  const q = encodeURIComponent(sku || name || ''), st = String(store || '');
-  if (/home ?depot/i.test(st)) return sku ? 'https://www.homedepot.com/s/' + q : 'https://www.homedepot.com/s/' + encodeURIComponent(name);
-  if (/lowe/i.test(st)) return 'https://www.lowes.com/search?searchTerm=' + q;
-  if (/harbor/i.test(st)) return 'https://www.harborfreight.com/search?q=' + q;
-  if (/amazon|amzn/i.test(st)) return /^B0[A-Z0-9]{8}$/.test(sku || '') ? 'https://www.amazon.com/dp/' + sku : 'https://www.amazon.com/s?k=' + encodeURIComponent(name);
-  if (/tractor/i.test(st)) return 'https://www.tractorsupply.com/tsc/search/' + q;
-  return 'https://www.google.com/search?q=' + encodeURIComponent(st + ' ' + (name || '') + ' ' + (sku || ''));
+  const st = String(store || ''), k = String(sku || '').replace(/\D/g, '') === String(sku || '') ? String(sku || '') : '', n = clean(name).replace(/\(.*?\)/g, '').trim();
+  const cryptic = !/\s/.test(n) || /^[A-Z0-9 /#"'.\-]+$/.test(n) && n.split(' ').some(w => w.length > 7 && /\d/.test(w));
+  const q = encodeURIComponent(n), g = 'https://www.google.com/search?q=' + encodeURIComponent(st + ' ' + n + (sku ? ' ' + sku : ''));
+  if (/amazon|amzn/i.test(st)) return /^B0[A-Z0-9]{8}$/.test(sku || '') ? 'https://www.amazon.com/dp/' + sku : 'https://www.amazon.com/s?k=' + q;
+  if (/home ?depot/i.test(st)) return /^(\d{6}|\d{9,10})$/.test(k) ? 'https://www.homedepot.com/s/' + k : cryptic ? g : 'https://www.homedepot.com/s/' + q;
+  if (/lowe/i.test(st)) return /^\d{4,7}$/.test(k) ? 'https://www.lowes.com/search?searchTerm=' + k : cryptic ? g : 'https://www.lowes.com/search?searchTerm=' + q;
+  if (/harbor/i.test(st)) return /^\d{5}$/.test(k) ? 'https://www.harborfreight.com/search?q=' + k : 'https://www.harborfreight.com/search?q=' + q;
+  if (/tractor/i.test(st)) return cryptic ? g : 'https://www.tractorsupply.com/tsc/search/' + q;
+  if (/walmart/i.test(st)) return 'https://www.walmart.com/search?q=' + q;
+  return g;
 };
 const itemsState = () => (cache.get('rampItems') || {}).data || { done: {} };
 const saveItemsState = d => { cache.set('rampItems', { data: d, t: Date.now() }); saveSnap('rampItems', d); };
@@ -1549,7 +1555,7 @@ let itemsBusy = false;
 async function readReceipts(max = 15) {
   if (itemsBusy) return { busy: true };
   const st = itemsState();
-  if (!AI_KEY()) { st.err = 'Add ANTHROPIC_API_KEY in Render so receipts can be read.'; return st; }
+  if (!AI_KEY()) return { ...st, manual: true };   // read by hand on /receipts until the key is added
   itemsBusy = true; let n = 0, made = 0;
   try {
     const todo = (await hwPurchases()).filter(t => t.receipts.length && !st.done[t.id]);
@@ -1585,7 +1591,7 @@ async function purchases() {
   if (!RAMP_CLIENT_ID || !RAMP_CLIENT_SECRET) return { connected: false };
   const st = itemsState(), [tx, recs] = await Promise.all([hwPurchases(), cached('itemsAT', 60, () => atAll(AT_ITEMS, Object.values(IT)))]);
   const items = recs.map(r => { const f = r.fields; return { id: r.id, name: clean(f[IT.item]), txn: clean(f[IT.txn]), date: clean(f[IT.date]), store: clean(f[IT.store]), who: clean(f[IT.person]), memo: clean(f[IT.memo]),
-    sku: clean(f[IT.sku]), qty: f[IT.qty] || 1, price: f[IT.price] || 0, link: clean(f[IT.link]), ramp: clean(f[IT.ramp]), status: clean(f[IT.status]?.name ?? f[IT.status]) || 'Out', notes: clean(f[IT.notes]) }; });
+    sku: clean(f[IT.sku]), qty: f[IT.qty] || 1, price: f[IT.price] || 0, link: itemLink(f[IT.store], clean(f[IT.sku]), clean(f[IT.item])), ramp: clean(f[IT.ramp]), status: clean(f[IT.status]?.name ?? f[IT.status]) || 'Out', notes: clean(f[IT.notes]) }; });
   const txns = tx.map(t => ({ ...t, state: st.done[t.id] ? (String(st.done[t.id]).startsWith('err') ? 'error' : 'read') : t.receipts.length ? 'waiting' : 'noReceipt', err: String(st.done[t.id] || '').startsWith('err') ? String(st.done[t.id]).slice(5) : '' }));
   return { connected: true, ai: !!AI_KEY(), err: st.err || '', last: st.last || 0, busy: itemsBusy, since: ITEMS_SINCE, items, txns };
 }
