@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist', 'swapReq']);
+const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -135,6 +135,9 @@ const routes = {
       || svcs.find(v => svcName(v) === s.tech && etDay(new Date(v.startTime)).ymd === day);
       if (hit) { s.service = hit.id; s.done = true; } });
     const at = await atData().catch(() => ({ drivers: [] })), people = at.drivers.filter(d => d.name && d.status !== 'Inactive'), roles = {}, phones = {}, emails = {}, seen = new Set();
+    // Inactive in Airtable = gone from the check-up grid and the reminder emails, even with old POM check-ups on record
+    const gone = at.drivers.filter(d => d.name && d.status === 'Inactive'), isGone = n => !matchPerson(people, n) && !!matchPerson(gone, n);
+    for (let i = list.length - 1; i >= 0; i--) if (isGone(list[i].tech)) list.splice(i, 1);
     [...new Set(list.map(s => s.tech))].forEach(n => { const m = matchPerson(drivers, n), p = matchPerson(people, n); trucks[n] = m ? m.v : null; roles[n] = p ? p.role : ''; phones[n] = p ? p.phone : ''; emails[n] = p ? p.email : ''; if (p) seen.add(p.id); });
     // Techs, tech assistants and auditors submit the weekly truck form; owners, district, regional and staffers don't
     const missing = people.filter(d => CHECKUP_ROLES.includes(d.role) && !seen.has(d.id)).map(d => ({ name: d.name, role: d.role }));
@@ -172,6 +175,8 @@ const routes = {
     return out; },
   '/api/pom/checkup-plan': () => checkupPlan(),
   '/api/truck/swaps': () => swapLog(),
+  '/api/purchases': () => purchases(),
+  '/api/ramp/overview': () => RAMP_CLIENT_ID && RAMP_CLIENT_SECRET ? rampOverview() : { connected: false },
   '/api/truck/requests': () => swapReqs(),
   '/api/truck/history': q => truckHistory(q),
   '/api/mail/status': () => { const st = mailState(); return { ready: mailReady(), from: mailFrom(), auto: !!st.auto, week: st.week, sent: st.sent || [], bounced: st.bounced || [], bounceErr: st.bounceErr || '' }; },
@@ -789,7 +794,7 @@ const drvHistory = () => cached('drvHist', 12 * 3600, async () => {
     const rows = list(await azuga('https://services.azuga.com/reports/v3/reports/score?appId=FLEET', { startDate: azIso(start), endDate: azIso(end), browserTimezone: 'US/Eastern', reportFilter: 'default', index: 0, size: 500, desc: false, filter: { orFilter: {}, matchFilter: {} } }));
     for (const r of rows) {
       const name = [r.firstName, r.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, ''), mi = +r.distanceTravelled || 0;
-      if (!name || !r.vehicleId || mi < 1) continue;
+      if (!/[a-z]/i.test(name) || !r.vehicleId || mi < 1) continue;   // Azuga shows a number when nobody was logged in
       const tv = by[r.vehicleId] = by[r.vehicleId] || {}, h = tv[dupeName(name)] = tv[dupeName(name)] || { name, from: +start, to: +end, miles: 0 };
       h.from = Math.min(h.from, +start); h.to = Math.max(h.to, +end); h.miles += mi;
     }
@@ -1369,7 +1374,7 @@ if (process.argv[2] !== 'test') setInterval(autoCheckups, 60 * 60e3);
 const { RAMP_CLIENT_ID, RAMP_CLIENT_SECRET } = process.env;
 let rampTok, rampExp = 0, rampScopes = '';
 // Asks for all three permissions; if the Ramp app wasn't given one, falls back to fewer so the box still works.
-const RAMP_SCOPES = ['transactions:read reimbursements:read users:read', 'transactions:read reimbursements:read', 'transactions:read'];
+const RAMP_SCOPES = ['transactions:read reimbursements:read users:read receipts:read', 'transactions:read reimbursements:read users:read', 'transactions:read reimbursements:read', 'transactions:read'];
 async function rampLogin() {
   let last = '';
   for (const scope of RAMP_SCOPES) {
@@ -1457,6 +1462,152 @@ const rampRepairs = () => cached('rampRepairs', 3600, async () => {
       link: 'https://app.ramp.com/business-overview/transactions/' + t.id });
   }
   return out;
+});
+// ---------------- Purchases: hardware-store receipts from Ramp, read line by line ----------------
+// Each receipt on a Home Depot / Lowe's / Harbor Freight / Amazon... card purchase is read once by Claude
+// (ANTHROPIC_API_KEY in Render; the Ramp app needs receipts:read). Every line becomes a row in Airtable's
+// "Ramp items" table with a link to the item and a Status (Out / Returned / Used up) for season-end returns.
+const AT_ITEMS = 'tbl6f6FmKPRdie2uK', IT = { item: 'fldfmOGrz3tAqyezP', txn: 'fldXZEoseMTikTgag', date: 'fld2WjFbXDZhqOBda', store: 'fldHsRbMDA1cR2bkp', person: 'fldwyvwcJAb8F0iGw',
+  memo: 'fldPRjPJD6cvCmvGp', sku: 'fldJrAoNyn1x1b6OM', qty: 'fldV9CKeJD8cH3G7F', price: 'fldbu8c7CM3UAOCbF', link: 'fldf5PvAkxMQh33f3', ramp: 'fld9AX1cKax6Ol5Na', status: 'fldKj2OZkOHoPF9qF', notes: 'fldO2GBAIjZlFhnqo' };
+const HW_STORE = /home ?depot|lowe'?s|harbor ?freight|amazon|amzn|tractor supply|\bace\b|menards|northern tool|grainger|true value|leslie'?s|pinch a penny|sherwin|walmart|target|costco|sam'?s club|staples|best buy|autozone|advance auto|o'?reilly|napa/i;
+const ITEMS_SINCE = process.env.ITEMS_SINCE || '2026-03-01';
+const AI_KEY = () => clean(process.env.ANTHROPIC_API_KEY || ''), AI_MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
+const itemLink = (store, sku, name) => {
+  const q = encodeURIComponent(sku || name || ''), st = String(store || '');
+  if (/home ?depot/i.test(st)) return sku ? 'https://www.homedepot.com/s/' + q : 'https://www.homedepot.com/s/' + encodeURIComponent(name);
+  if (/lowe/i.test(st)) return 'https://www.lowes.com/search?searchTerm=' + q;
+  if (/harbor/i.test(st)) return 'https://www.harborfreight.com/search?q=' + q;
+  if (/amazon|amzn/i.test(st)) return /^B0[A-Z0-9]{8}$/.test(sku || '') ? 'https://www.amazon.com/dp/' + sku : 'https://www.amazon.com/s?k=' + encodeURIComponent(name);
+  if (/tractor/i.test(st)) return 'https://www.tractorsupply.com/tsc/search/' + q;
+  return 'https://www.google.com/search?q=' + encodeURIComponent(st + ' ' + (name || '') + ' ' + (sku || ''));
+};
+const itemsState = () => (cache.get('rampItems') || {}).data || { done: {} };
+const saveItemsState = d => { cache.set('rampItems', { data: d, t: Date.now() }); saveSnap('rampItems', d); };
+const hwPurchases = () => cached('hwTx', 1800, async () => {
+  const money = a => typeof a === 'number' ? a : Number(a && a.amount) / 100 || 0;
+  return (await rampAll('transactions', { from_date: new Date(ITEMS_SINCE).toISOString() })).filter(t => !/DECLINED|ERROR/i.test(t.state || '') && HW_STORE.test(t.merchant_name || t.merchant_descriptor || ''))
+    .map(t => { const h = t.card_holder || {}; return { id: t.id, date: (t.user_transaction_time || t.settlement_date || '').slice(0, 10), store: clean(t.merchant_name || t.merchant_descriptor),
+      who: [h.first_name, h.last_name].filter(Boolean).join(' '), memo: clean(t.memo || ''), amount: money(t.amount), receipts: t.receipts || [], link: 'https://app.ramp.com/business-overview/transactions/' + t.id }; });
+});
+async function readReceipt(id, gas) {
+  const r = await ramp('https://api.ramp.com/developer/v1/receipts/' + encodeURIComponent(id));
+  if (!r.receipt_url) throw new Error('Ramp gave no file for receipt ' + id);
+  const f = await fetch(r.receipt_url); if (!f.ok) throw new Error('Receipt download ' + f.status);
+  let type = (f.headers.get('content-type') || '').split(';')[0].toLowerCase(); const buf = Buffer.from(await f.arrayBuffer());
+  if (!/^image\/(jpeg|png|gif|webp)$|^application\/pdf$/.test(type)) type = buf.slice(0, 4).toString() === '%PDF' ? 'application/pdf' : buf[0] === 0x89 ? 'image/png' : buf[0] === 0xff ? 'image/jpeg' : type;
+  if (!/^image\/(jpeg|png|gif|webp)$|^application\/pdf$/.test(type)) throw new Error('Receipt file type ' + (type || 'unknown') + ' cannot be read');
+  const part = { type: type === 'application/pdf' ? 'document' : 'image', source: { type: 'base64', media_type: type, data: buf.toString('base64') } };
+  const a = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': AI_KEY(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    body: JSON.stringify({ model: AI_MODEL, max_tokens: 2500, messages: [{ role: 'user', content: [part, { type: 'text', text:
+      gas ? 'This is a gas station / fuel receipt. Reply with JSON only, no other text: {"gallons":0.000,"price_per_gallon":0.000,"grade":"regular|plus|premium|diesel|"}. Use 0 or "" for anything not printed.' : 'This is a store receipt or order confirmation. List every item bought. Reply with JSON only, no other text: {"store":"store name","items":[{"name":"short plain item name","sku":"the store SKU / item number / model number / Amazon ASIN printed for that line, else empty","qty":1,"price":0.00}]}. price is the line total in dollars. Leave out tax, subtotals, totals, discounts, bag fees, rewards and payment lines. If it is not a receipt, reply {"store":"","items":[]}.' }] }] }) });
+  const j = await a.json().catch(() => ({}));
+  if (!a.ok) { const e = new Error('Claude ' + a.status + ': ' + String((j.error && j.error.message) || '').slice(0, 160)); e.fatal = a.status === 401 || a.status === 403 || a.status === 400 && /credit|billing/i.test(e.message); throw e; }
+  const txt = ((j.content || []).find(c => c.type === 'text') || {}).text || '', m = txt.match(/\{[\s\S]*\}/);
+  const out = m ? JSON.parse(m[0]) : { items: [] };
+  if (gas) return [Math.round((+out.gallons || 0) * 1000) / 1000, Math.round((+out.price_per_gallon || 0) * 1000) / 1000, String(out.grade || '').toLowerCase().slice(0, 1)];
+  return (out.items || []).filter(x => x && x.name).slice(0, 80).map(x => ({ name: clean(x.name).slice(0, 200), sku: clean(x.sku).replace(/\s+/g, '').slice(0, 40), qty: Math.max(1, Math.round(+x.qty || 1)), price: Math.round((+x.price || 0) * 100) / 100 }));
+}
+let itemsBusy = false;
+async function readReceipts(max = 15) {
+  if (itemsBusy) return { busy: true };
+  const st = itemsState();
+  if (!AI_KEY()) { st.err = 'Add ANTHROPIC_API_KEY in Render so receipts can be read.'; return st; }
+  itemsBusy = true; let n = 0, made = 0;
+  try {
+    const todo = (await hwPurchases()).filter(t => t.receipts.length && !st.done[t.id]);
+    for (const t of todo) {
+      if (n >= max) break; n++;
+      try {
+        let lines = [];
+        for (const rid of t.receipts.slice(0, 4)) lines = lines.concat(await readReceipt(rid));
+        const recs = lines.map(x => ({ fields: { [IT.item]: x.name, [IT.txn]: t.id, [IT.date]: t.date || null, [IT.store]: t.store, [IT.person]: t.who, [IT.memo]: t.memo, [IT.sku]: x.sku,
+          [IT.qty]: x.qty, [IT.price]: x.price, [IT.link]: itemLink(t.store, x.sku, x.name), [IT.ramp]: t.link, [IT.status]: 'Out' } }));
+        for (let i = 0; i < recs.length; i += 10) await airtable(AT_ITEMS, { method: 'POST', body: JSON.stringify({ records: recs.slice(i, i + 10), typecast: true }) });
+        st.done[t.id] = recs.length || 'none'; made += recs.length; st.err = '';
+      } catch (e) {
+        if (e.fatal || /Ramp 40[13]/.test(e.message)) { st.err = /Ramp 40[13]/.test(e.message) ? 'The Ramp app needs the receipts:read permission.' : e.message; break; }
+        console.error('Receipt for', t.store, t.date, t.who, 'failed:', e.message); st.done[t.id] = 'err: ' + e.message.slice(0, 80);
+      }
+      await sleep(400);
+    }
+    // then gas receipts (gallons, price per gallon, grade), last 12 months
+    if (!st.err && n < max) {
+      const gx = gasRx(), gas = (await rampYear()).card.filter(t => t.gas && t.receipts.length && !(t.id.slice(0, 10) in gx));
+      for (const t of gas) { if (n >= max) break; n++;
+        try { gx[t.id.slice(0, 10)] = await readReceipt(t.receipts[0], true); }
+        catch (e) { if (e.fatal || /Ramp 40[13]/.test(e.message)) { st.err = /Ramp 40[13]/.test(e.message) ? 'The Ramp app needs the receipts:read permission.' : e.message; break; } gx[t.id.slice(0, 10)] = 0; }
+        await sleep(300); }
+      cache.set('gasRx', { data: gx, t: Date.now() }); saveSnap('gasRx', gx); cache.delete('rampOv');
+    }
+  } catch (e) { st.err = e.message; console.error('Reading receipts:', e.message); }
+  finally { itemsBusy = false; }
+  st.last = Date.now(); saveItemsState(st); cache.delete('itemsAT');
+  if (made) console.log(new Date().toISOString(), 'Receipts read:', n, 'purchases,', made, 'items');
+  return { ...st, read: n, items: made };
+}
+if (process.argv[2] !== 'test') { setTimeout(() => readReceipts().catch(() => {}), 3 * 60e3); setInterval(() => readReceipts().catch(() => {}), 20 * 60e3); }
+async function purchases() {
+  if (!RAMP_CLIENT_ID || !RAMP_CLIENT_SECRET) return { connected: false };
+  const st = itemsState(), [tx, recs] = await Promise.all([hwPurchases(), cached('itemsAT', 60, () => atAll(AT_ITEMS, Object.values(IT)))]);
+  const items = recs.map(r => { const f = r.fields; return { id: r.id, name: clean(f[IT.item]), txn: clean(f[IT.txn]), date: clean(f[IT.date]), store: clean(f[IT.store]), who: clean(f[IT.person]), memo: clean(f[IT.memo]),
+    sku: clean(f[IT.sku]), qty: f[IT.qty] || 1, price: f[IT.price] || 0, link: clean(f[IT.link]), ramp: clean(f[IT.ramp]), status: clean(f[IT.status]?.name ?? f[IT.status]) || 'Out', notes: clean(f[IT.notes]) }; });
+  const txns = tx.map(t => ({ ...t, state: st.done[t.id] ? (String(st.done[t.id]).startsWith('err') ? 'error' : 'read') : t.receipts.length ? 'waiting' : 'noReceipt', err: String(st.done[t.id] || '').startsWith('err') ? String(st.done[t.id]).slice(5) : '' }));
+  return { connected: true, ai: !!AI_KEY(), err: st.err || '', last: st.last || 0, busy: itemsBusy, since: ITEMS_SINCE, items, txns };
+}
+async function setItemStatus(b) {
+  const status = ['Out', 'Returned', 'Used up'].includes(b.status) ? b.status : null, ids = (Array.isArray(b.ids) ? b.ids : []).map(String).filter(x => /^rec\w{14}$/.test(x)).slice(0, 200);
+  if (!status || !ids.length) throw new Error('Pick items and a status.');
+  for (let i = 0; i < ids.length; i += 10) await airtable(AT_ITEMS, { method: 'PATCH', body: JSON.stringify({ records: ids.slice(i, i + 10).map(id => ({ id, fields: { [IT.status]: status } })), typecast: true }) });
+  cache.delete('itemsAT'); console.log(new Date().toISOString(), 'Purchases:', ids.length, 'items →', status);
+  return { ok: true, n: ids.length };
+}
+// ---------------- Ramp tab: the last 12 months of card spend and reimbursements ----------------
+const gasRx = () => (cache.get('gasRx') || {}).data || {};   // first 10 chars of a Ramp id -> [gallons, $/gal, grade] (0 = unreadable)
+const rampYear = () => cached('rampYear', 3600, async () => {
+  const since = new Date(Date.now() - 365 * 864e5), money = a => typeof a === 'number' ? a : Number(a && a.amount) / 100 || 0;
+  const card = (await rampAll('transactions', { from_date: since.toISOString() })).filter(t => !/DECLINED|ERROR/i.test(t.state || '')).map(t => { const h = t.card_holder || {};
+    return { id: t.id, at: t.user_transaction_time || t.settlement_date || '', who: [h.first_name, h.last_name].filter(Boolean).join(' '), merchant: clean(t.merchant_name || t.merchant_descriptor), cat: clean(t.sk_category_name) || 'Other',
+      amount: money(t.amount), gas: isGas(t), receipts: t.receipts || [], memo: clean(t.memo || '') }; });
+  let reimb = [];
+  if (/reimbursements/.test(rampScopes)) try {
+    const users = Object.fromEntries((/users/.test(rampScopes) ? await rampAll('users', {}).catch(() => []) : []).map(u => [u.id, [u.first_name, u.last_name].filter(Boolean).join(' ')]));
+    reimb = (await rampAll('reimbursements', { from_date: since.toISOString() })).filter(r => !/REJECT|CANCEL|DRAFT/i.test(r.state || r.status || '')).map(r => ({ id: r.id, at: r.transaction_date || r.created_at || '',
+      who: users[r.user_id] || r.user_full_name || '', merchant: clean(r.merchant || r.merchant_name) || 'Reimbursement', cat: 'Reimbursement', amount: money(r.amount),
+      gas: GAS_WORDS.test((r.merchant || r.merchant_name || '') + ' ' + (r.memo || '')), receipts: [], memo: clean(r.memo || ''), reimb: true }));
+  } catch (e) { console.error('Ramp reimbursements:', e.message); }
+  return { since: since.toISOString(), card, reimb };
+});
+const rampOverview = () => cached('rampOv', 3600, async () => {
+  const y = await rampYear(), gx = gasRx(), all = y.card.concat(y.reimb).filter(t => t.amount > 0 && t.at);
+  const et = t => new Date(new Date(t.at).toLocaleString('en-US', { timeZone: 'America/New_York' })), mk = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+  const months = {}, cats = {}, merch = {}, ppl = {}, stations = {}, gp = {}, flags = [], sameDay = {};
+  for (let i = 11; i >= 0; i--) { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - i); months[mk(d)] = { k: mk(d), gas: 0, other: 0, gal: 0, ppgSum: 0, ppgN: 0 }; }
+  let gal = 0, ppgS = 0, ppgN = 0, prem = 0, read = 0, noRc = 0, noRcAmt = 0;
+  for (const t of all) {
+    const d = et(t), m = months[mk(d)], who = t.who || 'Unknown';
+    if (m) m[t.gas ? 'gas' : 'other'] += t.amount;
+    const pp = ppl[who] = ppl[who] || { name: who, total: 0, gas: 0, n: 0, noRc: 0 }; pp.total += t.amount; pp.n++; if (t.gas) pp.gas += t.amount;
+    if (!t.reimb && !t.receipts.length) { noRc++; noRcAmt += t.amount; pp.noRc++; }
+    if (!t.gas) { (cats[t.cat] = cats[t.cat] || { name: t.cat, total: 0, n: 0 }).total += t.amount; cats[t.cat].n++; (merch[t.merchant] = merch[t.merchant] || { name: t.merchant, total: 0, n: 0 }).total += t.amount; merch[t.merchant].n++; continue; }
+    const g = gp[who] = gp[who] || { name: who, total: 0, n: 0, gal: 0, wk: 0, late: 0, big: 0 }; g.total += t.amount; g.n++;
+    (stations[t.merchant] = stations[t.merchant] || { name: t.merchant, total: 0, n: 0 }).total += t.amount; stations[t.merchant].n++;
+    const rx = gx[t.id.slice(0, 10)];
+    if (rx) { read++; if (rx[0] > 0) { gal += rx[0]; g.gal += rx[0]; if (m) m.gal += rx[0]; } if (rx[1] > 2 && rx[1] < 9) { ppgS += rx[1]; ppgN++; if (m) { m.ppgSum += rx[1]; m.ppgN++; } } if (rx[2] === 'p') prem++; }
+    // worth a look: weekends, before 5 AM / after 9 PM, over $120 at once, a 2nd fill-up the same day, premium fuel
+    const why = [], dow = d.getDay(), hr = d.getHours(), day = who + '|' + d.toDateString();
+    if (dow === 0 || dow === 6) { why.push('weekend'); g.wk++; }
+    if (/T\d/.test(t.at) && (hr < 5 || hr >= 21)) { why.push(d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })); g.late++; }
+    if (t.amount > 120) { why.push('over $120'); g.big++; }
+    if (sameDay[day]) why.push('2nd fill-up that day'); sameDay[day] = 1;
+    if (rx && rx[2] === 'p') why.push('premium fuel');
+    if (why.length) flags.push({ who, date: mk(d) + '-' + String(d.getDate()).padStart(2, '0'), amount: t.amount, merchant: t.merchant, why: why.join(', '), link: t.reimb ? '' : 'https://app.ramp.com/business-overview/transactions/' + t.id });
+  }
+  const top = (o, n) => Object.values(o).sort((a, b) => b.total - a.total).slice(0, n);
+  const gasT = all.filter(t => t.gas), gasCard = gasT.filter(t => !t.reimb);
+  return { since: y.since, months: Object.values(months).map(m => ({ k: m.k, gas: m.gas, other: m.other, gal: Math.round(m.gal), ppg: m.ppgN ? m.ppgSum / m.ppgN : 0 })),
+    total: all.reduce((a, t) => a + t.amount, 0), n: all.length, noRc, noRcAmt, cats: top(cats, 10), merchants: top(merch, 12), people: top(ppl, 60),
+    gas: { total: gasT.reduce((a, t) => a + t.amount, 0), n: gasT.length, reimb: gasT.filter(t => t.reimb).reduce((a, t) => a + t.amount, 0), gal: Math.round(gal), ppg: ppgN ? ppgS / ppgN : 0, prem,
+      withRc: gasCard.filter(t => t.receipts.length).length, read, card: gasCard.length, people: top(gp, 60), stations: top(stations, 8), flags: flags.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 80) } };
 });
 async function rampFor(name) {
   if (!RAMP_CLIENT_ID || !RAMP_CLIENT_SECRET) return { connected: false };
@@ -2099,7 +2250,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   if (POSTS[url.pathname]) {
@@ -2866,6 +3017,19 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .tchip{transition:transform .18s cubic-bezier(.2,1.4,.4,1),box-shadow .18s}.tchip:hover{transform:translateY(-2px);box-shadow:0 6px 14px -6px rgba(8,145,178,.7)}
 .panel{transition:box-shadow .25s,transform .25s}.panel:hover{box-shadow:0 18px 40px -22px rgba(14,116,144,.55)}
 .cm-auto{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:12px 16px;margin-bottom:12px}.cm-auto>div{display:flex;flex-direction:column;flex:1;min-width:240px}.cm-auto>div b{font-size:14px}.cm-auto>div .muted{font-size:12.5px}.qrbtn{display:flex;justify-content:center;margin-top:10px;text-decoration:none;background:linear-gradient(135deg,#ecfeff,#cffafe);border-color:#67e8f9;color:#0e7490;font-weight:700;transition:transform .2s,box-shadow .2s}.qrbtn:hover{transform:translateY(-2px) rotate(-.6deg);box-shadow:0 8px 18px -10px rgba(8,145,178,.7)}
+.pbring{animation:pbGlow 3s ease-in-out infinite}@keyframes pbGlow{50%{filter:drop-shadow(0 0 8px rgba(103,232,249,.75))}}
+.rnav{display:inline-flex;background:#e0f2fe;border-radius:12px;padding:3px;gap:2px}.rnav button{font:inherit;font-size:13.5px;font-weight:700;border:0;background:transparent;color:#0b4a63;padding:7px 14px;border-radius:9px;cursor:pointer;transition:background .2s,color .2s}.rnav button.on{background:#0e7490;color:#fff;box-shadow:0 4px 10px -4px rgba(14,116,144,.7)}
+.rbars>div{position:relative}.rbars>div em{position:absolute;top:-16px;left:50%;transform:translateX(-50%);font-size:9.5px;font-style:normal;color:#64748b;white-space:nowrap;opacity:0;transition:opacity .2s}.rbars>div:hover em,.rbars>div.hi em,.rbars>div.cur em{opacity:1}.rbars>div.hi i{background:linear-gradient(180deg,#f59e0b,#ea580c)!important}.rbars>div.cur i{outline:2px dashed #0891b2;outline-offset:1px}
+.rpl{position:relative;display:flex;align-items:center;gap:8px;padding:8px 6px;border-top:1px solid #f1f5f9;font-size:13px;overflow:hidden}.rpl>div{flex:1;min-width:0;position:relative;z-index:1}.rpl small{display:block;color:#64748b;font-size:11.5px}.rpl>span{font-weight:700;position:relative;z-index:1}.rpl>i{position:absolute;left:0;bottom:0;height:3px;background:linear-gradient(90deg,#22d3ee,#0e7490);border-radius:2px}.rwarn{color:#b45309;font-weight:700}
+.rfl{display:flex;align-items:center;gap:8px;padding:8px 4px;border-top:1px dashed #e2e8f0;font-size:13px}.rfl>div{flex:1}.rfl small{display:block;color:#b45309;font-size:12px}.rfl .btn2{padding:4px 9px;font-size:12px;text-decoration:none}.rgnote{font-size:12.5px;margin:-4px 0 12px}
+#vBuy{padding:14px 24px 24px;max-width:1240px;margin:0 auto;animation:fadein .3s ease-out}body[data-v=vBuy] .vopt{display:none}@media(max-width:900px){#vBuy{padding:12px 16px}}
+.bsum{display:flex;flex-wrap:wrap;gap:12px;background:linear-gradient(135deg,#0b4a63,#0e7490 60%,#14b8a6);color:#fff;border-radius:16px;padding:16px 20px;margin-bottom:12px;position:relative;overflow:hidden}.bsum::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.14) 50%,transparent 70%);animation:bsumSheen 5s ease-in-out infinite}@keyframes bsumSheen{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+.bsum>div{flex:1;min-width:120px}.bsum b{display:block;font-size:26px;font-weight:800}.bsum span{font-size:12.5px;color:#cffafe}.bnote{margin-bottom:10px}
+.bchips{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}.bchip{font:inherit;font-size:13px;font-weight:600;padding:6px 14px;border-radius:99px;border:1px solid #cbd5e1;background:#fff;color:#0b4a63;cursor:pointer;transition:transform .15s}.bchip:hover{transform:translateY(-1px)}.bchip.on{background:#0e7490;color:#fff;border-color:#0e7490}
+.bcard{background:#fff;border:1px solid #e2e8f0;border-radius:14px;margin-bottom:10px;overflow:hidden;animation:fadein .3s ease-out both;animation-delay:calc(var(--i)*30ms)}.bhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;font-size:14px}.bhead small{display:block;color:#64748b;font-size:12px;margin-top:2px}.bhead .btn2{padding:5px 10px;font-size:12.5px;text-decoration:none}
+.bit{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 14px;border-top:1px dashed #eef2f7;font-size:13.5px}.bit>div{flex:1;min-width:180px}.bit a{color:#0b4a63;font-weight:600;text-decoration:none}.bit a:hover{text-decoration:underline}.bit small{display:block;color:#64748b;font-size:12px}
+.bseg{display:inline-flex;border:1px solid #cbd5e1;border-radius:9px;overflow:hidden}.bseg button{font:inherit;font-size:12px;border:0;background:#fff;padding:5px 9px;cursor:pointer;color:#475569}.bseg button+button{border-left:1px solid #cbd5e1}.bseg .on.sOut{background:#f59e0b;color:#fff}.bseg .on.sReturned{background:#16a34a;color:#fff}.bseg .on.sUsedup{background:#64748b;color:#fff}
+.bside{padding:14px;margin-bottom:12px}.bside h4{margin:0 0 8px;font-size:14px}.brow{display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid #f1f5f9;font-size:13px;text-decoration:none;color:inherit}.brow span{color:#64748b;text-align:right}
 .hist{margin-top:10px;border-top:1px solid #e2e8f0;padding-top:8px}.hist summary{cursor:pointer;font-weight:700;color:#0b4a63;font-size:13.5px}.hl{margin-top:6px}.hrow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:7px 10px;border-radius:10px;font-size:13px;transition:background .2s}.hrow:hover{background:#f0f9ff}.hrow small{color:#64748b;width:100%}.hrow.now{background:linear-gradient(90deg,#ecfeff,transparent)}.hnow{background:#0891b2;color:#fff;border-radius:99px;padding:1px 8px;font-size:11px;font-weight:700;animation:hnowP 2s ease-in-out infinite}@keyframes hnowP{50%{box-shadow:0 0 0 4px rgba(8,145,178,.15)}}
 .rqbox{margin-top:10px;background:#fffbeb;border:1px solid #fcd34d;border-radius:12px;padding:10px;animation:rqIn .4s ease both}.rqbox>b span,.rqb{background:#f59e0b;color:#fff;border-radius:99px;padding:0 7px;margin-left:5px;font-size:11px}.rqi{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 0;border-top:1px dashed #fcd34d;font-size:13px}.rqi>div{flex:1;min-width:140px}.rqi small{display:block;color:#92400e}.rqi .btn2{padding:6px 10px}@keyframes rqIn{from{opacity:0;transform:translateY(-4px)}}
 .swaps{margin-top:10px;font-size:12.5px}.swaps summary{cursor:pointer;font-weight:700;color:#0b4a63}.swaps summary span{background:#0891b2;color:#fff;border-radius:99px;padding:0 7px;margin-left:4px;font-size:11px}.swp{display:flex;flex-wrap:wrap;gap:4px;padding:6px 0;border-bottom:1px dashed #e2e8f0;animation:swpIn .35s ease both}.swp small{color:#64748b;width:100%}.swp.o b{color:#b91c1c}@keyframes swpIn{from{opacity:0;transform:translateX(-6px)}}
@@ -2940,7 +3104,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
  <svg class="hwave front" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M3 9c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0"/><path d="M3 15c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0" opacity=".6"/></svg></div><div>Millennial Pools<small>Fleet</small></div></div>
  <div class="live" id="live"><span class="dot"></span><svg class="ekg" viewBox="0 0 40 14" aria-hidden="true"><path d="M0 7h12l3-5 4 10 3-8 2 3h16"/></svg><span id="upd">Connecting to Azuga...</span></div>
- <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Live map</button><button data-v="vEdit"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l2-5h11l3 5v4H3z"/><circle cx="7" cy="17" r="2"/><circle cx="16" cy="17" r="2"/></svg>Edit vehicles</button><button data-v="vDrv"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><circle cx="17" cy="9" r="2.4"/><path d="M15.5 14.6c2.8.2 5 2.1 5 5.4"/></svg>Drivers</button><button data-v="vPom"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M2 19.5c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M8 12V5a2 2 0 0 1 4 0M14 12V5a2 2 0 0 1 4 0M8 8h6"/></svg>Pools</button><button data-v="vChk"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12l2 2 4-4M9 17h6"/></svg>Truck check-ups</button><button data-v="vRep"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z"/></svg>Repairs</button><button data-v="vCam"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3z"/></svg>Cameras</button><a class="reptab" href="/report" target="_blank" rel="noopener"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Score report</a></nav>
+ <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Live map</button><button data-v="vEdit"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l2-5h11l3 5v4H3z"/><circle cx="7" cy="17" r="2"/><circle cx="16" cy="17" r="2"/></svg>Edit vehicles</button><button data-v="vDrv"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><circle cx="17" cy="9" r="2.4"/><path d="M15.5 14.6c2.8.2 5 2.1 5 5.4"/></svg>Drivers</button><button data-v="vPom"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M2 19.5c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M8 12V5a2 2 0 0 1 4 0M14 12V5a2 2 0 0 1 4 0M8 8h6"/></svg>Pools</button><button data-v="vChk"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12l2 2 4-4M9 17h6"/></svg>Truck check-ups</button><button data-v="vRep"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z"/></svg>Repairs</button><button data-v="vBuy"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>Ramp</button><button data-v="vCam"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3z"/></svg>Cameras</button><a class="reptab" href="/report" target="_blank" rel="noopener"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Score report</a></nav>
 </header>
 <div class="bar"><div class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" placeholder="Search trucks or drivers" aria-label="Search trucks or drivers"></div><nav class="sum" id="sum" aria-label="Filter vehicles"></nav>
  <div class="vopt"><button id="voBtn" aria-expanded="false" aria-controls="voPop"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>View<span id="voHid"></span></button>
@@ -3027,6 +3191,13 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
  <div class="crewhead"><div><h2>Repairs</h2><p id="repCount" class="muted">Loading repairs from Airtable...</p></div><span style="flex:1"></span><button class="btn2" id="repMiss" aria-pressed="false">Missing a total</button><button class="btn2" id="repLink">🔗 Share upload link</button><button class="btn2 pri" id="repAdd">📷 Add invoice</button></div>
  <div id="repNew"></div>
  <div id="repSum"></div><div class="rp-grid"><div id="repList"></div><aside id="repSide"></aside></div>
+</div>
+<div id="vBuy" hidden>
+ <div class="crewhead"><div><h2>Ramp</h2><p id="rampCount" class="muted">Card spend and reimbursements, last 12 months</p></div><span style="flex:1"></span><div class="rnav" id="rampNav"><button data-rs="ov" class="on">Overview</button><button data-rs="gas">Gas</button><button data-rs="items">Tools &amp; items</button></div></div>
+ <div id="rsOv"></div>
+ <div id="rsGas" hidden></div>
+ <div id="rsItems" hidden><div class="crewhead" style="margin-top:4px"><p id="buyCount" class="muted">Loading Ramp purchases...</p><span style="flex:1"></span><select id="buyWho" aria-label="Filter by person"><option value="">Everyone</option></select><button class="btn2" id="buyRead">Read new receipts now</button></div>
+ <div id="buySum"></div><div class="bchips" id="buyChips"></div><div class="rp-grid"><div id="buyList"></div><aside id="buySide"></aside></div></div>
 </div>
 <div id="vCam" hidden>
  <div class="crewhead"><div><h2>Camera events</h2><p id="camCount" class="muted">Loading the last 7 days from Azuga...</p></div><span style="flex:1"></span>
@@ -3956,7 +4127,7 @@ function renderPlan(){const r=PLAN;if(!r||!r.connected){$('chkPlan').innerHTML='
   const txt={create:o=>'<b>Add</b> a Monday 9 AM truck check-up for <b>'+esc(o.name)+'</b> ('+esc(o.role)+'), starting '+d(o.when),
     move:o=>'<b>Move</b> <b>'+esc(o.name)+'</b>\u2019s check-up from '+hr(o.hour)+' to Monday 9 AM, starting '+d(o.when),
     remove:o=>'<b>Stop</b> <b>'+esc(o.name)+'</b>\u2019s weekly check-up from '+d(o.next)+' ('+esc(o.role)+' doesn\u2019t submit one)',
-    none:o=>'<b>'+esc(o.name)+'</b> ('+esc(o.role)+') needs a check-up but '+esc(o.why)};
+    none:o=>'<b>'+esc(o.name)+'</b> ('+esc(o.role)+') needs a check-up but '+esc(o.why.replace(/^Not /,'not '))};
   const ops=r.ops,act=ops.filter(o=>o.op!=='none');
   $('chkPlan').innerHTML='<div class="cplan"><div class="cph2"><div><b>POM schedule</b><span class="muted">'+(act.length?act.length+' change'+(act.length>1?'s':'')+' to line POM up with roles':'POM matches everyone\u2019s role. Nothing to change.')+'</span></div>'
     +'<label class="cauto"><input type="checkbox" id="chkAuto"'+(r.auto?' checked':'')+'> Keep POM in sync automatically</label>'+(act.length?'<button class="btn2 pri" id="chkAll">Apply all '+act.length+'</button>':'')+'</div>'
@@ -4040,10 +4211,10 @@ function moveTab(){const b=document.querySelector('.tabs button.on'),i=document.
 addEventListener('resize',moveTab);(document.fonts&&document.fonts.ready||Promise.resolve()).then(moveTab);setTimeout(moveTab,50);
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));moveTab();
-  ['vMap','vEdit','vDrv','vPom','vCam','vChk','vRep'].forEach(v=>$(v).hidden=b.dataset.v!==v);if(b.dataset.v==='vChk'){loadChk();mailPanel()}if(b.dataset.v==='vRep')loadRep();if(b.dataset.v==='vPom')loadPomBoard();if(b.dataset.v==='vCam')loadCamTab();if(b.dataset.v==='vMap'&&sel&&TRUCKV.length)drawCams();document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
+  ['vMap','vEdit','vDrv','vPom','vCam','vChk','vRep','vBuy'].forEach(v=>$(v).hidden=b.dataset.v!==v);if(b.dataset.v==='vBuy')loadRampTab();if(b.dataset.v==='vChk'){loadChk();mailPanel()}if(b.dataset.v==='vRep')loadRep();if(b.dataset.v==='vPom')loadPomBoard();if(b.dataset.v==='vCam')loadCamTab();if(b.dataset.v==='vMap'&&sel&&TRUCKV.length)drawCams();document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
   if(b.dataset.v!=='vMap')loadSync();if(b.dataset.v==='vEdit')renderEdit();else if(b.dataset.v==='vDrv'){if(!PEOPLE)loadPeople();else renderDrivers()}else map.invalidateSize();
 });
-$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();if(!$('vPom').hidden)renderPom();if(!$('vCam').hidden)renderCamTab();if(!$('vChk').hidden)renderChk();if(!$('vRep').hidden)renderRep();};
+$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();if(!$('vPom').hidden)renderPom();if(!$('vCam').hidden)renderCamTab();if(!$('vChk').hidden)renderChk();if(!$('vRep').hidden)renderRep();if(!$('vBuy').hidden){renderBuy();renderRampOv()}};
 /*repadd*/
 // Automatic emails: setup status, a test send to Callum, and the Monday switch
 async function mailPanel(){const el=$('chkMailAuto');if(!el)return;let st;try{st=await get('/api/mail/status')}catch(e){el.innerHTML='';return}
@@ -4119,6 +4290,73 @@ function repParse(trucks){const out=[];trucks.forEach(t=>String(t.notes||'').spl
   return out.sort((a,b)=>b.ts-a.ts)}
 const repName=t=>(t.truckNo?'#'+t.truckNo.split(/[ ~(]/)[0]+' ':'')+(t.desc||'Truck');
 const money=n=>'$'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+// ---- Ramp tab: Overview + Gas (from /api/ramp/overview), Tools & items (above) ----
+let ROV=null,RSEC='ov';
+async function loadRampTab(){loadBuy();if(!ROV){$('rsOv').innerHTML=$('rsGas').innerHTML='<div class="empty">Loading the last 12 months from Ramp... (the first load can take a minute)</div>'}
+  try{ROV=await get('/api/ramp/overview')}catch(e){$('rsOv').innerHTML=$('rsGas').innerHTML='<div class="empty">Could not load Ramp: '+esc(e.message)+'</div>';return}renderRampOv()}
+const mlab=k=>new Date(k+'-15').toLocaleDateString('en-US',{month:'short'}),mfull=k=>new Date(k+'-15').toLocaleDateString('en-US',{month:'long',year:'numeric'});
+function bars(ms,key,fmt,base){const nz=ms.map(m=>m[key]).filter(v=>v>0),b0=base&&nz.length?Math.min(...nz)*0.9:0,mx=Math.max(b0+0.01,...ms.map(m=>m[key])),hi=ms.reduce((a,m)=>m[key]>a[key]?m:a,ms[0]),cur=ms[ms.length-1].k;
+  return '<div class="rp-mo rbars">'+ms.map(m=>'<div title="'+mfull(m.k)+': '+fmt(m[key])+'" class="'+(m.k===hi.k?'hi':'')+(m.k===cur?' cur':'')+'"><em>'+(m[key]?fmt(m[key]).replace('.00',''):'')+'</em><i style="height:'+(m[key]?Math.max(4,(m[key]-b0)/(mx-b0)*100):2)+'%"></i><span>'+mlab(m.k)+'</span></div>').join('')+'</div>'}
+const k0=n=>'$'+Math.round(n).toLocaleString(),plural=(n,w)=>n+' '+w+(n===1?'':'s');
+function plist(rows,val,sub){const mx=Math.max(1,...rows.map(val));return rows.map(r=>'<div class="rpl"><div><b>'+esc(r.name)+'</b><small>'+sub(r)+'</small></div><span>'+money(val(r))+'</span><i style="width:'+(val(r)/mx*100)+'%"></i></div>').join('')}
+function renderRampOv(){const r=ROV;if(!r)return;if(r.connected===false){$('rsOv').innerHTML=$('rsGas').innerHTML='<div class="empty">Ramp is not connected.</div>';return}
+  const q=$('q').value.trim().toLowerCase(),f=x=>!q||x.name.toLowerCase().includes(q),ms=r.months,last=ms[ms.length-1],avg=a=>a.reduce((s,m)=>s+m,0)/Math.max(1,a.length);
+  const all=ms.map(m=>({k:m.k,v:m.gas+m.other})),g=r.gas,gAvg=avg(ms.slice(0,-1).map(m=>m.gas)),hiG=ms.reduce((a,m)=>m.gas>a.gas?m:a,ms[0]);
+  $('rampCount').textContent=r.n.toLocaleString()+' card purchases and reimbursements since '+new Date(r.since).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  // Overview
+  $('rsOv').innerHTML='<div class="pbs"><div><b>'+k0(r.total)+'</b><span>spent in 12 months</span></div><div><b>'+k0(r.total/12)+'</b><span>a month on average</span></div><div><b>'+k0(g.total)+'</b><span>on gas ('+Math.round(g.total/Math.max(1,r.total)*100)+'%)</span></div>'
+    +'<div><b>'+r.noRc.toLocaleString()+'</b><span>card purchases with no receipt · '+k0(r.noRcAmt)+'</span></div></div>'
+    +'<div class="rp-grid"><div><div class="panel rp-pan"><h3>Spend by month <small class="muted">gas + everything else</small></h3>'+bars(all.map(m=>({k:m.k,v:m.v})),'v',k0)+'</div>'
+    +'<div class="panel rp-pan"><h3>By person</h3>'+plist(r.people.filter(f).slice(0,25),x=>x.total,x=>plural(x.n,'purchase')+' · gas '+k0(x.gas)+(x.noRc?' · <b class="rwarn">'+x.noRc+' without receipt</b>':''))+'</div></div>'
+    +'<aside><div class="panel rp-pan"><h3>Top categories <small class="muted">not gas</small></h3>'+plist(r.cats,x=>x.total,x=>plural(x.n,'purchase'))+'</div>'
+    +'<div class="panel rp-pan"><h3>Top stores</h3>'+plist(r.merchants.filter(f),x=>x.total,x=>plural(x.n,'purchase'))+'</div></aside></div>';
+  // Gas
+  const now=new Date(),frac=now.getDate()/new Date(now.getFullYear(),now.getMonth()+1,0).getDate(),pace=last.gas/frac,vs=gAvg?Math.round((pace-gAvg)/gAvg*100):0;
+  $('rsGas').innerHTML='<div class="pbs"><div><b>'+k0(g.total)+'</b><span>gas in 12 months · '+g.n.toLocaleString()+' fill-ups</span></div><div><b>'+k0(gAvg)+'</b><span>a month on average</span></div>'
+    +'<div><b>'+k0(last.gas)+'</b><span>so far in '+mfull(last.k).split(' ')[0]+(gAvg&&frac>=0.2?' · on pace for '+k0(pace)+' ('+(vs>=0?'+':'')+vs+'% vs avg)':'')+'</span></div><div><b>'+mlab(hiG.k)+'</b><span>most expensive month · '+k0(hiG.gas)+'</span></div>'
+    +(g.gal?'<div><b>'+g.gal.toLocaleString()+'</b><span>gallons · '+(g.ppg?'$'+g.ppg.toFixed(2)+'/gal avg':'')+'</span></div>':'')+'</div>'
+    +'<p class="muted rgnote">Gallons, price per gallon and fuel grade come from the receipts read so far ('+g.read+' of '+g.withRc+' gas receipts; '+(g.card-g.withRc)+' card fill-ups have no receipt). '+(g.reimb?k0(g.reimb)+' of the total is out-of-pocket gas paid back as reimbursements.':'')+'</p>'
+    +'<div class="rp-grid"><div><div class="panel rp-pan"><h3>Gas by month</h3>'+bars(ms,'gas',k0)+(ms.some(m=>m.ppg)?'<h3 style="margin-top:14px">Price per gallon</h3>'+bars(ms.map(m=>({k:m.k,p:m.ppg})),'p',v=>'$'+v.toFixed(2),1):'')+'</div>'
+    +'<div class="panel rp-pan"><h3>Worth a look <small class="muted">weekends, very early or late, over $120, a 2nd fill-up the same day, premium fuel</small></h3>'+(g.flags.filter(x=>!q||x.who.toLowerCase().includes(q)).slice(0,40).map(x=>'<div class="rfl"><div><b>'+esc(x.who)+'</b> · '+money(x.amount)+' at '+esc(x.merchant)+'<small>'+esc(x.date)+' · '+esc(x.why)+'</small></div>'+(x.link?'<a class="btn2" href="'+esc(x.link)+'" target="_blank" rel="noopener">Ramp ↗</a>':'')+'</div>').join('')||'<div class="muted">Nothing unusual.</div>')+'</div></div>'
+    +'<aside><div class="panel rp-pan"><h3>Gas by person</h3>'+plist(g.people.filter(f).slice(0,30),x=>x.total,x=>plural(x.n,'fill-up')+(x.gal?' · '+Math.round(x.gal)+' gal':'')+(x.wk?' · '+x.wk+' weekend':'')+(x.big?' · '+x.big+' over $120':''))+'</div>'
+    +'<div class="panel rp-pan"><h3>Stations</h3>'+plist(g.stations,x=>x.total,x=>plural(x.n,'fill-up'))+'</div></aside></div>';
+}
+document.addEventListener('click',e=>{const b=e.target.closest('#rampNav [data-rs]');if(!b)return;RSEC=b.dataset.rs;document.querySelectorAll('#rampNav button').forEach(x=>x.classList.toggle('on',x===b));
+  $('rsOv').hidden=RSEC!=='ov';$('rsGas').hidden=RSEC!=='gas';$('rsItems').hidden=RSEC!=='items'});
+// ---- Purchases tab: hardware-store receipts from Ramp, item by item, with season-end return status ----
+let BUY=null,BUYF='Out';
+async function loadBuy(){if(!BUY)$('buyCount').textContent='Loading Ramp purchases...';try{BUY=await get('/api/purchases')}catch(e){$('buyCount').textContent='Could not load purchases: '+e.message;return}renderBuy()}
+const BST={'Out':'Out','Returned':'Returned','Used up':'Used up'};
+function renderBuy(){const r=BUY;if(!r)return;
+  if(!r.connected){$('buyCount').textContent='Ramp is not connected (add RAMP_CLIENT_ID / RAMP_CLIENT_SECRET in Render).';return}
+  const q=$('q').value.trim().toLowerCase(),who=$('buyWho').value;
+  const ppl=[...new Set(r.txns.map(t=>t.who).filter(Boolean))].sort();if($('buyWho').options.length-1!==ppl.length)$('buyWho').innerHTML='<option value="">Everyone</option>'+ppl.map(p=>'<option'+(p===who?' selected':'')+'>'+esc(p)+'</option>').join('');
+  const it=r.items.filter(x=>(!who||x.who===who)&&(!q||(x.name+' '+x.sku+' '+x.who+' '+x.store+' '+x.memo).toLowerCase().includes(q)));
+  const sum=st=>it.filter(x=>x.status===st).reduce((a,x)=>[a[0]+1,a[1]+x.price],[0,0]),o=sum('Out'),rt=sum('Returned'),u=sum('Used up');
+  const wait=r.txns.filter(t=>t.state==='waiting').length,nor=r.txns.filter(t=>t.state==='noReceipt').length,bad=r.txns.filter(t=>t.state==='error').length;
+  $('buyCount').textContent=r.txns.length+' hardware-store purchases since '+r.since+' · '+r.items.length+' items read'+(r.last?' · last check '+new Date(r.last).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}):'');
+  $('buySum').innerHTML=(r.err||!r.ai?'<div class="note bnote">'+esc(r.err||'Add ANTHROPIC_API_KEY in Render so receipts can be read.')+'</div>':'')
+    +'<div class="bsum"><div><b>'+o[0]+'</b><span>still out · '+money(o[1])+'</span></div><div><b>'+rt[0]+'</b><span>returned</span></div><div><b>'+u[0]+'</b><span>used up</span></div><div><b>'+wait+'</b><span>receipts waiting to be read</span></div><div><b>'+nor+'</b><span>purchases with no receipt</span></div>'+(bad?'<div><b>'+bad+'</b><span>receipts unreadable</span></div>':'')+'</div>';
+  $('buyChips').innerHTML=['Out','Returned','Used up','All'].map(k=>'<button class="bchip'+(BUYF===k?' on':'')+'" data-bf="'+k+'">'+(k==='Out'?'Still out':k)+'</button>').join('');
+  const show=it.filter(x=>BUYF==='All'||x.status===BUYF),by={};show.forEach(x=>(by[x.txn]=by[x.txn]||[]).push(x));
+  const tx=Object.fromEntries(r.txns.map(t=>[t.id,t])),ids=Object.keys(by).sort((a,b)=>((by[b][0].date||'')>(by[a][0].date||'')?1:-1));
+  const seg=x=>'<span class="bseg">'+Object.keys(BST).map(k=>'<button data-bi="'+esc(x.id)+'" data-bs="'+k+'" class="'+(x.status===k?'on s'+k.replace(' ',''):'')+'">'+k+'</button>').join('')+'</span>';
+  $('buyList').innerHTML=ids.length?ids.slice(0,150).map((id,i)=>{const L=by[id],f=L[0],t=tx[id]||{};
+    return '<div class="bcard" style="--i:'+Math.min(i,12)+'"><div class="bhead"><div><b>'+esc(f.store)+'</b> · '+esc(f.who)+'<small>'+esc(f.date)+(t.amount?' · '+money(t.amount):'')+(f.memo?' · '+esc(f.memo):'')+'</small></div><span style="flex:1"></span>'
+      +(f.ramp?'<a class="btn2" href="'+esc(f.ramp)+'" target="_blank" rel="noopener">Ramp ↗</a>':'')+'<button class="btn2" data-ball="'+esc(L.map(x=>x.id).join(','))+'" data-bs="Returned">All returned</button></div>'
+      +L.map(x=>'<div class="bit"><div><a href="'+esc(x.link)+'" target="_blank" rel="noopener">'+esc(x.name)+' ↗</a><small>'+(x.sku?'SKU '+esc(x.sku)+' · ':'')+'Qty '+x.qty+' · '+money(x.price)+'</small></div>'+seg(x)+'</div>').join('')+'</div>'}).join('')
+    :'<div class="empty">'+(r.items.length?'No items match.':'No receipts read yet.'+(wait?' '+wait+' are waiting.':''))+'</div>';
+  const out={};it.filter(x=>x.status==='Out').forEach(x=>{const p=out[x.who]=out[x.who]||[0,0];p[0]+=x.qty;p[1]+=x.price});
+  const nr=r.txns.filter(t=>t.state==='noReceipt'&&(!who||t.who===who)).slice(0,15);
+  $('buySide').innerHTML='<div class="panel bside"><h4>Still out by person</h4>'+(Object.keys(out).length?Object.entries(out).sort((a,b)=>b[1][1]-a[1][1]).map(([p,v])=>'<div class="brow"><b>'+esc(p||'Unknown')+'</b><span>'+v[0]+' items · '+money(v[1])+'</span></div>').join(''):'<div class="muted">Nothing out.</div>')+'</div>'
+    +(nr.length?'<div class="panel bside"><h4>No receipt in Ramp yet</h4>'+nr.map(t=>'<a class="brow" href="'+esc(t.link)+'" target="_blank" rel="noopener"><b>'+esc(t.who)+'</b><span>'+esc(t.store)+' · '+esc(t.date)+' · '+money(t.amount)+'</span></a>').join('')+'</div>':'');
+}
+$('buyWho').onchange=renderBuy;
+document.addEventListener('click',async e=>{const c=e.target.closest('[data-bf]');if(c){BUYF=c.dataset.bf;renderBuy();return}
+  const b=e.target.closest('#vBuy [data-bs]');if(!b)return;const ids=b.dataset.ball?b.dataset.ball.split(','):[b.dataset.bi],st=b.dataset.bs;b.disabled=true;
+  try{await post('/api/purchase/status',{ids,status:st});BUY.items.forEach(x=>{if(ids.includes(x.id))x.status=st});renderBuy();toast(ids.length+' item'+(ids.length>1?'s':'')+' marked '+st.toLowerCase())}catch(err){toast(err.message,'bad');b.disabled=false}});
+$('buyRead').onclick=async e=>{const b=e.currentTarget;b.disabled=true;b.textContent='Reading...';try{await post('/api/purchase/read',{});toast('Reading receipts. New items show up in a minute or two.');setTimeout(async()=>{BUY=null;await loadBuy();b.disabled=false;b.textContent='Read new receipts now'},60000)}catch(err){toast(err.message,'bad');b.disabled=false;b.textContent='Read new receipts now'}};
+
 async function loadRep(){if(!REP)$('repCount').textContent='Loading repairs from Airtable...';try{REP=await get('/api/repairs')}catch(e){$('repCount').textContent='Could not load repairs: '+e.message;return}renderRep()}
 function renderRep(){if(!REP)return;if(!REP.connected){$('repCount').textContent='Airtable is not connected.';return}
   const all=repMerge(repParse(REP.trucks),REP.ramp,REP.trucks),q=$('q').value.trim().toLowerCase(),miss=$('repMiss').getAttribute('aria-pressed')==='true';
