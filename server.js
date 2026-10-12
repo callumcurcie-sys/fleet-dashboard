@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist']);
+const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist', 'swapReq']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -172,6 +172,7 @@ const routes = {
     return out; },
   '/api/pom/checkup-plan': () => checkupPlan(),
   '/api/truck/swaps': () => swapLog(),
+  '/api/truck/requests': () => swapReqs(),
   '/api/truck/history': q => truckHistory(q),
   '/api/mail/status': () => { const st = mailState(); return { ready: mailReady(), from: mailFrom(), auto: !!st.auto, week: st.week, sent: st.sent || [], bounced: st.bounced || [], bounceErr: st.bounceErr || '' }; },
   '/api/repairs': async () => { if (!AIRTABLE_TOKEN) return { connected: false };
@@ -1294,6 +1295,8 @@ function smtpSend(to, subject, text) {
   });
 }
 const swapLog = () => (cache.get('swaps') || {}).data || [];   // truck sticker sign-ins, newest first
+const swapReqs = () => (cache.get('swapReq') || {}).data || [];   // sign-in requests waiting for the office
+const saveReqs = l => { cache.set('swapReq', { data: l, t: Date.now() }); saveSnap('swapReq', l); };
 const mailState = () => (cache.get('mail') || {}).data || { auto: false, week: '', sent: [] };
 const saveMail = d => { cache.set('mail', { data: d, t: Date.now() }); saveSnap('mail', d); };
 // Reminder times (Eastern): Mon-Wed at noon, Thu-Sun at 9 AM and 3 PM. Each run emails everyone who still hasn't
@@ -1920,10 +1923,9 @@ function invoicePage(trucks) {
     + '<p class="hint">Only the photo and truck are needed.</p><button id="save">Save invoice</button><div class="msg" id="msg"></div></div></div><script>' + INVOICE_PAGE_JS + '</script></body></html>';
 }
 // ---------------- Truck sign-in stickers (QR code in every truck) ----------------
-// Each Airtable truck gets a permanent signed link (/r/<token>) printed as a QR sticker. Scanning it lets a driver
-// sign into that truck (and out of any truck they had) or sign out. Airtable's Driver field is the record; Azuga's
-// assigned driver follows for trucks with a tracker. No login, so every swap is logged and shown on Edit vehicles.
-// ponytail: no per-driver PIN (only 1 driver has a phone in Airtable); add one if stickers get abused.
+// One QR code for every truck, pointing at one sign-in / sign-out page (/r/<token>). A driver picks their name and a
+// truck. Signing OUT happens right away; signing IN is only a request until someone approves it on the dashboard
+// (Edit vehicles). Approving does the swap: Airtable's Driver field, then Azuga's driver if the truck has a tracker.
 // Stickers are signed with SHARE_SECRET (or the dashboard password): changing that voids every sticker.
 const STICKER_DAYS = 3650;
 const truckLabelOf = t => (t.truckNo ? '#' + t.truckNo.split(/[ ~(]/)[0] + ' ' : '') + ([t.year, t.make, t.model].filter(Boolean).join(' ') || 'Truck');
@@ -1951,63 +1953,94 @@ async function truckSwap(truckId, b, out) {
     if (id) { const r = await syncOne(id); if (!r.skipped) azuga = 'Azuga updated too.'; }
   } catch (e) { azuga = 'Azuga was not updated (' + e.message + ').'; console.error('Truck sign-in, Azuga:', e.message); }
   const was = t.driver && t.driver.id !== d.id ? t.driver.name : '';
-  const log = [{ at: Date.now(), who: d.name, tid: t.id, truck: truckLabelOf(t), out: !!out, was, left }, ...swapLog()].slice(0, 200);
+  const log = [{ at: Date.now(), who: d.name, tid: t.id, truck: truckLabelOf(t), out: !!out, was, left, ok: b.approvedBy || '' }, ...swapLog()].slice(0, 200);
   cache.set('swaps', { data: log, t: Date.now() }); saveSnap('swaps', log);
   console.log(new Date().toISOString(), 'Truck', out ? 'sign-out:' : 'sign-in:', d.name, truckLabelOf(t), left.length ? '(left ' + left.join(', ') + ')' : '');
   return { ok: true, truck: truckLabelOf(t), who: d.name, out: !!out, was, left, azuga };
 }
-const TRUCK_PAGE_JS = `const $=i=>document.getElementById(i),me=$('me'),msg=$('msg');
-try{const s=localStorage.getItem('mp_me');if(s&&[...me.options].some(o=>o.value===s))me.value=s}catch(e){}
-function paint(){const mine=me.value&&me.value===CUR;$('in').hidden=mine;$('out').hidden=!mine;$('mine').hidden=!mine}
-me.onchange=()=>{try{localStorage.setItem('mp_me',me.value)}catch(e){}paint()};paint();
-async function go(kind){if(!me.value){msg.textContent='Pick your name first.';return}msg.className='msg';msg.textContent='Saving...';
+// Driver asks to sign into a truck. One open request per driver; the truck has to be free (one person per truck).
+async function requestSignIn(b) {
+  const at = await atData(), d = swapDrivers(at).find(x => x.id === String(b.driverId || '')), t = at.trucks.find(x => x.id === String(b.truckId || ''));
+  if (!d) throw new Error('Pick your name first.');
+  if (!t) throw new Error('Pick a truck.');
+  if (t.driver && t.driver.id === d.id) throw new Error('You are already signed into ' + truckLabelOf(t) + '.');
+  if (t.driver) throw new Error(t.driver.name + ' is signed into ' + truckLabelOf(t) + '. They need to sign out of it first.');
+  const r = { id: crypto.randomBytes(6).toString('hex'), at: Date.now(), driverId: d.id, who: d.name, truckId: t.id, truck: truckLabelOf(t) };
+  saveReqs([r, ...swapReqs().filter(x => x.driverId !== d.id)].slice(0, 100));
+  console.log(new Date().toISOString(), 'Truck sign-in requested:', d.name, r.truck);
+  return { ok: true, truck: r.truck };
+}
+async function signOutSelf(b) {
+  const at = await atData(), d = swapDrivers(at).find(x => x.id === String(b.driverId || ''));
+  if (!d) throw new Error('Pick your name first.');
+  const t = at.trucks.find(x => x.driver && x.driver.id === d.id);
+  if (!t) throw new Error('You are not signed into a truck.');
+  return truckSwap(t.id, { driverId: d.id }, true);
+}
+// Dashboard: approve (does the swap) or deny a request
+async function decideRequest(b) {
+  const r = swapReqs().find(x => x.id === String(b.id || ''));
+  if (!r) throw new Error('That request is gone (already handled?).');
+  let out = { ok: true, denied: true };
+  if (b.approve === true) out = await truckSwap(r.truckId, { driverId: r.driverId, approvedBy: 'office' }, false);
+  else { const log = [{ at: Date.now(), who: r.who, tid: r.truckId, truck: r.truck, denied: true, left: [] }, ...swapLog()].slice(0, 200); cache.set('swaps', { data: log, t: Date.now() }); saveSnap('swaps', log); }
+  saveReqs(swapReqs().filter(x => x.id !== r.id));
+  console.log(new Date().toISOString(), 'Truck sign-in', b.approve === true ? 'approved:' : 'denied:', r.who, r.truck);
+  return out;
+}
+const SIGN_PAGE_JS = `const $=i=>document.getElementById(i),me=$('me'),tr=$('tr'),msg=$('msg');
+try{const s=localStorage.getItem('mp_me');if(s&&D[s])me.value=s}catch(e){}
+function paint(){const d=D[me.value];$('cur').hidden=!d;if(!d)return;
+  $('curT').textContent=d.truck||'No truck';$('out').hidden=!d.truck;$('pend').hidden=!d.pending;$('pendT').textContent=d.pending||''}
+me.onchange=()=>{try{localStorage.setItem('mp_me',me.value)}catch(e){}msg.textContent='';paint()};paint();
+async function go(kind,body){if(!me.value){msg.className='msg';msg.textContent='Pick your name first.';return}msg.className='msg';msg.textContent='Sending...';
   document.querySelectorAll('button').forEach(b=>b.disabled=true);
-  try{const r=await fetch(location.pathname.replace(/\\/$/,'')+'/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({driverId:me.value})});const j=await r.json();if(!r.ok)throw new Error(j.error||'Could not save');
-    msg.className='msg ok';msg.textContent=j.out?'Signed out of '+j.truck+'.':'You are signed into '+j.truck+'.'+(j.left.length?' Signed out of '+j.left.join(', ')+'.':'');
-    CUR=j.out?'':me.value;$('who').textContent=j.out?'Nobody':j.who;paint()}
+  try{const r=await fetch(location.pathname.replace(/\\/$/,'')+'/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({driverId:me.value},body))});const j=await r.json();if(!r.ok)throw new Error(j.error||'Could not send');
+    const d=D[me.value];msg.className='msg ok';
+    if(kind==='out'){msg.textContent='Signed out of '+j.truck+'.';d.truck=''}else{msg.textContent='Request sent for '+j.truck+'. You are signed in once the office approves it.';d.pending=j.truck}paint()}
   catch(e){msg.textContent=e.message}document.querySelectorAll('button').forEach(b=>b.disabled=false)}
-$('in').onclick=()=>go('in');$('out').onclick=()=>go('out');`;
+$('in').onclick=()=>{if(!tr.value){msg.className='msg';msg.textContent='Pick a truck.';return}go('request',{truckId:tr.value})};$('out').onclick=()=>go('out',{});`;
 const MINI_CSS = 'body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:linear-gradient(180deg,#0a4660 0,#0e7490 200px,#f0f9fb 200px);color:#0f172a;min-height:100vh}'
   + '.w{max-width:480px;margin:0 auto;padding:22px 16px 40px}h1{color:#fff;font-size:26px;margin:0 0 2px}.sub{color:#cffafe;font-size:14px;margin:0 0 18px}'
-  + '.card{background:#fff;border-radius:18px;padding:18px;box-shadow:0 14px 34px -18px rgba(8,74,99,.6)}.now{font-size:14px;color:#475569;margin:0 0 4px}.now b{display:block;font-size:22px;color:#0f172a}'
+  + '.card{background:#fff;border-radius:18px;padding:18px;box-shadow:0 14px 34px -18px rgba(8,74,99,.6)}.cur{background:#f0f9ff;border-radius:12px;padding:12px;margin:0 0 6px}.cur p{margin:0;font-size:13px;color:#475569}.cur b{display:block;font-size:20px;color:#0f172a;margin:2px 0 10px}'
   + 'label{display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:700;color:#475569;margin:16px 0}select{font:inherit;font-size:17px;padding:12px;border:1px solid #cbd5e1;border-radius:12px;min-height:50px;background:#fff;color:#0f172a}'
-  + 'button{width:100%;font:inherit;font-size:18px;font-weight:800;color:#fff;background:linear-gradient(135deg,#0891b2,#0e7490);border:0;border-radius:14px;min-height:56px;cursor:pointer}button:disabled{opacity:.6}#out{background:#fff;color:#b91c1c;border:2px solid #fecaca}'
-  + '.mine{background:#ecfeff;color:#0e7490;border-radius:10px;padding:8px 10px;font-size:14px;font-weight:700;margin:0 0 12px}.msg{margin-top:12px;font-size:15px;color:#b45309;min-height:20px}.msg.ok{color:#15803d;font-weight:700}';
-function truckPage(t, at) {
-  const ds = swapDrivers(at), cur = t.driver ? t.driver.id : '';
-  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>' + H(truckLabelOf(t)) + ' · Sign in</title><style>' + MINI_CSS + '</style></head><body><div class="w">'
-    + '<h1>' + H(truckLabelOf(t)) + '</h1><p class="sub">Millennial Pools · sign in or out of this truck' + (t.plate ? ' · plate ' + H(t.plate.trim()) : '') + '</p><div class="card">'
-    + '<p class="now">Signed in now<b id="who">' + H(t.driver ? t.driver.name : 'Nobody') + '</b></p>'
-    + '<label>Who are you?<select id="me"><option value="">Pick your name...</option>' + ds.map(d => '<option value="' + H(d.id) + '">' + H(d.name) + '</option>').join('') + '</select></label>'
-    + '<p class="mine" id="mine" hidden>This is your truck.</p><button id="in">Sign in to this truck</button><button id="out" hidden>Sign out of this truck</button><div class="msg" id="msg"></div>'
-    + '<p style="font-size:12.5px;color:#64748b;margin:14px 0 0">One person per truck: if someone else is signed in, they sign out first. Signing in here signs you out of any other truck. Your phone remembers your name for next time.</p></div></div>'
-    + '<script>let CUR=' + JSON.stringify(cur) + ';' + TRUCK_PAGE_JS + '</script></body></html>';
+  + 'button{width:100%;font:inherit;font-size:18px;font-weight:800;color:#fff;background:linear-gradient(135deg,#0891b2,#0e7490);border:0;border-radius:14px;min-height:54px;cursor:pointer}button:disabled{opacity:.6}#out{background:#fff;color:#b91c1c;border:2px solid #fecaca;min-height:46px;font-size:16px}'
+  + '.pend{background:#fef3c7;color:#92400e;border-radius:10px;padding:8px 10px;font-size:14px;font-weight:700;margin:10px 0 0}.msg{margin-top:12px;font-size:15px;color:#b45309;min-height:20px}.msg.ok{color:#15803d;font-weight:700}';
+function signPage(at) {
+  const ds = swapDrivers(at), reqs = swapReqs();
+  const D = Object.fromEntries(ds.map(d => { const t = at.trucks.find(x => x.driver && x.driver.id === d.id), r = reqs.find(x => x.driverId === d.id);
+    return [d.id, { truck: t ? truckLabelOf(t) : '', pending: r ? r.truck : '' }]; }));
+  const ts = at.trucks.slice().sort((a, b) => (b.active - a.active) || (parseInt(a.truckNo) || 999) - (parseInt(b.truckNo) || 999));
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Truck sign in / out · Millennial Pools</title><style>' + MINI_CSS + '</style></head><body><div class="w">'
+    + '<h1>Truck sign in / out</h1><p class="sub">Millennial Pools</p><div class="card">'
+    + '<label style="margin-top:0">Who are you?<select id="me"><option value="">Pick your name...</option>' + ds.map(d => '<option value="' + H(d.id) + '">' + H(d.name) + '</option>').join('') + '</select></label>'
+    + '<div class="cur" id="cur" hidden><p>Your truck now</p><b id="curT"></b><button id="out" hidden>Sign out of it</button><div class="pend" id="pend" hidden>Waiting for the office to approve: <span id="pendT"></span></div></div>'
+    + '<label>Truck you want to sign into<select id="tr"><option value="">Pick a truck...</option>' + ts.map(t => '<option value="' + H(t.id) + '"' + (t.driver ? ' disabled' : '') + '>' + H(truckLabelOf(t) + (t.driver ? ' · ' + t.driver.name : t.active ? '' : ' (inactive)')) + '</option>').join('') + '</select></label>'
+    + '<button id="in">Request sign in</button><div class="msg" id="msg"></div>'
+    + '<p style="font-size:12.5px;color:#64748b;margin:14px 0 0">One person per truck: a truck with someone in it is greyed out until they sign out. The office approves each sign in, then you are moved off your old truck. Your phone remembers your name.</p></div></div>'
+    + '<script>const D=' + JSON.stringify(D).replace(/</g, '\\u003c') + ';' + SIGN_PAGE_JS + '</script></body></html>';
 }
 // Round 1.5" stickers, 20 per letter sheet (4 x 5), same positions as the "Matt Stickers" label sheet:
-// circles start 0.5" from the left and 0.75" from the top, 2" apart. Print at 100% scale, margins "None".
-const STICKERS_JS = `const grid=document.getElementById('pages'),list=document.getElementById('list');
-list.innerHTML=T.map((t,i)=>'<label><input type="checkbox" data-i="'+i+'"'+(t.on?' checked':'')+'> '+t.no+' <small>'+t.mdl+'</small></label>').join('');
-function draw(){const sel=T.filter((t,i)=>list.querySelector('[data-i="'+i+'"]').checked);grid.innerHTML='';
-  for(let p=0;p<Math.max(1,Math.ceil(sel.length/20));p++){const pg=document.createElement('div');pg.className='pg';
-    sel.slice(p*20,p*20+20).forEach((t,k)=>{const c=document.createElement('div');c.className='rc';c.style.left=(0.5+2*(k%4))+'in';c.style.top=(0.751+2*Math.floor(k/4))+'in';
-      c.innerHTML='<div class="rq"></div><div class="rn">'+t.no+'</div>';new QRCode(c.querySelector('.rq'),{text:t.u,width:300,height:300,correctLevel:QRCode.CorrectLevel.M});pg.appendChild(c)});
-    grid.appendChild(pg)}
-  document.getElementById('cnt').textContent=sel.length+' stickers · '+Math.max(1,Math.ceil(sel.length/20))+' sheet'+(sel.length>20?'s':'')}
-list.onchange=draw;draw();`;
+// circles start 0.5" from the left and 0.75" from the top, 2" apart. Every sticker is the same QR code.
+const STICKERS_JS = `const n=document.getElementById('n'),pages=document.getElementById('pages');
+function draw(){const c=Math.max(1,Math.min(200,+n.value||20));pages.innerHTML='';
+  for(let p=0;p<Math.ceil(c/20);p++){const pg=document.createElement('div');pg.className='pg';
+    for(let k=0;k<Math.min(20,c-p*20);k++){const e=document.createElement('div');e.className='rc';e.style.left=(0.5+2*(k%4))+'in';e.style.top=(0.751+2*Math.floor(k/4))+'in';
+      new QRCode(e,{text:U,width:300,height:300,correctLevel:QRCode.CorrectLevel.M});pg.appendChild(e)}
+    pages.appendChild(pg)}}
+n.oninput=draw;draw();`;
 function stickersPage(at, base) {
-  const ts = at.trucks.slice().sort((a, b) => (b.active - a.active) || (parseInt(a.truckNo) || 999) - (parseInt(b.truckNo) || 999));
-  const T = ts.map(t => ({ no: H(t.truckNo ? '#' + t.truckNo.split(/[ ~(]/)[0] : 'Truck'), mdl: H([t.year, t.make, t.model].filter(Boolean).join(' ')), on: t.active, u: base + '/r/' + signShare({ k: 't', t: t.id }, STICKER_DAYS) }));
+  const u = base + '/r/' + signShare({ k: 's' }, STICKER_DAYS);
   return '<!doctype html><html><head><meta charset="utf-8"><title>Truck QR stickers</title><style>'
     + 'body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#e2e8f0;color:#0f172a}.bar{position:sticky;top:0;background:#0b4a63;color:#fff;padding:12px 18px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;z-index:2}'
-    + '.bar button{font:inherit;font-weight:800;background:#22d3ee;color:#083344;border:0;border-radius:10px;padding:9px 16px;cursor:pointer}.bar span{font-size:13px;color:#cffafe}'
-    + '#list{display:flex;flex-wrap:wrap;gap:6px 14px;padding:10px 18px;background:#fff;border-bottom:1px solid #cbd5e1;font-size:13px}#list small{color:#64748b}'
+    + '.bar button{font:inherit;font-weight:800;background:#22d3ee;color:#083344;border:0;border-radius:10px;padding:9px 16px;cursor:pointer}.bar span{font-size:13px;color:#cffafe}.bar input{width:60px;font:inherit;padding:6px;border-radius:8px;border:0}.bar a{color:#a5f3fc}'
     + '.pg{width:8.5in;height:11in;background:#fff;position:relative;margin:.3in auto;box-shadow:0 6px 20px rgba(0,0,0,.15);overflow:hidden}'
-    + '.rc{position:absolute;width:1.5in;height:1.5in;border-radius:50%;outline:1px dashed #94a3b8;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}'
-    + '.rn{position:absolute;bottom:-.24in;font-size:9pt;font-weight:800;color:#0e7490}.rq img,.rq canvas{width:1in!important;height:1in!important;display:block}'
-    + '@media print{body{background:#fff}.bar,#list,.rn{display:none}.pg{margin:0;box-shadow:none;break-after:page}.rc{outline:0}@page{size:letter;margin:0}}</style>'
+    + '.rc{position:absolute;width:1.5in;height:1.5in;border-radius:50%;outline:1px dashed #94a3b8;display:flex;align-items:center;justify-content:center}.rc img,.rc canvas{width:1in!important;height:1in!important;display:block}'
+    + '@media print{body{background:#fff}.bar{display:none}.pg{margin:0;box-shadow:none;break-after:page}.rc{outline:0}@page{size:letter;margin:0}}</style>'
     + '<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script></head><body>'
-    + '<div class="bar"><b>Truck QR stickers</b><button onclick="print()">Print</button><b id="cnt"></b><span>Round 1.5" labels, 20 per sheet. Only the QR code prints; the blue truck number under each circle is just so you know which truck it goes in. In the print box set Scale 100% (not "Fit") and Margins: None. Untick trucks to leave them out.</span></div>'
-    + '<div id="list"></div><div id="pages"></div><script>const T=' + JSON.stringify(T).replace(/</g, '\\u003c') + ';' + STICKERS_JS + '</script></body></html>';
+    + '<div class="bar"><b>Truck QR stickers</b><label>Stickers <input id="n" type="number" min="1" max="200" value="20"></label><button onclick="print()">Print</button>'
+    + '<span>Every sticker is the same code, so any sticker goes in any truck. It opens <a href="' + H(u) + '" target="_blank">the sign in / out page</a>. Print at Scale 100% with Margins: None on round 1.5" labels (20 per sheet).</span></div>'
+    + '<div id="pages"></div><script>const U=' + JSON.stringify(u) + ';' + STICKERS_JS + '</script></body></html>';
 }
 // Azuga's camera storage only serves files to pages on azuga.com, so the server fetches them
 // and passes them through. Locked to Azuga's recording bucket so it can't fetch anything else.
@@ -2044,17 +2077,15 @@ http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }); return res.end(invoicePage(at.trucks));
       } catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: e.message })); }
     }
-    if (o.k === 't') {   // truck sticker: sign in or out of this one truck
+    if (o.k === 's') {   // QR sticker: sign-in request / sign-out page
       try {
-        if (sub === 'in' || sub === 'out') {
+        if (sub === 'request' || sub === 'out') {
           if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
-          const out = await truckSwap(o.t, await readJson(req), sub === 'out');
+          const b = await readJson(req), out = sub === 'out' ? await signOutSelf(b) : await requestSignIn(b);
           res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(out));
         }
         if (sub) { res.writeHead(404); return res.end(); }
-        const at = await atData(), t = at.trucks.find(x => x.id === o.t);
-        if (!t) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('This truck is no longer in the system. Tell the office.'); }
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }); return res.end(truckPage(t, at));
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }); return res.end(signPage(await atData()));
       } catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: e.message })); }
     }
     if (o.k !== 'd' && o.k !== 'f') { res.writeHead(404); return res.end(); }
@@ -2068,7 +2099,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   if (POSTS[url.pathname]) {
@@ -2836,6 +2867,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .panel{transition:box-shadow .25s,transform .25s}.panel:hover{box-shadow:0 18px 40px -22px rgba(14,116,144,.55)}
 .cm-auto{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:12px 16px;margin-bottom:12px}.cm-auto>div{display:flex;flex-direction:column;flex:1;min-width:240px}.cm-auto>div b{font-size:14px}.cm-auto>div .muted{font-size:12.5px}.qrbtn{display:flex;justify-content:center;margin-top:10px;text-decoration:none;background:linear-gradient(135deg,#ecfeff,#cffafe);border-color:#67e8f9;color:#0e7490;font-weight:700;transition:transform .2s,box-shadow .2s}.qrbtn:hover{transform:translateY(-2px) rotate(-.6deg);box-shadow:0 8px 18px -10px rgba(8,145,178,.7)}
 .hist{margin-top:10px;border-top:1px solid #e2e8f0;padding-top:8px}.hist summary{cursor:pointer;font-weight:700;color:#0b4a63;font-size:13.5px}.hl{margin-top:6px}.hrow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:7px 10px;border-radius:10px;font-size:13px;transition:background .2s}.hrow:hover{background:#f0f9ff}.hrow small{color:#64748b;width:100%}.hrow.now{background:linear-gradient(90deg,#ecfeff,transparent)}.hnow{background:#0891b2;color:#fff;border-radius:99px;padding:1px 8px;font-size:11px;font-weight:700;animation:hnowP 2s ease-in-out infinite}@keyframes hnowP{50%{box-shadow:0 0 0 4px rgba(8,145,178,.15)}}
+.rqbox{margin-top:10px;background:#fffbeb;border:1px solid #fcd34d;border-radius:12px;padding:10px;animation:rqIn .4s ease both}.rqbox>b span,.rqb{background:#f59e0b;color:#fff;border-radius:99px;padding:0 7px;margin-left:5px;font-size:11px}.rqi{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 0;border-top:1px dashed #fcd34d;font-size:13px}.rqi>div{flex:1;min-width:140px}.rqi small{display:block;color:#92400e}.rqi .btn2{padding:6px 10px}@keyframes rqIn{from{opacity:0;transform:translateY(-4px)}}
 .swaps{margin-top:10px;font-size:12.5px}.swaps summary{cursor:pointer;font-weight:700;color:#0b4a63}.swaps summary span{background:#0891b2;color:#fff;border-radius:99px;padding:0 7px;margin-left:4px;font-size:11px}.swp{display:flex;flex-wrap:wrap;gap:4px;padding:6px 0;border-bottom:1px dashed #e2e8f0;animation:swpIn .35s ease both}.swp small{color:#64748b;width:100%}.swp.o b{color:#b91c1c}@keyframes swpIn{from{opacity:0;transform:translateX(-6px)}}
 .cm-bounce{margin-top:6px;font-size:12.5px;color:#b45309;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:4px 8px;animation:cmPulse 2.4s ease-in-out infinite}@keyframes cmPulse{50%{box-shadow:0 0 0 4px rgba(251,146,60,.18)}}
 .btn2.pri{position:relative;overflow:hidden}.btn2.pri::after{content:'';position:absolute;top:0;bottom:0;left:-60%;width:40%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.45),transparent);transform:skewX(-20deg);transition:left .5s ease}.btn2.pri:hover::after{left:120%}
@@ -3260,8 +3292,11 @@ document.addEventListener('toggle',async e=>{const d=e.target;if(!d.classList||!
   try{const l=await get('/api/truck/history?v='+encodeURIComponent(d.dataset.v)+'&t='+encodeURIComponent(d.dataset.t));const f=x=>new Date(x).toLocaleDateString('en-US',{month:'short',year:'numeric'});
     box.className='hl';box.innerHTML=l.length?l.map(h=>'<div class="hrow'+(h.now?' now':'')+'"><b>'+esc(h.name)+'</b>'+(h.now?'<span class="hnow">Now</span>':'')+'<small>'+(f(h.from)===f(h.to)?f(h.to):f(h.from)+' – '+f(h.to))+(h.miles?' · '+h.miles.toLocaleString()+' mi':'')+(h.signIns?' · '+h.signIns+' sign-in'+(h.signIns>1?'s':''):'')+'</small></div>').join(''):'<span class="muted">No drivers on record yet. Sticker sign-ins will show here.</span>'}
   catch(err){box.textContent=err.message}},true);
-async function swapPanel(){const el=$('swapBox');if(!el)return;let l=[];try{l=await get('/api/truck/swaps')}catch(e){}
-  el.innerHTML=l.length?'<details class="swaps"><summary>Recent truck sign-ins <span>'+l.length+'</span></summary>'+l.slice(0,25).map(x=>'<div class="swp'+(x.out?' o':'')+'"><b>'+esc(x.who)+'</b> '+(x.out?'signed out of':'→')+' '+esc(x.truck)+(x.was?' <small>('+esc(x.was)+' bumped)</small>':'')+'<small>'+new Date(x.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+'</small></div>').join('')+'</details>':''}
+async function swapPanel(){const el=$('swapBox');if(!el)return;let l=[],rq=[];try{[l,rq]=await Promise.all([get('/api/truck/swaps'),get('/api/truck/requests')])}catch(e){}
+  const tab=[...document.querySelectorAll('nav button,.tabs button,[data-v]')].find(x=>/Edit vehicles/.test(x.textContent));if(tab){let b=tab.querySelector('.rqb');if(!b&&rq.length){b=document.createElement('span');b.className='rqb';tab.appendChild(b)}if(b){b.textContent=rq.length;b.hidden=!rq.length}}
+  el.innerHTML=(rq.length?'<div class="rqbox"><b>Sign-in requests <span>'+rq.length+'</span></b>'+rq.map(r=>'<div class="rqi"><div><b>'+esc(r.who)+'</b> wants '+esc(r.truck)+'<small>'+new Date(r.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+'</small></div><button class="btn2 pri" data-rq="'+esc(r.id)+'" data-ok="1">Approve</button><button class="btn2" data-rq="'+esc(r.id)+'">Deny</button></div>').join('')+'<div id="rqMsg" class="muted" style="font-size:12px"></div></div>':'')+(l.length?'<details class="swaps"><summary>Recent truck sign-ins <span>'+l.length+'</span></summary>'+l.slice(0,25).map(x=>'<div class="swp'+(x.out?' o':'')+'"><b>'+esc(x.who)+'</b> '+(x.denied?'denied for':x.out?'signed out of':'→')+' '+esc(x.truck)+(x.was?' <small>('+esc(x.was)+' bumped)</small>':'')+'<small>'+new Date(x.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+'</small></div>').join('')+'</details>':'');
+  el.querySelectorAll('[data-rq]').forEach(b=>b.onclick=async()=>{el.querySelectorAll('[data-rq]').forEach(x=>x.disabled=true);try{const r=await post('/api/truck/request',{id:b.dataset.rq,approve:!!b.dataset.ok});if(r.who)toast(r.who+' is now in '+r.truck+(r.left&&r.left.length?' (moved off '+r.left.join(', ')+')':''));await loadAT()}catch(err){$('rqMsg').textContent=err.message;el.querySelectorAll('[data-rq]').forEach(x=>x.disabled=false)}})}
+setInterval(swapPanel,60000);
 async function loadAT(){swapPanel();try{AT=await get('/api/airtable')}catch(e){AT={connected:true,error:e.message,links:{}}}if(!$('vEdit').hidden)renderEdit();if(vehicles.length||locs.length)render()}
 const link=id=>AT&&AT.links&&AT.links[id];
 const docBtns=t=>{const d=[...t.insCard.map(f=>['Insurance card',f]),...t.files.map(f=>[f.name,f])];return d.length?'<div class="docs">'+d.map(([n,f])=>'<a class="btn" target="_blank" rel="noopener" href="'+esc(f.url)+'">'+ICON.file+esc(n)+'</a>').join('')+'</div>':'<div class="muted" style="margin-top:8px">No insurance card or other files in Airtable yet.</div>'};
