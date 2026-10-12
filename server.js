@@ -1472,20 +1472,22 @@ const AT_ITEMS = 'tbl6f6FmKPRdie2uK', IT = { item: 'fldfmOGrz3tAqyezP', txn: 'fl
 const HW_STORE = /home ?depot|lowe'?s|harbor ?freight|amazon|amzn|tractor supply|\bace\b|menards|northern tool|grainger|true value|leslie'?s|pinch a penny|sherwin|walmart|target|costco|sam'?s club|staples|best buy|autozone|advance auto|o'?reilly|napa/i;
 const ITEMS_SINCE = process.env.ITEMS_SINCE || '2026-03-01';
 const AI_KEY = () => clean(process.env.ANTHROPIC_API_KEY || ''), AI_MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
-// Product link for a receipt line. Receipts mostly print UPC barcodes (12-13 digits), which store sites can't search,
-// so those go by the item name. Only real store item numbers (Home Depot internet #/store SKU, Lowe's item #,
-// Harbor Freight item #, Amazon ASIN) are used directly. Short register codes ("1/4XCBRPPNPL") go to a Google search.
+// Product link for a receipt line. Checked on homedepot.com: a real barcode (UPC/EAN with a valid check digit),
+// internet # or store SKU opens the exact product page; a misread barcode finds 0 results and receipt abbreviations
+// ("2PC PLI MIL") find junk. So: good barcode/item # -> search by it; else the item name; abbreviations -> Google.
+const gtinOk = c => { if (!/^(\d{8}|\d{12,14})$/.test(c)) return false;   // barcode check digit
+  const d = c.split('').reverse().map(Number), sum = d.slice(1).reduce((t, x, i) => t + x * (i % 2 ? 1 : 3), 0); return (10 - sum % 10) % 10 === d[0]; };
 const itemLink = (store, sku, name) => {
-  const st = String(store || ''), k = String(sku || '').replace(/\D/g, '') === String(sku || '') ? String(sku || '') : '', n = clean(name).replace(/\(.*?\)/g, '').trim();
-  const cryptic = !/\s/.test(n) || /^[A-Z0-9 /#"'.\-]+$/.test(n) && n.split(' ').some(w => w.length > 7 && /\d/.test(w));
-  const q = encodeURIComponent(n), g = 'https://www.google.com/search?q=' + encodeURIComponent(st + ' ' + n + (sku ? ' ' + sku : ''));
+  const st = String(store || ''), c = String(sku || '').replace(/[\s-]/g, ''), n = clean(name).replace(/\(.*?\)/g, '').replace(/^Home Depot item \d+$/, '').trim();
+  const code = gtinOk(c) ? c : '', cryptic = !n || !/\s/.test(n) || n === n.toUpperCase() && n.replace(/[^A-Z]/g, '').length < n.length * 0.6 || /^[A-Z0-9 /#"'.\-]+$/.test(n) && n.split(/\s+/).every(w => w.length <= 5);
+  const q = encodeURIComponent(n), g = 'https://www.google.com/search?q=' + encodeURIComponent(st + ' ' + (n || '') + (c ? ' ' + c : ''));
   if (/amazon|amzn/i.test(st)) return /^B0[A-Z0-9]{8}$/.test(sku || '') ? 'https://www.amazon.com/dp/' + sku : 'https://www.amazon.com/s?k=' + q;
-  if (/home ?depot/i.test(st)) return /^(\d{6}|\d{9,10})$/.test(k) ? 'https://www.homedepot.com/s/' + k : cryptic ? g : 'https://www.homedepot.com/s/' + q;
-  if (/lowe/i.test(st)) return /^\d{4,7}$/.test(k) ? 'https://www.lowes.com/search?searchTerm=' + k : cryptic ? g : 'https://www.lowes.com/search?searchTerm=' + q;
-  if (/harbor/i.test(st)) return /^\d{5}$/.test(k) ? 'https://www.harborfreight.com/search?q=' + k : 'https://www.harborfreight.com/search?q=' + q;
+  if (/home ?depot/i.test(st)) return code || /^(\d{6}|[1-3]\d{8,9})$/.test(c) ? 'https://www.homedepot.com/s/' + (code || c) : cryptic ? g : 'https://www.homedepot.com/s/' + q;
+  if (/lowe/i.test(st)) return /^\d{4,7}$/.test(c) || code ? 'https://www.lowes.com/search?searchTerm=' + (code || c) : cryptic ? g : 'https://www.lowes.com/search?searchTerm=' + q;
+  if (/harbor/i.test(st)) return /^\d{5}$/.test(c) ? 'https://www.harborfreight.com/search?q=' + c : 'https://www.harborfreight.com/search?q=' + q;
+  if (/walmart/i.test(st)) return code ? 'https://www.walmart.com/search?q=' + code : cryptic ? g : 'https://www.walmart.com/search?q=' + q;
   if (/tractor/i.test(st)) return cryptic ? g : 'https://www.tractorsupply.com/tsc/search/' + q;
-  if (/walmart/i.test(st)) return 'https://www.walmart.com/search?q=' + q;
-  return g;
+  return cryptic || !n ? g : 'https://www.google.com/search?q=' + encodeURIComponent(st + ' ' + n);
 };
 const itemsState = () => (cache.get('rampItems') || {}).data || { done: {} };
 const saveItemsState = d => { cache.set('rampItems', { data: d, t: Date.now() }); saveSnap('rampItems', d); };
@@ -1505,7 +1507,7 @@ async function readReceipt(id, gas) {
   const part = { type: type === 'application/pdf' ? 'document' : 'image', source: { type: 'base64', media_type: type, data: buf.toString('base64') } };
   const a = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': AI_KEY(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
     body: JSON.stringify({ model: AI_MODEL, max_tokens: 2500, messages: [{ role: 'user', content: [part, { type: 'text', text:
-      gas ? 'This is a gas station / fuel receipt. Reply with JSON only, no other text: {"gallons":0.000,"price_per_gallon":0.000,"grade":"regular|plus|premium|diesel|"}. Use 0 or "" for anything not printed.' : 'This is a store receipt or order confirmation. List every item bought. Reply with JSON only, no other text: {"store":"store name","items":[{"name":"short plain item name","sku":"the store SKU / item number / model number / Amazon ASIN printed for that line, else empty","qty":1,"price":0.00}]}. price is the line total in dollars. Leave out tax, subtotals, totals, discounts, bag fees, rewards and payment lines. If it is not a receipt, reply {"store":"","items":[]}.' }] }] }) });
+      gas ? 'This is a gas station / fuel receipt. Reply with JSON only, no other text: {"gallons":0.000,"price_per_gallon":0.000,"grade":"regular|plus|premium|diesel|"}. Use 0 or "" for anything not printed.' : 'This is a store receipt or order confirmation. List every item bought. Reply with JSON only, no other text: {"store":"store name","items":[{"name":"brand and product spelled out the way a shopper would search for it, e.g. Husky 16 in. Groove Pliers, not the receipt abbreviation","sku":"the store SKU / item number / model number / Amazon ASIN printed for that line, else empty","qty":1,"price":0.00}]}. price is the line total in dollars. Leave out tax, subtotals, totals, discounts, bag fees, rewards and payment lines. If it is not a receipt, reply {"store":"","items":[]}.' }] }] }) });
   const j = await a.json().catch(() => ({}));
   if (!a.ok) { const e = new Error('Claude ' + a.status + ': ' + String((j.error && j.error.message) || '').slice(0, 160)); e.fatal = a.status === 401 || a.status === 403 || a.status === 400 && /credit|billing/i.test(e.message); throw e; }
   const txt = ((j.content || []).find(c => c.type === 'text') || {}).text || '', m = txt.match(/\{[\s\S]*\}/);
