@@ -482,7 +482,7 @@ async function people() {
   return { connected: true, azugaOk: !!az, dupes: dupeGroups(named), allTrucks: at.trucks.map(t => ({ id: t.id, label: truckLabel[t.id] })).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true })),
     blank: at.drivers.filter(d => !d.name).map(d => ({ id: d.id, license: d.license, policy: d.policy, trucks: d.truckIds.map(id => truckLabel[id]).filter(Boolean) })),
     drivers: named.sort((a, b) => a.name.localeCompare(b.name)).map(d => ({
-    id: d.id, name: d.name, license: d.license, state: d.state, policy: d.policy, notes: d.notes, pic: d.pic, status: d.status, role: d.role,
+    id: d.id, name: d.name, license: d.license, state: d.state, policy: d.policy, notes: d.notes, pic: d.pic, status: d.status, role: d.role, email: d.email, phone: d.phone,
     trucks: d.truckIds.map(id => truckLabel[id]).filter(Boolean), truckIds: d.truckIds, inAzuga: inAz.has(dupeName(d.name)) })) };
 }
 
@@ -570,6 +570,11 @@ async function deleteBlankDriver(b) {
 }
 
 const EMAIL_OK = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Email / phone typed in the Drivers tab: blank clears, otherwise checked and tidied ("609-555-1234" -> "(609) 555-1234")
+const contactFields = b => { const f = {};
+  if ('email' in b) { const e = clean(b.email).toLowerCase(); if (e && !EMAIL_OK.test(e)) throw new Error('That email address does not look right.'); f[D.email] = e || null; }
+  if ('phone' in b) { const d = clean(b.phone).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); if (d && d.length !== 10) throw new Error('Phone number needs 10 digits.'); f[D.phone] = d ? '(' + d.slice(0, 3) + ') ' + d.slice(3, 6) + '-' + d.slice(6) : null; }
+  return f; };
 // Azuga requires an email login for every driver. When none is given we make a unique one from the
 // office inbox with a "+" tag (callum+jane.doe@...), so Azuga mail about drivers lands with the office.
 const DRIVER_EMAIL = process.env.DRIVER_EMAIL || 'callum@millennialpools.com';
@@ -622,6 +627,7 @@ async function createDriver(b) {
   const fields = { [D.name]: name };
   const opt = { license: [D.license, 40], state: [D.state, 20], policy: [D.policy, 60], notes: [D.notes, 500] };
   for (const k in opt) if (clean(b[k])) fields[opt[k][0]] = text(b[k], opt[k][1], k);
+  Object.assign(fields, Object.fromEntries(Object.entries(contactFields(b)).filter(([, v]) => v)));
   if (b.dob) fields[D_DOB] = b.dob;
   if (clean(b.role)) { if (!ROLES.includes(b.role)) throw new Error('Pick a role from the list.'); fields[D.role] = b.role; }
   if (b.addToAzuga && clean(b.email) && !EMAIL_OK.test(clean(b.email))) throw new Error('That email address does not look right.');
@@ -729,6 +735,7 @@ async function updateDriver(b) {
   const fields = { [D.name]: name };
   const opt = { license: 40, state: 20, policy: 60, notes: 500 };
   for (const k in opt) fields[D[k]] = text(b[k], opt[k], k) || null;  // blank clears it
+  Object.assign(fields, contactFields(b));
   if (b.status === 'Active' || b.status === 'Inactive') fields[D.status] = b.status;
   if ('role' in b) { if (b.role && !ROLES.includes(b.role)) throw new Error('Pick a role from the list.'); fields[D.role] = b.role || null; }
   if (Array.isArray(b.truckIds)) {
@@ -1414,7 +1421,7 @@ async function eodCheck(dry) {
     const d = matchPerson(at.drivers.filter(x => x.status !== 'Inactive'), tech), u = matchPerson(users, tech), email = (d && d.email) || (u && u.email) || '';
     const lines = mine.map(x => { const w = vis[x.id]; return '• ' + (x.customer || 'Pool') + (x.address ? ', ' + x.address : '') + (w ? '  (you were there ' + tm(w.arrive) + '–' + tm(w.leave) + ')' : ''); });
     const first = tech.split(' ')[0], n = mine.length;
-    out.push({ tech, email, n, subject: n + ' POM service' + (n > 1 ? 's' : '') + ' not submitted today', body: 'Hi ' + first + ',\n\nThese services from today still haven\'t been submitted in Pool Office Manager:\n\n' + lines.join('\n') + '\n\nPlease open the POM app and complete ' + (n > 1 ? 'them' : 'it') + ' tonight. If you didn\'t get to a pool, mark it so the office knows.\n\nThanks,\nMillennial Pools' });
+    out.push({ tech, email, n, subject: n + ' POM service' + (n > 1 ? 's' : '') + ' not submitted today', body: 'Hi ' + first + ',\n\nThese services from today still haven\'t been submitted in Pool Office Manager:\n\n' + lines.join('\n') + '\n\nPlease open the POM app and complete ' + (n > 1 ? 'them' : 'it') + ' tonight. If you didn\'t get to a pool, let your regional know.\n\nThanks,\nMillennial Pools' });
     await sleep(300);
   }
   if (dry) return out;
@@ -3614,6 +3621,15 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .rtech{font-size:12px;color:#334155;background:rgba(255,255,255,.7);border-radius:8px;padding:5px 7px;margin-top:6px}.rtech.w{color:#92400e;background:#fffbeb}.rblk input{width:100%;box-sizing:border-box;margin-top:8px;font:inherit;font-size:13px;border:1px solid #cbd5e1;border-radius:8px;padding:4px 6px;background:#fff}.rblk input.saved{background:#dcfce7}
 .camload{display:inline-flex;align-items:center;gap:6px;margin-left:6px;color:#0e7490;font-weight:600}
 .camat{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#475569;background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:5px 11px}.camdot{width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.2)}.camdot.bad{background:#ef4444;box-shadow:0 0 0 3px rgba(239,68,68,.2)}.camdot.off{background:#94a3b8;box-shadow:none}.camdot.spin{background:#0ea5e9;animation:gbPulse 1s ease-in-out infinite}
+.rmc.wide{margin-bottom:14px}.rmc.wide .rma .sw{flex:1 1 auto}
+.dcon input{background:#f0f9ff}.dcon{position:relative}
+.rmhead{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;margin:4px 0 10px}.rmhead h3{margin:0;font-size:16px;color:#0b4a63}.rmhead .muted{font-size:12.5px}
+.rmgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-bottom:16px}.rmc{background:#fff;border:1px solid #e2e8f0;border-left:5px solid #94a3b8;border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:10px;transition:box-shadow .2s,transform .2s}.rmc:hover{transform:translateY(-2px);box-shadow:0 12px 26px -16px rgba(14,116,144,.5)}
+.rmc.em{border-left-color:#0ea5e9}.rmc.tx{border-left-color:#8b5cf6}.rmc.sv{border-left-color:#06b6d4}.rmc.eo{border-left-color:#6366f1}.rmc.live{background:linear-gradient(180deg,#f0fdf4,#fff 45%)}
+.rmh{display:flex;align-items:center;gap:10px}.rmh>div{flex:1;min-width:0}.rmh b{display:block;font-size:15px;color:#0f172a}.rmh small{color:#64748b;font-size:12px}.rmi{font-size:22px;width:38px;height:38px;border-radius:11px;background:#f1f5f9;display:grid;place-items:center;flex:none}
+.rmpill{font-size:12px;font-weight:800;border-radius:20px;padding:3px 10px;white-space:nowrap}.rmpill.on{background:#dcfce7;color:#15803d}.rmpill.off{background:#f1f5f9;color:#475569}.rmpill.set{background:#fef3c7;color:#92400e}
+.rmd{display:grid;grid-template-columns:62px 1fr;gap:4px 10px;margin:0;font-size:13px}.rmd dt{font-weight:700;color:#64748b;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;padding-top:2px}.rmd dd{margin:0;color:#334155}
+.rmw{font-size:12.5px;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:7px 9px}.rma{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding-top:8px;border-top:1px dashed #e2e8f0}.rma .sw{flex:1 1 100%;min-width:0;font-size:13px}.rmm{font-size:12.5px;min-height:1em}
 .cm-eod{width:100%;display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:10px;padding-top:10px;border-top:1px dashed #a5f3fc}.cm-eod>div{flex:1;min-width:220px}.cm-eod b{display:block}
 .cm-svc{margin-top:10px;border-left:4px solid #06b6d4;background:linear-gradient(90deg,#ecfeff,#fff 60%)}
 .cm-sms{margin-top:10px;border-left:4px solid #8b5cf6;background:linear-gradient(90deg,#f5f3ff,#fff 60%)}
@@ -3749,6 +3765,8 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
   <label>Full name *<input name="name" maxlength="80" required></label>
   <label>License number<input name="license" maxlength="40"></label>
   <label>License state<input name="state" maxlength="20" placeholder="NJ"></label>
+  <label class="dcon">✉️ Email<input name="email" type="email" maxlength="120" placeholder="name@millennialpools.com" autocomplete="off"><span class="hint">Check-up, service and safety emails go here</span></label>
+  <label class="dcon">📱 Mobile phone<input name="phone" type="tel" maxlength="20" placeholder="(609) 555-0100" autocomplete="off"><span class="hint">Used for reminder texts</span></label>
   <label>Insurance policy<input name="policy" maxlength="60" list="policyList"></label>
   <label>Role<select name="role"><option value="">Not set</option><option>Tech</option><option>Tech assistant</option><option>District</option><option>Regional</option><option>Owner</option><option>Auditor</option><option>Staffer</option></select></label>
   <label>Status<select name="status"><option>Active</option><option>Inactive</option></select></label>
@@ -4609,7 +4627,7 @@ let deId=null,dePhoto=null,deSel=new Set();
 function deTrucks(){const q=$('deTq').value.trim().toLowerCase();
   $('deTl').innerHTML=(PEOPLE.allTrucks||[]).filter(t=>!q||t.label.toLowerCase().includes(q)||deSel.has(t.id)).map(t=>'<label class="'+(deSel.has(t.id)?'on':'')+'"><input type="checkbox" value="'+esc(t.id)+'"'+(deSel.has(t.id)?' checked':'')+'>'+esc(t.label)+'</label>').join('')||'<span class="muted">No trucks match.</span>'}
 function openDrv(id){const d=PEOPLE.drivers.find(x=>x.id===id);if(!d)return;deId=id;dePhoto=null;deSel=new Set(d.truckIds||[]);const f=$('drvForm');f.reset();
-  for(const k of ['name','license','state','policy','notes','role'])f[k].value=d[k]||'';f.status.value=d.status==='Inactive'?'Inactive':'Active';
+  for(const k of ['name','license','state','policy','notes','role','email','phone'])f[k].value=d[k]||'';f.status.value=d.status==='Inactive'?'Inactive':'Active';
   $('deTitle').textContent='Edit '+d.name;$('deDz').hidden=true;$('deDzYes').textContent='Delete for good';$('deTq').value='';deTrucks();$('dePrev').hidden=true;$('deMsg').textContent='';$('deSave').disabled=false;
   $('dePic').innerHTML=d.pic&&d.pic.length?'<a class="btn" target="_blank" rel="noopener" href="'+esc(d.pic[0].url)+'">'+ICON.file+'Current license photo</a>':'<span class="muted">No license photo yet</span>';
   $('drvEd').showModal()}
@@ -4862,23 +4880,36 @@ $('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hi
 /*repadd*/
 // Automatic emails: setup status, a test send to Callum, and the Monday switch
 async function mailPanel(){const el=$('chkMailAuto');if(!el)return;let st;try{st=await get('/api/mail/status')}catch(e){el.innerHTML='';return}
-  el.innerHTML='<div class="cm-auto"><div><b>Automatic emails</b><span class="muted">'+(st.ready?'Sent from '+esc(st.from)+' to anyone who hasn’t submitted: Mon–Wed at noon, Thu–Sun at 9 AM and 3 PM, until they do.'+(st.sent&&st.sent.length?' This week: '+st.sent.map(esc).join(', ')+'.':'')+(st.bounced&&st.bounced.length?'</span><span class="cm-bounce">Bounced, not emailed again: '+st.bounced.map(esc).join(', ')+'. Fix the address in Airtable.':'')+(st.bounceErr?'</span><span class="cm-bounce">'+esc(st.bounceErr):''):'Not set up yet: add the Outlook settings in Render (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, MAIL_FROM).')+'</span></div>'
-    +'<button class="btn2" id="mailTest"'+(st.ready?'':' disabled')+'>Send test email to me</button><label class="cauto"><input type="checkbox" id="mailAuto"'+(st.auto?' checked':'')+(st.ready?'':' disabled')+'> Email automatically</label><button class="btn2 pri" id="mailNow"'+(st.ready?'':' disabled')+'>Send reminders now</button><span class="muted" id="mailMsg" style="width:100%;font-size:12.5px"></span></div>';
-  el.insertAdjacentHTML('beforeend','<div class="cm-auto cm-sms"><div><b>📱 Text reminders</b><span class="muted">'+(st.smsReady?'Sent with Textedly to each tech’s phone in Airtable, once a day while their check-up is missing.'+(st.texted&&st.texted.length?' Texted today: '+st.texted.map(esc).join(', ')+'.':''):'Not set up: add TEXTEDLY_API_KEY in Render.')+'</span></div>'
-    +'<button class="btn2" id="smsTest"'+(st.smsReady?'':' disabled')+'>Send test text to me</button><label class="cauto"><input type="checkbox" id="smsAuto"'+(st.sms?' checked':'')+(st.smsReady?'':' disabled')+'> Text automatically</label><button class="btn2 pri" id="smsNow"'+(st.smsReady?'':' disabled')+'>Text reminders now</button><span class="muted" id="smsMsg" style="width:100%;font-size:12.5px"></span></div>');
-  el.insertAdjacentHTML('beforeend','<div class="cm-auto cm-svc"><div><b>🏊 Service report reminders</b><span class="muted">'+(st.ready?'Emails a tech '+20+' minutes after their truck leaves a pool if that service still isn’t submitted in POM. One email per pool.'+(st.svcToday?' Sent today: '+st.svcToday+'.':''):'Needs the Outlook email settings in Render.')+'</span></div>'
-    +'<button class="btn2" id="svcTest"'+(st.ready?'':' disabled')+'>Send me a sample</button><label class="cauto"><input type="checkbox" id="svcAuto"'+(st.svc?' checked':'')+(st.ready?'':' disabled')+'> Remind automatically</label><span class="muted" id="svcMsg" style="width:100%;font-size:12.5px"></span>'
-    +'<div class="cm-eod"><div><b>🌙 End-of-day email</b><span class="muted">At 6 PM, each tech with services still not submitted today gets one email listing them.'+(st.eodToday?' Sent today: '+(st.eodToday.length?st.eodToday.map(esc).join(', '):'nobody needed one')+'.':'')+'</span></div><button class="btn2" id="eodTest"'+(st.ready?'':' disabled')+'>Send me a sample</button><label class="cauto"><input type="checkbox" id="eodAuto"'+(st.eod?' checked':'')+(st.ready?'':' disabled')+'> Send at end of day</label><span class="muted" id="eodMsg" style="width:100%;font-size:12.5px"></span></div></div>');
-  $('eodTest').onclick=async e=>{const b=e.currentTarget;b.disabled=true;$('eodMsg').textContent='Checking and sending...';try{const r=await post('/api/eod/test',{});$('eodMsg').textContent='Sample sent to '+r.to+'. '+(r.waiting.length?'Right now: '+r.waiting.map(w=>w.tech+' ('+w.n+')'+(w.email?'':' – no email')).join(', '):'Nobody has unsubmitted services right now.')}catch(err){$('eodMsg').textContent=err.message}b.disabled=false};
-  $('eodAuto').onchange=async e=>{try{const r=await post('/api/eod/auto',{on:e.target.checked});$('eodMsg').textContent=r.on?'On: goes out once a day at 6 PM.':'Off.'}catch(err){e.target.checked=!e.target.checked;$('eodMsg').textContent=err.message}};
-  $('svcTest').onclick=async e=>{const b=e.currentTarget;b.disabled=true;$('svcMsg').textContent='Checking and sending...';try{const r=await post('/api/svc/test',{});$('svcMsg').textContent='Sample sent to '+r.to+'. '+(r.waiting.length?'Right now '+r.waiting.length+' would get one: '+r.waiting.map(w=>w.tech+' ('+w.customer+')'+(w.email?'':' – no email')).join(', '):'Nobody has left a pool without submitting right now.')}catch(err){$('svcMsg').textContent=err.message}b.disabled=false};
-  $('svcAuto').onchange=async e=>{try{const r=await post('/api/svc/auto',{on:e.target.checked});$('svcMsg').textContent=r.on?'On: checked every 15 minutes, 7 AM to 9 PM.':'Off.'}catch(err){e.target.checked=!e.target.checked;$('svcMsg').textContent=err.message}};
-  $('smsTest').onclick=async e=>{const b=e.currentTarget;b.disabled=true;$('smsMsg').textContent='Sending...';try{const r=await post('/api/text/test',{});$('smsMsg').textContent='Test text sent to '+r.to+'.'}catch(err){$('smsMsg').textContent=err.message}b.disabled=false};
-  $('smsNow').onclick=async e=>{if(!confirm('Text everyone who hasn\u2019t submitted this week\u2019s check-up right now? (Anyone already texted today is skipped.)'))return;const b=e.currentTarget;b.disabled=true;$('smsMsg').textContent='Sending...';try{const r=await post('/api/text/now',{confirm:'SEND'});$('smsMsg').textContent='Texted '+r.sent.length+(r.sent.length?': '+r.sent.join(', '):'')+'.'+(r.failed.length?' Failed: '+r.failed.map(f=>f.name+' ('+f.error+')').join('; '):'');mailPanel()}catch(err){$('smsMsg').textContent=err.message;b.disabled=false}};
-  $('smsAuto').onchange=async e=>{try{const r=await post('/api/text/auto',{on:e.target.checked});$('smsMsg').textContent=r.sms?'On: one text a day to anyone still missing their check-up.':'Off.'}catch(err){e.target.checked=!e.target.checked;$('smsMsg').textContent=err.message}};
-  $('mailTest').onclick=async e=>{const b=e.currentTarget;b.disabled=true;$('mailMsg').textContent='Sending...';try{const r=await post('/api/mail/test',{});$('mailMsg').textContent='Test email sent to '+r.to+'. Check that inbox (and spam).'}catch(err){$('mailMsg').textContent=err.message}b.disabled=false};
-  $('mailNow').onclick=async e=>{if(!confirm('Email everyone who hasn\u2019t submitted this week\u2019s check-up right now?'))return;const b=e.currentTarget;b.disabled=true;$('mailMsg').textContent='Sending...';try{const r=await post('/api/mail/now',{confirm:'SEND'});$('mailMsg').textContent='Sent to '+r.sent.length+(r.sent.length?': '+r.sent.join(', '):'')+'.'+(r.failed.length?' Failed: '+r.failed.map(f=>f.name+' ('+f.error+')').join('; '):'')+(r.noEmail.length?' No email: '+r.noEmail.join(', '):'');mailPanel()}catch(err){$('mailMsg').textContent=err.message;b.disabled=false}};
-  $('mailAuto').onchange=async e=>{try{const r=await post('/api/mail/auto',{on:e.target.checked});$('mailMsg').textContent=r.auto?'On: emails go out Mondays at noon.':'Off.'}catch(err){e.target.checked=!e.target.checked;$('mailMsg').textContent=err.message}}}
+  const pill=(on,ready)=>!ready?'<span class="rmpill set">Not set up</span>':on?'<span class="rmpill on">● On</span>':'<span class="rmpill off">Off</span>';
+  const card=o=>'<div class="rmc '+o.cls+(o.on&&o.ready?' live':'')+'"><div class="rmh"><span class="rmi">'+o.icon+'</span><div><b>'+o.title+'</b><small>'+o.how+'</small></div>'+pill(o.on,o.ready)+'</div>'
+    +'<dl class="rmd"><dt>Who</dt><dd>'+o.who+'</dd><dt>When</dt><dd>'+o.when+'</dd>'+(o.note?'<dt>Latest</dt><dd>'+o.note+'</dd>':'')+'</dl>'
+    +(o.warn?'<div class="rmw">'+o.warn+'</div>':'')
+    +'<div class="rma"><label class="sw"><input type="checkbox" id="'+o.tog+'"'+(o.on?' checked':'')+(o.ready?'':' disabled')+'><i></i>'+o.togLabel+'</label>'+o.btns.map(([id,l,pri])=>'<button class="btn2'+(pri?' pri':'')+'" id="'+id+'"'+(o.ready?'':' disabled')+'>'+l+'</button>').join('')+'</div>'
+    +'<span class="rmm muted" id="'+o.msg+'"></span></div>';
+  const bounced=(st.bounced&&st.bounced.length?'Bounced, never emailed again: '+st.bounced.map(esc).join(', ')+'. Fix the address in Airtable.':'')+(st.bounceErr?(st.bounced&&st.bounced.length?'<br>':'')+esc(st.bounceErr):'');
+  el.innerHTML='<div class="rmhead"><h3>Automatic reminders</h3><span class="muted">'+(st.ready?'Emails come from '+esc(st.from)+'.':'Email isn’t set up yet: add the Outlook settings in Render (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, MAIL_FROM).')+' Switch each one on when you’re ready; “Send me a sample” never goes to the techs.</span></div><div class="rmgrid">'
+   +card({cls:'em',icon:'✉️',title:'Check-up reminder',how:'Email',ready:st.ready,on:st.auto,tog:'mailAuto',togLabel:'Send automatically',msg:'mailMsg',
+     who:'Techs, tech assistants and auditors who haven’t submitted this week’s truck check-up',when:'Mon–Wed at 12 PM · Thu–Sun at 9 AM and 3 PM, until they submit',
+     note:st.sent&&st.sent.length?'Emailed this week: '+st.sent.map(esc).join(', '):'Nobody emailed yet this week',warn:bounced,btns:[['mailTest','Send me a sample'],['mailNow','Send to everyone now',1]]})
+   +card({cls:'tx',icon:'📱',title:'Check-up reminder',how:'Text message (Textedly)',ready:st.smsReady,on:st.sms,tog:'smsAuto',togLabel:'Text automatically',msg:'smsMsg',
+     who:'Same people, to the phone number in Airtable',when:'Once a day while their check-up is missing',
+     note:st.texted&&st.texted.length?'Texted today: '+st.texted.map(esc).join(', '):'Nobody texted today',warn:st.smsReady?'':'Add TEXTEDLY_API_KEY in Render. Texts only deliver once the number is approved.',btns:[['smsTest','Send me a sample'],['smsNow','Text everyone now',1]]})
+   +card({cls:'sv',icon:'🏊',title:'Service report reminder',how:'Email',ready:st.ready,on:st.svc,tog:'svcAuto',togLabel:'Remind automatically',msg:'svcMsg',
+     who:'A tech whose truck left a pool without submitting that service in POM',when:'20 minutes after they drive away · checked every 15 min, 7 AM–9 PM · one email per pool',
+     note:st.svcToday?'Sent today: '+st.svcToday:'None sent today',btns:[['svcTest','Send me a sample']]})
+   +card({cls:'eo',icon:'🌙',title:'End-of-day summary',how:'Email',ready:st.ready,on:st.eod,tog:'eodAuto',togLabel:'Send at end of day',msg:'eodMsg',
+     who:'Each tech with services from today still not submitted in POM',when:'Every day at 6 PM · one email listing all of them',
+     note:st.eodToday?'Sent today: '+(st.eodToday.length?st.eodToday.map(esc).join(', '):'nobody needed one'):'Not sent yet today',btns:[['eodTest','Send me a sample']]})
+   +'</div>';
+  const run=async(e,msg,fn)=>{const b=e.currentTarget;b.disabled=true;$(msg).textContent='Sending...';try{$(msg).textContent=await fn()}catch(err){$(msg).textContent=err.message}b.disabled=false};
+  const tog=(id,url,msg,onTxt)=>{$(id).onchange=async e=>{try{const r=await post(url,{on:e.target.checked});const on=r.auto??r.sms??r.on;$(msg).textContent=on?onTxt:'Off.';mailPanel()}catch(err){e.target.checked=!e.target.checked;$(msg).textContent=err.message}}};
+  $('mailTest').onclick=e=>run(e,'mailMsg',async()=>{const r=await post('/api/mail/test',{});return 'Sample sent to '+r.to+'. Check that inbox (and spam).'});
+  $('mailNow').onclick=e=>{if(!confirm('Email everyone who hasn’t submitted this week’s check-up right now?'))return;run(e,'mailMsg',async()=>{const r=await post('/api/mail/now',{confirm:'SEND'});setTimeout(mailPanel,1500);return 'Sent to '+r.sent.length+(r.sent.length?': '+r.sent.join(', '):'')+'.'+(r.failed.length?' Failed: '+r.failed.map(f=>f.name+' ('+f.error+')').join('; '):'')+(r.noEmail.length?' No email: '+r.noEmail.join(', '):'')})};
+  $('smsTest').onclick=e=>run(e,'smsMsg',async()=>{const r=await post('/api/text/test',{});return 'Sample text sent to '+r.to+'.'});
+  $('smsNow').onclick=e=>{if(!confirm('Text everyone who hasn’t submitted this week’s check-up right now? (Anyone already texted today is skipped.)'))return;run(e,'smsMsg',async()=>{const r=await post('/api/text/now',{confirm:'SEND'});setTimeout(mailPanel,1500);return 'Texted '+r.sent.length+(r.sent.length?': '+r.sent.join(', '):'')+'.'+(r.failed.length?' Failed: '+r.failed.map(f=>f.name+' ('+f.error+')').join('; '):'')})};
+  $('svcTest').onclick=e=>run(e,'svcMsg',async()=>{const r=await post('/api/svc/test',{});return 'Sample sent to '+r.to+'. '+(r.waiting.length?'Right now '+r.waiting.length+' would get one: '+r.waiting.map(w=>w.tech+' ('+w.customer+')'+(w.email?'':' – no email')).join(', '):'Nobody has left a pool without submitting right now.')});
+  $('eodTest').onclick=e=>run(e,'eodMsg',async()=>{const r=await post('/api/eod/test',{});return 'Sample sent to '+r.to+'. '+(r.waiting.length?'Right now: '+r.waiting.map(w=>w.tech+' ('+w.n+')'+(w.email?'':' – no email')).join(', '):'Nobody has unsubmitted services right now.')});
+  tog('mailAuto','/api/mail/auto','mailMsg','On.');tog('smsAuto','/api/text/auto','smsMsg','On.');tog('svcAuto','/api/svc/auto','svcMsg','On.');tog('eodAuto','/api/eod/auto','eodMsg','On.')}
 
 // Email everyone who hasn't done this week's check-up, from your own email app (addresses come from POM users)
 document.addEventListener('click',async e=>{if(e.target.closest('#chkMailX')){$('chkMailBox').innerHTML='';return}if(!e.target.closest('#chkMail'))return;const box=$('chkMailBox');box.innerHTML='<div class="panel rp-add"><span class="muted">Checking who still needs to submit...</span></div>';
@@ -5030,11 +5061,12 @@ function renderRampUp(){if(!UP)return;
       :'<div class="empty">'+(g.length?'Nothing here.':'No fill-ups checked yet. The first check runs a few minutes after the server starts.')+'</div>')+'</div>'
     +'<aside><div class="panel rp-pan"><h3>Most “not near” fill-ups</h3>'+(top.length?top.map(([n,b])=>'<div class="ukrank"><div><b>'+esc(n)+'</b><small>'+b.n+' fill-up'+(b.n>1?'s':'')+' · '+money(b.amt)+'</small></div><i><b style="width:'+(b.n/tmx*100)+'%"></b></i></div>').join(''):'<div class="muted">Nobody yet.</div>')+'</div>'
     +'<div class="panel rp-pan"><h3>How it works</h3><p class="muted" style="margin:0;font-size:13px">For every gas charge on a Ramp card, the dashboard looks at where the card holder’s trucks were (Azuga) within 30 minutes. If the engine was off, it uses where the truck was parked. More than about 6–10 miles from the station is flagged. It also flags more gallons than the tank holds, and a second fill-up within a day with little driving.</p></div></aside></div>'}
+const upRem=(icon,title,on,how,who,when,actions)=>'<div class="rmc wide'+(on?' live':'')+'"><div class="rmh"><span class="rmi">'+icon+'</span><div><b>'+title+'</b><small>'+how+'</small></div>'+(on?'<span class="rmpill on">● On</span>':'<span class="rmpill off">Off</span>')+'</div><dl class="rmd"><dt>About</dt><dd>'+who+'</dd><dt>When</dt><dd>'+when+'</dd></dl><div class="rma">'+actions+'</div></div>';
 function renderUp(){const u=UP;if(!u)return;let h='';
   if(USEC==='oil'){const o=Array.isArray(u.oil)?u.oil.filter(upf):[],lab={due:'Due now',soon:'Due soon',ok:'OK',unknown:'No record'};
     $('upCount').textContent='Due every '+u.oilMiles.toLocaleString()+' miles or 6 months · last change comes from invoices saved in the truck notes';
     h=(u.oil.error?'<div class="empty">'+esc(u.oil.error)+'</div>':'')+kpis([[o.filter(x=>x.status==='due').length,'due now','bad'],[o.filter(x=>x.status==='soon').length,'due soon','warn'],[o.filter(x=>x.status==='ok').length,'up to date','good'],[o.filter(x=>x.status==='unknown').length,'no oil change on record']])
-     +'<div class="ukset"><label class="sw"><input type="checkbox" id="upOilOn"'+(u.settings.oil?' checked':'')+'><i></i>Email callum@millennialpools.com every Monday with the trucks that are due</label><button class="btn2" id="upOilTest">Send me a sample</button></div>'
+     +upRem('🛢️','Oil change reminder',u.settings.oil,'Email to callum@millennialpools.com (one per truck)','Every truck that is due (5,000 miles or 6 months)','Mondays at 8 AM','<label class="sw"><input type="checkbox" id="upOilOn"'+(u.settings.oil?' checked':'')+'><i></i>Send automatically</label><button class="btn2" id="upOilTest">Send me a sample</button>')
      +'<div class="ukg">'+o.map(x=>{const pct=x.since!==null?x.since/u.oilMiles*100:x.days!==null?x.days/183*100:0;
        return '<div class="ukc oil '+x.status+'"><div class="ukc-h"><div><b>'+esc(x.name)+'</b><small>'+esc(x.driver||'No driver')+'</small></div><span class="upill '+x.status+'">'+lab[x.status]+'</span></div>'
         +'<div class="ukc-big">'+(x.since!==null?'<b>'+x.since.toLocaleString()+'</b><span>miles since last change</span>':x.days!==null?'<b>'+x.days+'</b><span>days since last change'+(x.odoMismatch?' (odometer doesn’t match the invoice)':'')+'</span>':'<b class="muted">–</b><span>no oil change saved yet</span>')+'</div>'
@@ -5052,7 +5084,7 @@ function renderUp(){const u=UP;if(!u)return;let h='';
     const grp=(t,list,cls)=>list.length?'<h3 class="ukgh '+cls+'">'+t+' <i>'+list.length+'</i></h3><div class="ukg">'+list.map(card).join('')+'</div>':'';
     const lt=x=>Math.min(x.insLeft??1e4,x.regLeft??1e4);
     h=kpis([[r.filter(x=>soon(x.insLeft)).length,'insurance due in 30 days','bad'],[r.filter(x=>soon(x.regLeft)).length,'registrations due in 30 days','bad'],[r.filter(x=>!x.reg).length,'trucks with no registration date','warn'],[r.filter(x=>x.ins&&x.reg&&!need(x)).length,'all set','good']])
-     +'<div class="ukset"><label class="sw"><input type="checkbox" id="upRenOn"'+(u.settings.renew?' checked':'')+'><i></i>Email me 30 days before each one, with the card attached</label><button class="btn2" id="upRenRead"'+(u.ai?'':' disabled title="Needs ANTHROPIC_API_KEY"')+'>Read cards now</button><button class="btn2" id="upRenTest">Send due reminders now</button></div>'
+     +upRem('📄','Renewal reminder',u.settings.renew,'Email to callum@millennialpools.com with the card attached','Any truck whose insurance or registration runs out within 30 days','Checked every day from 8 AM · once per renewal','<label class="sw"><input type="checkbox" id="upRenOn"'+(u.settings.renew?' checked':'')+'><i></i>Send automatically</label><button class="btn2" id="upRenRead"'+(u.ai?'':' disabled title="Needs ANTHROPIC_API_KEY"')+'>Read cards now</button><button class="btn2" id="upRenTest">Send due reminders now</button>')
      +grp('Due in 30 days or expired',r.filter(need).sort((a,b)=>lt(a)-lt(b)),'bad')+grp('Missing a date',r.filter(miss),'warn')+grp('All set',r.filter(x=>!need(x)&&!miss(x)).sort((a,b)=>lt(a)-lt(b)),'good')}
   if(USEC==='saf'){$('upCount').textContent='Every Monday each driver gets their own score, rank and worst camera event of the week';
     h='<div class="saf"><div class="panel rp-pan"><h3>Weekly safety email</h3><label class="sw"><input type="checkbox" id="upSafOn"'+(u.settings.safety?' checked':'')+'><i></i>Send to every driver, Mondays at 8 AM</label>'
@@ -5075,7 +5107,7 @@ document.addEventListener('click',async e=>{const n=e.target.closest('#upNav [da
   if(id==='upSafTest')go('/api/upkeep/safety-sample',{name:$('upSafName').value.trim()},r=>{$('upSafMsg').textContent='Sent '+r.name+'’s email to '+r.to});
 });
 document.addEventListener('change',async e=>{const t=e.target,map={upOilOn:'oil',upRenOn:'renew',upSafOn:'safety'};
-  if(map[t.id]){try{UP.settings=await post('/api/upkeep/settings',{[map[t.id]]:t.checked})}catch(err){alert(err.message);t.checked=!t.checked}return}
+  if(map[t.id]){try{UP.settings=await post('/api/upkeep/settings',{[map[t.id]]:t.checked});renderUp()}catch(err){alert(err.message);t.checked=!t.checked}return}
   if(t.dataset&&t.dataset.ren){try{await post('/api/upkeep/renewal',{id:t.dataset.id,[t.dataset.ren]:t.value});const x=UP.renew.find(r=>r.id===t.dataset.id);x[t.dataset.ren+'Air']=t.value;if(!x[t.dataset.ren]||x[t.dataset.ren+'Src']!=='checkup'||t.value>x[t.dataset.ren]){x[t.dataset.ren]=t.value;x[t.dataset.ren+'Src']=t.value?'airtable':''}x[t.dataset.ren+'Left']=x[t.dataset.ren]?Math.round((Date.parse(x[t.dataset.ren]+'T12:00')-Date.now())/864e5):null;t.classList.add('saved');setTimeout(renderUp,700)}catch(err){alert(err.message)}}});
 // ---- Purchases tab: hardware-store receipts from Ramp, item by item, with season-end return status ----
 let BUY=null,BUYF='Out';
