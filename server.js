@@ -2939,7 +2939,7 @@ http.createServer(async (req, res) => {
   if (url.pathname === '/checkup') return serveCheckup(res, url.searchParams.get('id'));
   if (url.pathname === '/report') return serveReport(res, url.searchParams.get('driver') ? 'driver' : 'fleet', url.searchParams.get('driver'), base, false);
   const route = routes[url.pathname];
-  if (!route) { res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(PAGE); }
+  if (!route) { res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(PAGE_OUT); }
   try {
     const data = await route(url.searchParams);
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -2954,6 +2954,7 @@ http.createServer(async (req, res) => {
 
 const PAGE = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Fleet Dashboard · Millennial Pools</title>
+<script>(function(){var t;try{t=localStorage.getItem('theme')}catch(e){}document.documentElement.dataset.theme=t||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')})()</script>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -3703,7 +3704,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .rmc.wide{margin-bottom:14px}.rmc.wide .rma .sw{flex:1 1 auto}
 .dcon input{background:#f0f9ff}.dcon{position:relative}
 .ptbar{position:relative;height:10px;border-radius:6px;background:#f1f5f9}.ptbar i{position:absolute;inset:0 auto 0 0;border-radius:6px;background:linear-gradient(90deg,#22d3ee,#0e7490)}.ptbar em{position:absolute;top:-4px;bottom:-4px;width:2px;background:#0f172a;opacity:.55}
-.ptbad{color:#b91c1c;font-weight:700}.ptchg{font-size:12.5px;font-weight:700;border-radius:10px;padding:5px 9px}.ptchg.dn{background:#fff7ed;color:#c2410c}.ptchg.up{background:#ecfeff;color:#0e7490}.ptnote{font-size:12.5px;margin:-4px 0 12px}
+.ptbad{color:#b91c1c;font-weight:700}.ptjobs{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px;margin:-4px 0 14px;color:#64748b}.ptjobs em{font-style:normal;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:999px;padding:3px 10px;color:#334155}.ptjt{display:inline-block;margin-left:6px;font-size:11px;font-weight:700;background:#ede9fe;color:#6d28d9;border-radius:999px;padding:1px 8px}.ptchg{font-size:12.5px;font-weight:700;border-radius:10px;padding:5px 9px}.ptchg.dn{background:#fff7ed;color:#c2410c}.ptchg.up{background:#ecfeff;color:#0e7490}.ptnote{font-size:12.5px;margin:-4px 0 12px}
 .ptpools{display:grid;gap:8px}.ptp{display:grid;grid-template-columns:minmax(180px,1.4fr) 110px 2fr;gap:10px;align-items:center;background:#fff;border-radius:12px;padding:10px 14px;box-shadow:0 2px 8px rgba(15,23,42,.05)}.ptp small{display:block;color:#64748b;font-size:12px}.ptm b{font-size:17px;color:#0b4a63}.ptt{display:flex;flex-wrap:wrap;gap:5px}.ptt span{font-size:12px;background:#e0f2fe;color:#0b4a63;border-radius:10px;padding:2px 8px}
 @media(max-width:700px){.ptp{grid-template-columns:1fr auto}.ptt{grid-column:1/-1}}.ptus{color:#0e7490;font-weight:700}#pomNav{margin-right:10px}
 .rmhead{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;margin:4px 0 10px}.rmhead h3{margin:0;font-size:16px;color:#0b4a63}.rmhead .muted{font-size:12.5px}
@@ -3817,6 +3818,43 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .tcard.fin{position:relative}.tcard.fin::after{content:'🏆';position:absolute;right:-8px;top:-10px;width:34px;height:34px;display:grid;place-items:center;font-size:18px;border-radius:50%;background:linear-gradient(135deg,#fef3c7,#fbbf24);box-shadow:0 6px 14px -6px rgba(180,83,9,.7),0 0 0 3px #fff;animation:trophy .7s cubic-bezier(.2,.9,.3,1.5) both;animation-delay:calc(var(--i,0)*35ms + .3s)}
 @keyframes trophy{from{transform:scale(0) rotate(-40deg)}}
 @media (prefers-reduced-motion:reduce){.tcard.fin::after{animation:none}}
+
+.themebtn{margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:10px;border:0;background:rgba(255,255,255,.1);color:#e6f6fb;cursor:pointer}
+.themebtn:hover{background:rgba(255,255,255,.18)}.themebtn .i-sun,html[data-theme=dark] .themebtn .i-moon{display:none}html[data-theme=dark] .themebtn .i-sun{display:block}
+header .live{margin-left:8px!important}
+/* ===== v30: calm look. Same pool colours, no moving decorations, quieter cards, more room ===== */
+:root{--deck:#f3f6f8;--deck2:#e9eef1;--line:#e2e8ec;--line2:#d3dce2;--card:#fff;--r:14px;
+ --sh:0 1px 2px rgba(15,35,50,.05),0 2px 8px -4px rgba(15,35,50,.08)}
+body,body[data-v]{background:var(--deck)!important;background-image:none!important}
+body::before,body::after,#bubbles,.caus,.sun,.birds,#floaty,.hwave,.hwave.front,header::before,header::after{display:none!important}
+header,header[data-sky]{background:linear-gradient(100deg,#082a3d 0%,#0b4a63 60%,#0e6f8a 100%)!important;padding:12px 24px 0!important;box-shadow:none!important;border-bottom:0}
+header .brand{font-size:16px}
+header .logo,header .logo::after{animation:none!important}
+.brand>div:last-child{background:none!important;-webkit-background-clip:border-box!important;background-clip:border-box!important;color:#fff!important}
+.tabs a.reptab{background:none!important;-webkit-background-clip:border-box!important;background-clip:border-box!important;color:#fde68a!important}.tabs a.reptab .ti{color:#fde68a}
+.crewhead h2{background:none!important;-webkit-background-clip:border-box!important;background-clip:border-box!important}
+.tabs{background:transparent!important;border:0!important;box-shadow:none!important;padding:0!important;margin-top:4px;gap:2px;overflow-x:auto;scrollbar-width:none}
+.tabs .tabind{display:none!important}
+.tabs button{border-radius:10px 10px 0 0!important;padding:10px 14px 11px!important;color:rgba(226,244,250,.78)!important;background:transparent!important;box-shadow:none!important;font-weight:600}
+.tabs button:hover{color:#fff!important;background:rgba(255,255,255,.07)!important}
+.tabs button.on{background:var(--deck)!important;color:var(--poolInk)!important;font-weight:700}
+.tabs button.on::after,.tabs button::before{display:none!important}
+.live{background:rgba(255,255,255,.08)!important;border:0!important}
+.live .ekg{display:none}
+*,*::before,*::after{animation-duration:0s!important;animation-iteration-count:1!important}
+.dot,.pulse,.sk,.spin,.spinner,[class*=spin]{animation-duration:revert!important;animation-iteration-count:revert!important}
+.crewhead h2::after,h2::after{display:none!important}
+.crewhead h2{padding-bottom:0!important;color:var(--ink)!important;font-size:22px;letter-spacing:-.01em}
+body:not([data-v=vMap]):not([data-v=vEdit]) .bar{max-width:1240px;margin:0 auto}
+body[data-v=vCam]:not([data-v=vMap]) .bar{max-width:1400px}
+.tabs{flex-wrap:nowrap!important}.tabs button,.tabs a{white-space:nowrap;flex:0 0 auto}
+@media(max-width:700px){header,header[data-sky]{padding:10px 12px 0!important}.tabs button{padding:9px 11px 10px!important}.tabs .ti{display:none}}
+.bar{padding-top:18px}
+.search input,input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{border-radius:10px}
+/* cards: one soft border, no coloured top/side stripes */
+.ukc,.tcard,.rmc,.pt,.card,.panel,.box,.ptp,.dcard,.drow,.rcard,.chkc,.ev{box-shadow:var(--sh)!important}
+.ukc,.tcard,.rmc,.ptp{border:1px solid var(--line)!important;border-top-width:1px!important}
+.ukc::before,.tcard::before,.rmc::before{display:none!important}
 </style></head><body>
 <header>
  <div class="caus" aria-hidden="true"></div>
@@ -3826,6 +3864,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
  <div id="floaty" aria-hidden="true"></div>
  <svg class="hwave front" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 Q 75 0 150 14 T 300 14 T 450 14 T 600 14 T 750 14 T 900 14 T 1050 14 T 1200 14 T 1350 14 T 1500 14 T 1650 14 T 1800 14 T 1950 14 T 2100 14 T 2250 14 T 2400 14 V24 H0Z"/></svg>
  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M3 9c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0"/><path d="M3 15c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0" opacity=".6"/></svg></div><div>Millennial Pools<small>Fleet</small></div></div>
+ <button id="themeBtn" class="themebtn" type="button" title="Switch light / dark" aria-label="Switch between light and dark mode" onclick="var h=document.documentElement,t=h.dataset.theme==='dark'?'light':'dark';h.dataset.theme=t;try{localStorage.setItem('theme',t)}catch(e){}"><svg class="i-moon" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><svg class="i-sun" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
  <div class="live" id="live"><span class="dot"></span><svg class="ekg" viewBox="0 0 40 14" aria-hidden="true"><path d="M0 7h12l3-5 4 10 3-8 2 3h16"/></svg><span id="upd">Connecting to Azuga...</span></div>
  <nav class="tabs"><span class="tabind" aria-hidden="true"></span><button data-v="vMap" class="on"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Live map</button><button data-v="vEdit"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l2-5h11l3 5v4H3z"/><circle cx="7" cy="17" r="2"/><circle cx="16" cy="17" r="2"/></svg>Edit vehicles</button><button data-v="vDrv"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><circle cx="17" cy="9" r="2.4"/><path d="M15.5 14.6c2.8.2 5 2.1 5 5.4"/></svg>Drivers</button><button data-v="vPom"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M2 19.5c1.7 1.4 3.3 1.4 5 0s3.3-1.4 5 0 3.3 1.4 5 0 3.3-1.4 5 0"/><path d="M8 12V5a2 2 0 0 1 4 0M14 12V5a2 2 0 0 1 4 0M8 8h6"/></svg>Pools</button><button data-v="vChk"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12l2 2 4-4M9 17h6"/></svg>Truck check-ups</button><button data-v="vRep"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z"/></svg>Repairs</button><button data-v="vBuy"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>Ramp</button><button data-v="vUp"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="5"/><path d="M12 9.5V12l1.8 1.2"/></svg>Upkeep</button><button data-v="vCam"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3z"/></svg>Cameras</button><a class="reptab" href="/report" target="_blank" rel="noopener"><svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Score report</a></nav>
 </header>
@@ -5282,3 +5321,58 @@ document.addEventListener('click',e=>{const b=e.target.closest('#vRep [data-rt]'
 window.addEventListener('beforeunload',e=>{if(dirtyCount())e.preventDefault()});
 refresh();setInterval(refresh,30000);
 </script></body></html>`;
+
+const DARK_FIX = `html[data-theme=dark]{color-scheme:dark;--deck:#0d161d;--deck2:#131f28;--card:#141f28;--line:#24333f;--line2:#2e404d;
+ --ink:#e4ebf0;--ink2:#b7c5cf;--muted:#8d9eab;--shallow:#123441;--shallow2:#174556;--poolInk:#5fd3ea;--pool:#22b8d4;
+ --go:#6ee7a0;--goBg:#123524;--idle:#a9b6c0;--idleBg:#1c2a34;--warn:#fbbf6a;--warnBg:#3a2a12;--bad:#fca5a5;--badBg:#3d1b1b;
+ --coralBg:#3a1f1b;--sunBg:#382c12;--grapeBg:#271f3d;--leafBg:#123524;--sh:0 0 0 1px rgba(0,0,0,.25),0 2px 8px -4px rgba(0,0,0,.5)}
+html[data-theme=dark] body{background:var(--deck)!important}
+html[data-theme=dark] header{background:linear-gradient(100deg,#06141d 0%,#0a2a3a 60%,#0b3e50 100%)!important}
+html[data-theme=dark] .tabs button.on{background:var(--deck)!important;color:#7fe0f2!important}
+html[data-theme=dark] .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.85) contrast(.9) saturate(.5)}
+html[data-theme=dark] .leaflet-container{background:#0d161d}
+html[data-theme=dark] img:not(.leaflet-tile){filter:brightness(.92)}
+html[data-theme=dark] input,html[data-theme=dark] select,html[data-theme=dark] textarea{background:#101a22;color:var(--ink);border-color:var(--line2)}
+html[data-theme=dark] ::placeholder{color:#6f808c}
+html[data-theme=dark] [style*="background:#fff"],html[data-theme=dark] [style*="background: #fff"],html[data-theme=dark] [style*="background:white"]{background:var(--card)!important}
+html[data-theme=dark] [style*="color:#0f172a"],html[data-theme=dark] [style*="color:#334155"],html[data-theme=dark] [style*="color:#1e293b"]{color:var(--ink)!important}
+html[data-theme=dark] [style*="color:#64748b"],html[data-theme=dark] [style*="color:#475569"]{color:var(--muted)!important}
+`;
+// Dark mode: built once at startup from the page's own CSS, so every existing (and future) rule gets a dark version.
+// Light backgrounds become dark surfaces, light borders become dim lines, dark text becomes light; accents stay.
+function darkCss(css) {
+  const hsl = (r, g, b) => { r /= 255; g /= 255; b /= 255; const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, d = mx - mn;
+    if (!d) return [0, 0, l]; const s = d / (1 - Math.abs(2 * l - 1)), h = mx === r ? ((g - b) / d + 6) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; return [h * 60, s, l]; };
+  const out = (h, s, l, a) => 'hsl(' + Math.round(h) + ' ' + Math.round(s * 100) + '% ' + Math.round(l * 100) + '%' + (a < 1 ? ' / ' + a : '') + ')';
+  const shift = (kind, h, s, l, a) => {
+    if (kind === 'tx') return l < 0.6 ? out(h, Math.min(s, 0.75), 0.93 - l * 0.6, a) : null;
+    if (l < (s > 0.3 ? 0.7 : 0.78)) return null;   // accents, buttons and dark panels already work on a dark page
+    if (kind === 'bd') return s > 0.3 ? out(h, Math.min(s, 0.4), 0.3, a) : out(s < 0.15 ? 205 : h, 0.2, 0.22 + (1 - l) * 0.3, a);
+    return s > 0.3 && l < 0.985 ? out(h, Math.min(s, 0.32), 0.16, a) : out(s < 0.15 ? 205 : h, s < 0.15 ? 0.22 : Math.min(s, 0.25), 0.135 - (1 - l) * 0.4, a);
+  };
+  const COL = /#([0-9a-f]{8}|[0-9a-f]{6}|[0-9a-f]{3})\b|rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)|\b(white)\b/gi;
+  const conv = (kind, v) => { let hit = false; const r = v.replace(COL, (m, hex, R, G, B, A, w) => {
+      let c, a = 1;
+      if (w) c = [255, 255, 255];
+      else if (hex) { const x = hex.length === 3 ? hex.split('').map(q => q + q).join('') : hex; c = [0, 2, 4].map(i => parseInt(x.slice(i, i + 2), 16)); if (x.length === 8) a = Math.round(parseInt(x.slice(6), 16) / 2.55) / 100; }
+      else { c = [+R, +G, +B]; if (A) a = A.endsWith('%') ? parseFloat(A) / 100 : +A; }
+      const n = shift(kind, ...hsl(...c), a); if (n) hit = true; return n || m; });
+    return hit ? r : null; };
+  const kindOf = p => /^(color|fill|stroke|caret-color|-webkit-text-fill-color|text-decoration-color)$/.test(p) ? 'tx' : /^(border|outline)/.test(p) ? 'bd' : /^background/.test(p) ? 'bg' : null;
+  const pre = sel => sel.split(/,(?![^(]*\))/).map(x => { x = x.trim(); return /^(:root|html)\b/.test(x) ? x.replace(/^(:root|html)/, ':where(html[data-theme=dark])') : ':where(html[data-theme=dark]) ' + x; }).join(',');   // :where keeps each rule's own weight
+  let res = '', i = 0;
+  const walk = (src) => { let o = '', re = /([^{}]+)\{([^{}]*)\}|(@media[^{]+)\{|(@(?:-webkit-)?keyframes[^{]+)\{|\}/g, m, depth = [];
+    while ((m = re.exec(src))) {
+      if (m[3]) { depth.push('m'); o += m[3] + '{'; continue; }
+      if (m[4]) { let d = 1, j = re.lastIndex; while (d && j < src.length) { if (src[j] === '{') d++; else if (src[j] === '}') d--; j++; } re.lastIndex = j; continue; }   // skip animations
+      if (!m[1]) { if (depth.pop()) o += '}'; continue; }
+      const sel = m[1].trim(); if (!sel || sel.startsWith('@') || /background-clip:\s*text/.test(m[2])) continue;
+      const decl = m[2].split(/;(?![^(]*\))/).map(d => { const k = d.indexOf(':'); if (k < 0) return null; const p = d.slice(0, k).trim().toLowerCase(), v = d.slice(k + 1).trim(), kd = kindOf(p);
+        const n = kd && conv(kd, v); return n ? p + ':' + n : null; }).filter(Boolean);
+      if (decl.length) o += pre(sel) + '{' + decl.join(';') + '}';
+    }
+    return o.replace(/@media[^{]+\{\}/g, ''); };
+  return walk(css.replace(/\/\*[\s\S]*?\*\//g, ''));
+}
+const PAGE_OUT = (() => { try { const a = PAGE.indexOf('<style>') + 7, b = PAGE.indexOf('</style></head><body>');
+  return PAGE.slice(0, b) + '\n/* generated dark mode */\n' + darkCss(PAGE.slice(a, b)) + '\n' + DARK_FIX + PAGE.slice(b); } catch (e) { console.error('Dark mode CSS:', e.message); return PAGE; } })();
