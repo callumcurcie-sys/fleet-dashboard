@@ -185,7 +185,7 @@ const routes = {
     return { connected: true, ramp, trucks: at.trucks.map(t => ({ id: t.id, truckNo: t.truckNo, desc: [t.year, t.make, t.model].filter(Boolean).join(' '),
       driver: t.driver ? t.driver.name : '', notes: t.notes })) }; },
   '/api/pom/stops': async () => { if (!clean(process.env.POM_API_KEY)) return { connected: false };
-    return { connected: true, day: etDay().ymd, stops: (await pomToday()).map(pomStop).filter(s => s.tech && !pomCheckup(s) && s.lat && s.lng) }; },
+    return { connected: true, day: etDay().ymd, stops: (await withCoords((await pomToday()).map(pomStop).filter(s => s.tech && !pomCheckup(s)))).filter(s => s.lat && s.lng) }; },
   '/api/pom/debug': async () => { const { start, end } = etDay();   // behind the dashboard login: what POM sends back, for setting this up
     try { const all = await pomToday(); return { auth: pomAuth, day: etDay().ymd, start, end, count: all.length, techs: [...new Set(all.map(a => pomStop(a).tech))], statuses: [...new Set(all.map(a => a.status + ' / ' + (a.serviceStatus && a.serviceStatus.name)))], sample: all.slice(0, 2) }; }
     catch (e) { return { error: e.message }; } },
@@ -1049,19 +1049,19 @@ const miles = (a, b) => { const R = 3958.8, r = Math.PI / 180, dl = (b.lat - a.l
   return 2 * R * Math.asin(Math.sqrt(Math.sin(dl / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dn / 2) ** 2)); };
 // POM addresses are sometimes off (or have no map pin), so: look close first (~500 ft), then widen (~0.3 mi),
 // then fall back to Azuga's own street address for each breadcrumb (same street, house number within 100).
-const AT_POOL_MI = [0.1, 0.3];
+const AT_POOL_MI = [0.1, 0.3, +process.env.POOL_WIDE_MI || 0.75];   // big sites (schools, apartment complexes) park far from the address pin: last ring needs a real stop
 const SUFFIX = { road: 'rd', street: 'st', avenue: 'ave', av: 'ave', drive: 'dr', lane: 'ln', court: 'ct', place: 'pl', boulevard: 'blvd', circle: 'cir', terrace: 'ter', parkway: 'pkwy', highway: 'hwy', route: 'rt' };
 const streetOf = a => { const m = String(a || '').toLowerCase().split(',')[0].replace(/[.#]/g, '').match(/^(\d+)[a-z]?\s+(.+)$/);
   return m ? { n: +m[1], st: m[2].split(/\s+/).map(w => SUFFIX[w] || w).join(' ') } : null; };
 // Arrived = the first ignition-off (or first stop) at the property; left = the last breadcrumb there before driving away.
 function visitAt(stop, pts) {
   const home = streetOf(stop.address), tests = [];
-  if (stop.lat && stop.lng) for (const r of AT_POOL_MI) tests.push({ at: p => miles(p, stop) <= r, how: r > AT_POOL_MI[0] ? 'wide' : '' });
+  if (stop.lat && stop.lng) AT_POOL_MI.forEach((r, i) => tests.push({ at: p => miles(p, stop) <= r, how: r > AT_POOL_MI[0] ? 'wide' : '', far: i === AT_POOL_MI.length - 1 }));
   if (home) tests.push({ at: p => { const x = streetOf(p.addr); return x && x.st === home.st && Math.abs(x.n - home.n) <= 100; }, how: 'addr' });
-  for (const { at, how } of tests) {
+  for (const { at, how, far } of tests) {
     const runs = []; let run = null;
     for (const p of pts) { if (at(p)) { if (!run) runs.push(run = []); run.push(p); } else run = null; }
-    const real = runs.filter(x => x[x.length - 1].t - x[0].t >= 2 * 60e3);
+    const real = runs.filter(x => x[x.length - 1].t - x[0].t >= (far ? 5 : 2) * 60e3 && (!far || x.some(p => p.mph === 0 || /ignition\s*off|engine\s*off|stop/i.test(p.ev))));
     if (!real.length) continue;
     const best = real.sort((a, b) => (b[b.length - 1].t - b[0].t) - (a[a.length - 1].t - a[0].t))[0];
     const off = best.find(p => /ignition\s*off|engine\s*off|stop/i.test(p.ev)) || best.find(p => p.mph === 0) || best[0];
@@ -1072,8 +1072,26 @@ function visitAt(stop, pts) {
   }
   return null;
 }
+// POM has no map pin for some properties (GCIT): look the street address up once (OpenStreetMap) and keep it
+const NOM = q => fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=' + encodeURIComponent(q), { headers: { 'User-Agent': 'MillennialPools-FleetDashboard/1.0' } })
+  .then(r => r.ok ? r.json() : []).then(j => j[0] ? { lat: +j[0].lat, lng: +j[0].lon } : null).catch(() => null);
+const ABBR = { rd: 'Road', st: 'Street', ave: 'Avenue', av: 'Avenue', dr: 'Drive', ln: 'Lane', blvd: 'Boulevard', ct: 'Court', pl: 'Place', pkwy: 'Parkway', hwy: 'Highway', cir: 'Circle', ter: 'Terrace', tpke: 'Turnpike' };
+async function geoAddr(a, name) {
+  const g = (cache.get('geo') || {}).data || {}, k = 'addr:' + clean(a).toLowerCase();
+  if (k in g) return g[k];
+  const parts = clean(a).split(',').map(x => x.trim()), street = (parts[0] || '').replace(/\b([A-Za-z]+)\.?$/, (m, w) => ABBR[w.toLowerCase()] || w), state = parts[parts.length - 1] || 'NJ';
+  // OpenStreetMap misses some spellings ("Rd", a mailing town like Sewell): try the address a few ways, then the property's name
+  const tries = [a, street + ', ' + state + ', USA', [street, ...parts.slice(1)].join(', '), name ? name + ', ' + state : ''].filter((q, i, l) => q && l.indexOf(q) === i);
+  let hit = null;
+  for (const q of tries) { await sleep(1100); hit = await NOM(q); if (hit) break; }   // one lookup a second
+  g[k] = hit; cache.set('geo', { data: g, t: Date.now() }); saveSnap('geo', g); return hit;
+}
+async function withCoords(stops) {
+  for (const s of stops) if ((!s.lat || !s.lng) && s.address) { const c = await geoAddr(s.address, s.customer); if (c) { s.lat = c.lat; s.lng = c.lng; s.geo = true; } }
+  return stops;
+}
 async function visitsFor(name, ymd) {
-  const { tech, stops } = await pomStopsFor(name, ymd);
+  const { tech, stops } = await pomStopsFor(name, ymd); await withCoords(stops);
   if (!tech) return { tech: null, date: ymd, stops: [] };
   const td = await truckDrivers(), trucks = Object.keys(td).filter(v => dupeName(td[v] || '') === dupeName(name));
   const d = etDay(new Date(ymd + 'T16:00:00Z')), past = ymd !== etDay().ymd;
@@ -3883,7 +3901,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
  <div class="panel roster" id="drvRows"><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div><div class="rrow"><div class="mav sk" style="height:36px;width:36px;border-radius:50%"></div><div style="flex:1"><div class="sk" style="width:30%"></div><div class="sk" style="width:20%"></div></div></div></div>
 </div>
 <div id="vPom" hidden>
- <div class="crewhead"><div><h2>Pool routes</h2><p id="pbCount" class="muted">Loading today&rsquo;s schedule from Pool Office Manager...</p></div><span style="flex:1"></span>
+ <div class="crewhead"><div><h2>Pools</h2><p id="pbCount" class="muted">Loading today&rsquo;s schedule from Pool Office Manager...</p></div><span style="flex:1"></span>
   <div class="rnav" id="pomNav"><button data-ps="routes" class="on">Today’s routes</button><button data-ps="time">Time at pools</button></div><label class="pbdate" id="pbDateL">Day <input type="date" id="pbDate"></label></div>
  <div id="psRoutes"><div id="pbSum"></div><div id="pbList" class="tgrid"></div></div>
  <div id="psTime" hidden></div>
