@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist2', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv', 'upkeep', 'gasChk2', 'geo', 'camSync', 'visDays']);
+const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist2', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv', 'upkeep', 'gasChk2', 'geo', 'camSync', 'visDays2']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -2785,7 +2785,7 @@ const AT_VIS = 'tbluerTi9eXWDU9if', VIS = { name: 'fld7U3SsUZ30RoXVQ', key: 'fld
   mins: 'fldSuhmwtaTpO1Zbu', arr: 'fldIU9Ztb7NYqKLTs', left: 'fldV6xyN3FhXA4vGe', type: 'fld3jdlrXTrtIQrqi', status: 'fldO9Ry5EsIr8aRoK', truck: 'fldPSpFIs806AL36b' };
 const VIS_DAYS = +process.env.VISIT_BACKFILL_DAYS || 90;   // how far back to work out visits from GPS history
 const VIS_MIN = 2, VIS_MAX = 240;   // a truck there under 2 min drove past; over 4 h is a parked truck, not a service
-const visState = () => (cache.get('visDays') || {}).data || { days: [] };
+const visState = () => (cache.get('visDays2') || {}).data || { days: [] };   // v2: redone once with the wider ring + address lookups
 let visBusy = false;
 async function logVisitDay(ymd) {
   const { start, end } = etDay(new Date(ymd + 'T16:00:00Z')), inDay = s => { const t = Date.parse(s.time); return t >= +start && t <= +end; };
@@ -2812,31 +2812,34 @@ async function visitBackfill(max = 3) {
     for (let i = 1; i <= VIS_DAYS && n < max; i++) {
       const ymd = etDay(new Date(Date.now() - i * 864e5)).ymd; if (done.has(ymd)) continue; n++;
       const c = await logVisitDay(ymd); done.add(ymd); cache.delete('visAll'); cache.delete('poolTime');
-      const ns = { days: [...done].sort().slice(-(VIS_DAYS + 10)) }; cache.set('visDays', { data: ns, t: Date.now() }); saveSnap('visDays', ns);
+      const ns = { days: [...done].sort().slice(-(VIS_DAYS + 10)) }; cache.set('visDays2', { data: ns, t: Date.now() }); saveSnap('visDays2', ns);
       console.log(new Date().toISOString(), 'Pool visits logged for', ymd + ':', c);
     }
   } catch (e) { console.error('Pool visits:', e.message); } finally { visBusy = false; }
 }
 if (process.argv[2] !== 'test') { setTimeout(() => visitBackfill(), 7 * 60e3); setInterval(() => visitBackfill(), 20 * 60e3); }
-const allVisits = () => cached('visAll', 1800, async () => (await atAll(AT_VIS, [VIS.date, VIS.tech, VIS.pool, VIS.addr, VIS.mins, VIS.arr, VIS.status])).map(r => { const f = r.fields;
-  return { d: f[VIS.date] || '', tech: f[VIS.tech] || '', pool: f[VIS.pool] || '', addr: f[VIS.addr] || '', m: +f[VIS.mins] || 0, a: f[VIS.arr] || '', done: ((f[VIS.status] && f[VIS.status].name) || f[VIS.status]) === 'Done' }; }));
+const allVisits = () => cached('visAll', 1800, async () => (await atAll(AT_VIS, [VIS.date, VIS.tech, VIS.pool, VIS.addr, VIS.mins, VIS.arr, VIS.status, VIS.type])).map(r => { const f = r.fields;
+  return { d: f[VIS.date] || '', tech: f[VIS.tech] || '', pool: f[VIS.pool] || '', addr: f[VIS.addr] || '', m: +f[VIS.mins] || 0, a: f[VIS.arr] || '', t: f[VIS.type] || '', done: ((f[VIS.status] && f[VIS.status].name) || f[VIS.status]) === 'Done' }; }));
+// Only regular tech visits set a tech's average; winterizing, closing crew, check-ups, repairs etc. take a different amount of time
+const isTechVisit = x => !x.t || /tech\s*visit/i.test(x.t);
 const visAgg = (list, key) => { const g = {}; list.forEach(x => (g[x[key]] = g[x[key]] || []).push(x));
   return Object.entries(g).map(([k, xs]) => { const ms = xs.map(x => x.m).sort((a, b) => a - b), tot = ms.reduce((a, b) => a + b, 0);
     return { name: k, n: xs.length, avg: Math.round(tot / ms.length), med: ms[Math.floor(ms.length / 2)], short: xs.filter(x => x.m < 8).length, total: tot, days: new Set(xs.map(x => x.d)).size }; }); };
 routes['/api/pools/time'] = async q => {
   const days = Math.max(1, Math.min(400, +q.get('days') || 30)), since = etDay(new Date(Date.now() - days * 864e5)).ymd;
   return cached('poolTime:' + days, 600, async () => {
-    const all = (await allVisits()).filter(x => x.tech && x.m >= VIS_MIN && x.m <= VIS_MAX), v = all.filter(x => x.d >= since);
+    const every = (await allVisits()).filter(x => x.tech && x.m >= VIS_MIN && x.m <= VIS_MAX), all = every.filter(isTechVisit), vAll = every.filter(x => x.d >= since), v = vAll.filter(isTechVisit), other = vAll.filter(x => !isTechVisit(x));
     const base = Object.fromEntries(visAgg(all, 'tech').map(t => [t.name, t]));   // every visit on record: the average to expect going forward
     const techs = visAgg(v, 'tech').map(t => ({ ...t, perDay: Math.round(t.n / Math.max(1, t.days) * 10) / 10, allAvg: base[t.name] ? base[t.name].avg : t.avg, allN: base[t.name] ? base[t.name].n : t.n,
       pools: visAgg(v.filter(x => x.tech === t.name), 'pool').sort((a, b) => b.n - a.n).slice(0, 25),
-      recent: v.filter(x => x.tech === t.name).sort((a, b) => b.a.localeCompare(a.a)).slice(0, 30).map(x => ({ d: x.d, a: x.a, pool: x.pool, m: x.m, done: x.done })) })).sort((a, b) => b.n - a.n);
+      jobs: visAgg(other.filter(x => x.tech === t.name), 't').sort((a, b) => b.n - a.n),
+      recent: vAll.filter(x => x.tech === t.name).sort((a, b) => b.a.localeCompare(a.a)).slice(0, 30).map(x => ({ d: x.d, a: x.a, pool: x.pool, m: x.m, done: x.done, t: isTechVisit(x) ? '' : x.t })) })).sort((a, b) => b.n - a.n);
     const pools = visAgg(v, 'pool').map(p => ({ ...p, addr: (v.find(x => x.pool === p.name) || {}).addr || '', techs: visAgg(v.filter(x => x.pool === p.name), 'tech').map(t => ({ name: t.name, avg: t.avg, n: t.n })).sort((a, b) => b.n - a.n) })).sort((a, b) => b.n - a.n).slice(0, 400);
     return { days, since, visits: v.length, fleetAvg: v.length ? Math.round(v.reduce((a, x) => a + x.m, 0) / v.length) : 0, logged: visState().days.length, backfill: VIS_DAYS,
-      oldest: all.reduce((m, x) => x.d && x.d < m ? x.d : m, '9999'), techs, pools };
+      oldest: every.reduce((m, x) => x.d && x.d < m ? x.d : m, '9999'), jobs: visAgg(other, 't').sort((a, b) => b.n - a.n), techs, pools };
   });
 };
-routes['/api/pools/averages'] = async () => ({ techs: Object.fromEntries(visAgg((await allVisits()).filter(x => x.tech && x.m >= VIS_MIN && x.m <= VIS_MAX), 'tech').map(t => [t.name, { avg: t.avg, n: t.n }])) });
+routes['/api/pools/averages'] = async () => ({ techs: Object.fromEntries(visAgg((await allVisits()).filter(x => x.tech && x.m >= VIS_MIN && x.m <= VIS_MAX && isTechVisit(x)), 'tech').map(t => [t.name, { avg: t.avg, n: t.n }])) });
 
 // Azuga's camera storage only serves files to pages on azuga.com, so the server fetches them
 // and passes them through. Locked to Azuga's recording bucket so it can't fetch anything else.
@@ -4765,8 +4768,9 @@ const mins=m=>m>=60?Math.floor(m/60)+' h '+(m%60)+' min':m+' min';
 function renderPoolTime(){const r=PT;if(!r)return;const q=$('q').value.trim().toLowerCase(),fa=r.fleetAvg||1;
   const T=r.techs.filter(t=>!q||t.name.toLowerCase().includes(q)),P=r.pools.filter(p=>!q||(p.name+' '+p.addr).toLowerCase().includes(q));
   const prog=r.logged<r.backfill?'<p class="muted ptnote">Still working back through GPS history: '+r.logged+' of '+r.backfill+' days done so far (a few days every 20 minutes). New days are added each morning.</p>':'';
-  let h=kpis([[r.visits.toLocaleString(),'pool visits in the last '+r.days+' days'],[mins(r.fleetAvg),'average time at a pool'],[T.length,'techs'],[r.oldest&&r.oldest!=='9999'?fdate(r.oldest):'–','tracked since']])
-   +'<div class="ukbar">'+chips('pd',String(PTD),[['7','7 days'],['30','30 days'],['90','90 days'],['365','Year']])+'<span style="flex:1"></span>'+chips('pv',PTV,[['techs','By tech'],['pools','By pool']])+'</div>'+prog;
+  let h=kpis([[r.visits.toLocaleString(),'tech visits in the last '+r.days+' days'],[mins(r.fleetAvg),'average tech visit'],[T.length,'techs'],[r.oldest&&r.oldest!=='9999'?fdate(r.oldest):'–','tracked since']])
+   +'<div class="ukbar">'+chips('pd',String(PTD),[['7','7 days'],['30','30 days'],['90','90 days'],['365','Year']])+'<span style="flex:1"></span>'+chips('pv',PTV,[['techs','By tech'],['pools','By pool']])+'</div>'+prog
+   +((r.jobs||[]).length?'<div class="ptjobs"><span>Not counted in the averages:</span>'+r.jobs.map(j=>'<em title="'+j.n+' jobs, '+j.avg+' min on average">'+esc(j.name)+' <b>'+j.n+'</b> · '+j.avg+'m</em>').join('')+'</div>':'');
   if(PTV==='techs'){const mx=Math.max(1,...T.map(t=>t.avg));
     h+=T.length?'<div class="ukg">'+T.map(t=>{const d=t.avg-t.allAvg,vf=Math.round((t.avg/fa-1)*100),sh=Math.round(t.short/Math.max(1,t.n)*100);
       return '<div class="ukc pt'+(sh>=25?' hot':'')+'"><div class="ukc-h"><div><b>'+esc(t.name)+'</b><small>'+t.n+' visits · '+t.days+' days · ~'+t.perDay+' pools a day</small></div></div>'
@@ -4775,7 +4779,8 @@ function renderPoolTime(){const r=PT;if(!r)return;const q=$('q').value.trim().to
        +'<div class="ukc-f"><span>Middle visit '+t.med+' min</span><span>Usual (all visits): <b>'+t.allAvg+' min</b></span>'+(t.short?'<span class="'+(sh>=25?'ptbad':'')+'">'+t.short+' under 8 min</span>':'')+'</div>'
        +(Math.abs(d)>=3&&t.allN>t.n?'<div class="ptchg '+(d<0?'dn':'up')+'">'+(d<0?'▼ ':'▲ ')+Math.abs(d)+' min '+(d<0?'shorter':'longer')+' than usual lately</div>':'')
        +'<details class="ukd"><summary>Pools and recent visits</summary><div class="bd"><h4>Their pools <span>avg · visits</span></h4>'+t.pools.map(p=>'<div class="bdr"><div><b>'+esc(p.name||'Pool')+'</b></div><b>'+p.avg+' min · '+p.n+'</b></div>').join('')
-       +'<h4>Recent visits</h4>'+t.recent.map(x=>'<div class="bdr"><div><b>'+esc(x.pool||'Pool')+'</b><small>'+fdate(x.d)+(x.a?' · arrived '+new Date(x.a).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'')+(x.done?'':' · not submitted in POM')+'</small></div><b class="'+(x.m<8?'ptbad':'')+'">'+mins(x.m)+'</b></div>').join('')+'</div></details></div>'}).join('')+'</div>'
+       +((t.jobs||[]).length?'<h4>Other jobs <span>not in their average</span></h4>'+t.jobs.map(j=>'<div class="bdr"><div><b>'+esc(j.name)+'</b></div><b>'+j.avg+' min · '+j.n+'</b></div>').join(''):'')
+       +'<h4>Recent visits</h4>'+t.recent.map(x=>'<div class="bdr"><div><b>'+esc(x.pool||'Pool')+'</b>'+(x.t?'<span class="ptjt">'+esc(x.t)+'</span>':'')+'<small>'+fdate(x.d)+(x.a?' · arrived '+new Date(x.a).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'')+(x.done?'':' · not submitted in POM')+'</small></div><b class="'+(x.m<8&&!x.t?'ptbad':'')+'">'+mins(x.m)+'</b></div>').join('')+'</div></details></div>'}).join('')+'</div>'
      :'<div class="empty">'+(r.logged?'No pool visits found for this range yet.':'No visits logged yet. The first days of GPS history are being worked out now; check back in a few minutes.')+'</div>'}
   else h+=P.length?'<div class="ptpools">'+P.map(p=>'<div class="ptp"><div><b>'+esc(p.name||'Pool')+'</b><small>'+esc(p.addr)+'</small></div><div class="ptm"><b>'+p.avg+' min</b><small>'+p.n+' visit'+(p.n>1?'s':'')+'</small></div><div class="ptt">'+p.techs.map(t=>'<span title="'+t.n+' visits">'+esc(t.name.split(' ')[0])+' '+t.avg+'m</span>').join('')+'</div></div>').join('')+'</div>':'<div class="empty">No pools match.</div>';
   $('psTime').innerHTML=h}
