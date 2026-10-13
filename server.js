@@ -1329,10 +1329,11 @@ async function checkBounces(st) {
 }
 // ---- Texts (Textedly). Key in Render as TEXTEDLY_API_KEY. Check-up reminder texts go once a day per person (the Bronze plan has 1,000 texts a month).
 const TXT_KEY = () => clean(process.env.TEXTEDLY_API_KEY), TXT_BASE = clean(process.env.TEXTEDLY_BASE) || 'https://application.textedly.com/api-v2/v1';
+const TXT_FROM = () => '+1' + (clean(process.env.TEXTEDLY_FROM) || '8777939510').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');   // the account's main number in Textedly
 async function sendText(to, message) {
   if (!TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.');
   if (!/^\+1\d{10}$/.test(to)) throw new Error('Not a US mobile number: ' + to);
-  const r = await fetch(TXT_BASE + '/messages', { method: 'POST', headers: { Authorization: 'Bearer ' + TXT_KEY(), 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ to, message: message.slice(0, 600) }) });
+  const r = await fetch(TXT_BASE + '/messages', { method: 'POST', headers: { Authorization: 'Bearer ' + TXT_KEY(), 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ to, from: TXT_FROM(), message: message.slice(0, 600) }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error('Textedly ' + r.status + ': ' + String(j.message || j.error || j.detail || JSON.stringify(j)).slice(0, 200));
   return j;
