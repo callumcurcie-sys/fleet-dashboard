@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist2', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv', 'upkeep', 'gasChk2', 'geo', 'camSync']);
+const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist2', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv', 'upkeep', 'gasChk2', 'geo', 'camSync', 'visDays']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -2762,6 +2762,64 @@ async function syncCameras() {
 }
 if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) { setTimeout(() => syncCameras(), 4 * 60e3); setInterval(() => syncCameras(), 60 * 60e3); }
 routes['/api/cameras/sync-status'] = () => ({ busy: camBusy, ...camState(), keys: undefined });
+// ---------------- Pool visits: time each tech's truck spent at each scheduled pool (Azuga GPS), one row per visit in Airtable "Pool visits" ----------------
+const AT_VIS = 'tbluerTi9eXWDU9if', VIS = { name: 'fld7U3SsUZ30RoXVQ', key: 'fldmStwClNSwxbLdo', date: 'fldRQTn65zhEhoMoX', tech: 'fldFiwsaOtyQlSx4F', pool: 'fld9sewnDCen43WoB', addr: 'fldbs4X1HGDnuBNEA',
+  mins: 'fldSuhmwtaTpO1Zbu', arr: 'fldIU9Ztb7NYqKLTs', left: 'fldV6xyN3FhXA4vGe', type: 'fld3jdlrXTrtIQrqi', status: 'fldO9Ry5EsIr8aRoK', truck: 'fldPSpFIs806AL36b' };
+const VIS_DAYS = +process.env.VISIT_BACKFILL_DAYS || 90;   // how far back to work out visits from GPS history
+const VIS_MIN = 2, VIS_MAX = 240;   // a truck there under 2 min drove past; over 4 h is a parked truck, not a service
+const visState = () => (cache.get('visDays') || {}).data || { days: [] };
+let visBusy = false;
+async function logVisitDay(ymd) {
+  const { start, end } = etDay(new Date(ymd + 'T16:00:00Z')), inDay = s => { const t = Date.parse(s.time); return t >= +start && t <= +end; };
+  const techs = [...new Set((await pomDay(ymd)).map(pomStop).filter(s => !pomCheckup(s) && s.tech && inDay(s)).map(s => s.tech))];
+  const L = (await atLinks()).links || {}, recs = [];
+  for (const tech of techs) {
+    const v = await visitsFor(tech, ymd).catch(() => null); if (!v || !v.trucks || !v.trucks.length) continue;
+    const tk = v.trucks.map(id => L[id] && L[id].linked ? L[id].truck.id : null).filter(Boolean)[0];
+    for (const s of v.stops) {
+      if (!s.visit || !inDay(s)) continue;
+      recs.push({ fields: { [VIS.name]: (s.customer || 'Pool') + ' · ' + tech + ' · ' + ymd, [VIS.key]: s.id + '|' + ymd, [VIS.date]: ymd, [VIS.tech]: tech, [VIS.pool]: s.customer || '', [VIS.addr]: s.address || '',
+        [VIS.mins]: s.visit.mins, [VIS.arr]: new Date(s.visit.arrive).toISOString(), [VIS.left]: new Date(s.visit.leave).toISOString(), [VIS.type]: s.type || '', [VIS.status]: s.done ? 'Done' : 'Not done', ...(tk ? { [VIS.truck]: [tk] } : {}) } });
+    }
+    await sleep(500);
+  }
+  for (let i = 0; i < recs.length; i += 10) { await airtable(AT_VIS, { method: 'PATCH', body: JSON.stringify({ performUpsert: { fieldsToMergeOn: [VIS.key] }, typecast: true, records: recs.slice(i, i + 10) }) }); await sleep(250); }
+  return recs.length;
+}
+// Works back from yesterday a few days per run until VIS_DAYS are logged; each new day is added the morning after
+async function visitBackfill(max = 3) {
+  if (visBusy || !AIRTABLE_TOKEN || !clean(process.env.POM_API_KEY)) return; visBusy = true;
+  try {
+    const done = new Set(visState().days); let n = 0;
+    for (let i = 1; i <= VIS_DAYS && n < max; i++) {
+      const ymd = etDay(new Date(Date.now() - i * 864e5)).ymd; if (done.has(ymd)) continue; n++;
+      const c = await logVisitDay(ymd); done.add(ymd); cache.delete('visAll'); cache.delete('poolTime');
+      const ns = { days: [...done].sort().slice(-(VIS_DAYS + 10)) }; cache.set('visDays', { data: ns, t: Date.now() }); saveSnap('visDays', ns);
+      console.log(new Date().toISOString(), 'Pool visits logged for', ymd + ':', c);
+    }
+  } catch (e) { console.error('Pool visits:', e.message); } finally { visBusy = false; }
+}
+if (process.argv[2] !== 'test') { setTimeout(() => visitBackfill(), 7 * 60e3); setInterval(() => visitBackfill(), 20 * 60e3); }
+const allVisits = () => cached('visAll', 1800, async () => (await atAll(AT_VIS, [VIS.date, VIS.tech, VIS.pool, VIS.addr, VIS.mins, VIS.arr, VIS.status])).map(r => { const f = r.fields;
+  return { d: f[VIS.date] || '', tech: f[VIS.tech] || '', pool: f[VIS.pool] || '', addr: f[VIS.addr] || '', m: +f[VIS.mins] || 0, a: f[VIS.arr] || '', done: ((f[VIS.status] && f[VIS.status].name) || f[VIS.status]) === 'Done' }; }));
+const visAgg = (list, key) => { const g = {}; list.forEach(x => (g[x[key]] = g[x[key]] || []).push(x));
+  return Object.entries(g).map(([k, xs]) => { const ms = xs.map(x => x.m).sort((a, b) => a - b), tot = ms.reduce((a, b) => a + b, 0);
+    return { name: k, n: xs.length, avg: Math.round(tot / ms.length), med: ms[Math.floor(ms.length / 2)], short: xs.filter(x => x.m < 8).length, total: tot, days: new Set(xs.map(x => x.d)).size }; }); };
+routes['/api/pools/time'] = async q => {
+  const days = Math.max(1, Math.min(400, +q.get('days') || 30)), since = etDay(new Date(Date.now() - days * 864e5)).ymd;
+  return cached('poolTime:' + days, 600, async () => {
+    const all = (await allVisits()).filter(x => x.tech && x.m >= VIS_MIN && x.m <= VIS_MAX), v = all.filter(x => x.d >= since);
+    const base = Object.fromEntries(visAgg(all, 'tech').map(t => [t.name, t]));   // every visit on record: the average to expect going forward
+    const techs = visAgg(v, 'tech').map(t => ({ ...t, perDay: Math.round(t.n / Math.max(1, t.days) * 10) / 10, allAvg: base[t.name] ? base[t.name].avg : t.avg, allN: base[t.name] ? base[t.name].n : t.n,
+      pools: visAgg(v.filter(x => x.tech === t.name), 'pool').sort((a, b) => b.n - a.n).slice(0, 25),
+      recent: v.filter(x => x.tech === t.name).sort((a, b) => b.a.localeCompare(a.a)).slice(0, 30).map(x => ({ d: x.d, a: x.a, pool: x.pool, m: x.m, done: x.done })) })).sort((a, b) => b.n - a.n);
+    const pools = visAgg(v, 'pool').map(p => ({ ...p, addr: (v.find(x => x.pool === p.name) || {}).addr || '', techs: visAgg(v.filter(x => x.pool === p.name), 'tech').map(t => ({ name: t.name, avg: t.avg, n: t.n })).sort((a, b) => b.n - a.n) })).sort((a, b) => b.n - a.n).slice(0, 400);
+    return { days, since, visits: v.length, fleetAvg: v.length ? Math.round(v.reduce((a, x) => a + x.m, 0) / v.length) : 0, logged: visState().days.length, backfill: VIS_DAYS,
+      oldest: all.reduce((m, x) => x.d && x.d < m ? x.d : m, '9999'), techs, pools };
+  });
+};
+routes['/api/pools/averages'] = async () => ({ techs: Object.fromEntries(visAgg((await allVisits()).filter(x => x.tech && x.m >= VIS_MIN && x.m <= VIS_MAX), 'tech').map(t => [t.name, { avg: t.avg, n: t.n }])) });
+
 // Azuga's camera storage only serves files to pages on azuga.com, so the server fetches them
 // and passes them through. Locked to Azuga's recording bucket so it can't fetch anything else.
 async function media(u, req, res) {
@@ -3623,6 +3681,10 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .camat{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#475569;background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:5px 11px}.camdot{width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.2)}.camdot.bad{background:#ef4444;box-shadow:0 0 0 3px rgba(239,68,68,.2)}.camdot.off{background:#94a3b8;box-shadow:none}.camdot.spin{background:#0ea5e9;animation:gbPulse 1s ease-in-out infinite}
 .rmc.wide{margin-bottom:14px}.rmc.wide .rma .sw{flex:1 1 auto}
 .dcon input{background:#f0f9ff}.dcon{position:relative}
+.ptbar{position:relative;height:10px;border-radius:6px;background:#f1f5f9}.ptbar i{position:absolute;inset:0 auto 0 0;border-radius:6px;background:linear-gradient(90deg,#22d3ee,#0e7490)}.ptbar em{position:absolute;top:-4px;bottom:-4px;width:2px;background:#0f172a;opacity:.55}
+.ptbad{color:#b91c1c;font-weight:700}.ptchg{font-size:12.5px;font-weight:700;border-radius:10px;padding:5px 9px}.ptchg.dn{background:#fff7ed;color:#c2410c}.ptchg.up{background:#ecfeff;color:#0e7490}.ptnote{font-size:12.5px;margin:-4px 0 12px}
+.ptpools{display:grid;gap:8px}.ptp{display:grid;grid-template-columns:minmax(180px,1.4fr) 110px 2fr;gap:10px;align-items:center;background:#fff;border-radius:12px;padding:10px 14px;box-shadow:0 2px 8px rgba(15,23,42,.05)}.ptp small{display:block;color:#64748b;font-size:12px}.ptm b{font-size:17px;color:#0b4a63}.ptt{display:flex;flex-wrap:wrap;gap:5px}.ptt span{font-size:12px;background:#e0f2fe;color:#0b4a63;border-radius:10px;padding:2px 8px}
+@media(max-width:700px){.ptp{grid-template-columns:1fr auto}.ptt{grid-column:1/-1}}.ptus{color:#0e7490;font-weight:700}#pomNav{margin-right:10px}
 .rmhead{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;margin:4px 0 10px}.rmhead h3{margin:0;font-size:16px;color:#0b4a63}.rmhead .muted{font-size:12.5px}
 .rmgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-bottom:16px}.rmc{background:#fff;border:1px solid #e2e8f0;border-left:5px solid #94a3b8;border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:10px;transition:box-shadow .2s,transform .2s}.rmc:hover{transform:translateY(-2px);box-shadow:0 12px 26px -16px rgba(14,116,144,.5)}
 .rmc.em{border-left-color:#0ea5e9}.rmc.tx{border-left-color:#8b5cf6}.rmc.sv{border-left-color:#06b6d4}.rmc.eo{border-left-color:#6366f1}.rmc.live{background:linear-gradient(180deg,#f0fdf4,#fff 45%)}
@@ -3822,8 +3884,9 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 </div>
 <div id="vPom" hidden>
  <div class="crewhead"><div><h2>Pool routes</h2><p id="pbCount" class="muted">Loading today&rsquo;s schedule from Pool Office Manager...</p></div><span style="flex:1"></span>
-  <label class="pbdate">Day <input type="date" id="pbDate"></label></div>
- <div id="pbSum"></div><div id="pbList" class="tgrid"></div>
+  <div class="rnav" id="pomNav"><button data-ps="routes" class="on">Today’s routes</button><button data-ps="time">Time at pools</button></div><label class="pbdate" id="pbDateL">Day <input type="date" id="pbDate"></label></div>
+ <div id="psRoutes"><div id="pbSum"></div><div id="pbList" class="tgrid"></div></div>
+ <div id="psTime" hidden></div>
 </div>
 <div id="vChk" hidden>
  <div class="crewhead"><div><h2>Truck check-ups</h2><p id="chkCount" class="muted">Loading check-ups from Pool Office Manager...</p></div><span style="flex:1"></span><button class="btn2 pri" id="chkMail">✉️ Email who missed</button></div>
@@ -4670,12 +4733,38 @@ sky();setInterval(sky,10*60e3);
 // ---- Pools tab: every tech's POM route for the day, with progress ----
 let POMB=null,pomTimer=null;
 const hm=t=>t?new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'';
-async function loadPomBoard(){const d=$('pbDate');if(!d.value){d.value=new Date().toLocaleDateString('en-CA');d.max=d.value}
+async function loadPomBoard(){if(!PTAVG)loadPoolAvg();const d=$('pbDate');if(!d.value){d.value=new Date().toLocaleDateString('en-CA');d.max=d.value}
   clearTimeout(pomTimer);if(!POMB)$('pbList').innerHTML='<div class="tcard"><div class="sk" style="width:60%"></div><div class="sk" style="width:80%"></div></div>'.repeat(3);
   try{POMB=await get('/api/pom/board?date='+d.value);renderPom()}catch(e){$('pbList').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}
   if(POMB&&POMB.today)pomTimer=setTimeout(()=>{if(!$('vPom').hidden)loadPomBoard()},120e3)}
 $('pbDate').onchange=()=>{POMB=null;loadPomBoard()};
 function stopLi(s){return '<li class="'+(s.done?'done':'')+'"><i>'+(s.done?'✓':'')+'</i><span><b>'+esc(s.customer||'Pool')+'</b><small>'+esc(s.address)+'</small></span><em>'+hm(s.time)+'</em></li>'}
+
+// ---- Pools tab › Time at pools: GPS time on site per tech and per pool, with each tech's usual time going forward ----
+let PT=null,PTD=30,PTV='techs',PTAVG=null;
+async function loadPoolTime(){if(!PT)$('psTime').innerHTML='<div class="empty">Loading pool visits...</div>';try{PT=await get('/api/pools/time?days='+PTD)}catch(e){$('psTime').innerHTML='<div class="empty">Could not load: '+esc(e.message)+'</div>';return}renderPoolTime()}
+const mins=m=>m>=60?Math.floor(m/60)+' h '+(m%60)+' min':m+' min';
+function renderPoolTime(){const r=PT;if(!r)return;const q=$('q').value.trim().toLowerCase(),fa=r.fleetAvg||1;
+  const T=r.techs.filter(t=>!q||t.name.toLowerCase().includes(q)),P=r.pools.filter(p=>!q||(p.name+' '+p.addr).toLowerCase().includes(q));
+  const prog=r.logged<r.backfill?'<p class="muted ptnote">Still working back through GPS history: '+r.logged+' of '+r.backfill+' days done so far (a few days every 20 minutes). New days are added each morning.</p>':'';
+  let h=kpis([[r.visits.toLocaleString(),'pool visits in the last '+r.days+' days'],[mins(r.fleetAvg),'average time at a pool'],[T.length,'techs'],[r.oldest&&r.oldest!=='9999'?fdate(r.oldest):'–','tracked since']])
+   +'<div class="ukbar">'+chips('pd',String(PTD),[['7','7 days'],['30','30 days'],['90','90 days'],['365','Year']])+'<span style="flex:1"></span>'+chips('pv',PTV,[['techs','By tech'],['pools','By pool']])+'</div>'+prog;
+  if(PTV==='techs'){const mx=Math.max(1,...T.map(t=>t.avg));
+    h+=T.length?'<div class="ukg">'+T.map(t=>{const d=t.avg-t.allAvg,vf=Math.round((t.avg/fa-1)*100),sh=Math.round(t.short/Math.max(1,t.n)*100);
+      return '<div class="ukc pt'+(sh>=25?' hot':'')+'"><div class="ukc-h"><div><b>'+esc(t.name)+'</b><small>'+t.n+' visits · '+t.days+' days · ~'+t.perDay+' pools a day</small></div></div>'
+       +'<div class="ukc-big"><b>'+t.avg+'</b><span>min a pool</span><em class="'+(vf>15?'up':vf<-15?'down':'')+'">'+(vf>0?'+':'')+vf+'% vs fleet</em></div>'
+       +'<div class="ptbar"><i style="width:'+Math.round(t.avg/mx*100)+'%"></i><em style="left:'+Math.min(100,Math.round(fa/mx*100))+'%" title="Fleet average"></em></div>'
+       +'<div class="ukc-f"><span>Middle visit '+t.med+' min</span><span>Usual (all visits): <b>'+t.allAvg+' min</b></span>'+(t.short?'<span class="'+(sh>=25?'ptbad':'')+'">'+t.short+' under 8 min</span>':'')+'</div>'
+       +(Math.abs(d)>=3&&t.allN>t.n?'<div class="ptchg '+(d<0?'dn':'up')+'">'+(d<0?'▼ ':'▲ ')+Math.abs(d)+' min '+(d<0?'shorter':'longer')+' than usual lately</div>':'')
+       +'<details class="ukd"><summary>Pools and recent visits</summary><div class="bd"><h4>Their pools <span>avg · visits</span></h4>'+t.pools.map(p=>'<div class="bdr"><div><b>'+esc(p.name||'Pool')+'</b></div><b>'+p.avg+' min · '+p.n+'</b></div>').join('')
+       +'<h4>Recent visits</h4>'+t.recent.map(x=>'<div class="bdr"><div><b>'+esc(x.pool||'Pool')+'</b><small>'+fdate(x.d)+(x.a?' · arrived '+new Date(x.a).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'')+(x.done?'':' · not submitted in POM')+'</small></div><b class="'+(x.m<8?'ptbad':'')+'">'+mins(x.m)+'</b></div>').join('')+'</div></details></div>'}).join('')+'</div>'
+     :'<div class="empty">'+(r.logged?'No pool visits found for this range yet.':'No visits logged yet. The first days of GPS history are being worked out now; check back in a few minutes.')+'</div>'}
+  else h+=P.length?'<div class="ptpools">'+P.map(p=>'<div class="ptp"><div><b>'+esc(p.name||'Pool')+'</b><small>'+esc(p.addr)+'</small></div><div class="ptm"><b>'+p.avg+' min</b><small>'+p.n+' visit'+(p.n>1?'s':'')+'</small></div><div class="ptt">'+p.techs.map(t=>'<span title="'+t.n+' visits">'+esc(t.name.split(' ')[0])+' '+t.avg+'m</span>').join('')+'</div></div>').join('')+'</div>':'<div class="empty">No pools match.</div>';
+  $('psTime').innerHTML=h}
+document.addEventListener('click',e=>{const n=e.target.closest('#pomNav [data-ps]');if(n){document.querySelectorAll('#pomNav button').forEach(x=>x.classList.toggle('on',x===n));const t=n.dataset.ps==='time';$('psRoutes').hidden=t;$('psTime').hidden=!t;$('pbDateL').hidden=t;if(t)loadPoolTime();return}
+  const d=e.target.closest('[data-pd]');if(d){PTD=+d.dataset.pd;PT=null;loadPoolTime();return}
+  const v=e.target.closest('[data-pv]');if(v){PTV=v.dataset.pv;renderPoolTime()}});
+async function loadPoolAvg(){try{PTAVG=(await get('/api/pools/averages')).techs;if(POMB)renderPom()}catch(e){}}
 function renderPom(){const r=POMB;if(!r)return;
   if(!r.connected){$('pbCount').textContent='Pool Office Manager is not connected (add POM_API_KEY in Render).';$('pbSum').innerHTML=$('pbList').innerHTML='';return}
   const q=$('q').value.trim().toLowerCase(),hit=t=>!q||t.name.toLowerCase().includes(q)||t.stops.some(s=>(s.customer+' '+s.address).toLowerCase().includes(q));
@@ -4687,7 +4776,7 @@ function renderPom(){const r=POMB;if(!r)return;
   $('pbList').innerHTML=(T.length?T.map((t,i)=>{const p=Math.round(t.done/t.total*100),nx=t.stops.find(s=>!s.done),last=[...t.stops].reverse().find(s=>s.done),fin=t.done===t.total;
     return '<div class="tcard'+(fin?' fin':'')+'" style="--i:'+Math.min(i,12)+'"><div class="th">'+avatar(t.driver||t.name)+'<div><b>'+esc(t.name)+'</b>'
       +(t.truck?'<button class="tchip" data-truck="'+esc(t.truck)+'">'+tno(t.truck)+'Show on map</button>':'<small class="muted">No truck matched in Airtable</small>')+'</div><span class="tpct">'+(fin?'Done':p+'%')+'</span></div>'
-      +'<div class="pbar"><i style="width:'+p+'%"></i></div><div class="tmeta"><b>'+t.done+' of '+t.total+'</b> pools done'+(last?' · last at '+esc(last.customer||'a pool'):'')+'</div>'
+      +'<div class="pbar"><i style="width:'+p+'%"></i></div><div class="tmeta"><b>'+t.done+' of '+t.total+'</b> pools done'+(last?' · last at '+esc(last.customer||'a pool'):'')+(PTAVG&&PTAVG[t.name]?' · <span class="ptus" title="Average of '+PTAVG[t.name].n+' GPS visits">usually '+PTAVG[t.name].avg+' min a pool</span>':'')+'</div>'
       +(nx?'<div class="tnext"><span>Next</span><b>'+esc(nx.customer||'Pool')+'</b><small>'+esc(nx.address)+(nx.time?' · '+hm(nx.time):'')+'</small></div>':'<div class="tnext fin"><span>All done</span><b>Route finished</b></div>')
       +'<details><summary>All '+t.total+' stops</summary><ol class="tstops">'+t.stops.map(stopLi).join('')+'</ol></details></div>'}).join(''):'<div class="empty">'+(q?'No techs match your search.':'No pools scheduled for this day.')+'</div>')}
 document.addEventListener('click',e=>{const b=e.target.closest('.tchip');if(!b)return;document.querySelector('.tabs button[data-v=vMap]').click();select(b.dataset.truck)});
@@ -4876,7 +4965,7 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   ['vMap','vEdit','vDrv','vPom','vCam','vChk','vRep','vBuy','vUp'].forEach(v=>$(v).hidden=b.dataset.v!==v);if(b.dataset.v==='vBuy')loadRampTab();if(b.dataset.v==='vUp')loadUp();if(b.dataset.v==='vChk'){loadChk();mailPanel()}if(b.dataset.v==='vRep')loadRep();if(b.dataset.v==='vPom')loadPomBoard();if(b.dataset.v==='vCam')loadCamTab();if(b.dataset.v==='vMap'&&sel&&TRUCKV.length)drawCams();document.body.dataset.v=b.dataset.v;$('sum').hidden=b.dataset.v!=='vMap';
   if(b.dataset.v!=='vMap')loadSync();if(b.dataset.v==='vEdit')renderEdit();else if(b.dataset.v==='vDrv'){if(!PEOPLE)loadPeople();else renderDrivers()}else map.invalidateSize();
 });
-$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();if(!$('vPom').hidden)renderPom();if(!$('vCam').hidden)renderCamTab();if(!$('vChk').hidden)renderChk();if(!$('vRep').hidden)renderRep();if(!$('vBuy').hidden){renderBuy();renderRampOv();renderRampUp()}if(!$('vUp').hidden)renderUp()};
+$('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hidden)renderDrivers();if(!$('vPom').hidden)renderPom();if(!$('vCam').hidden)renderCamTab();if(!$('vChk').hidden)renderChk();if(!$('vRep').hidden)renderRep();if(!$('vBuy').hidden){renderBuy();renderRampOv();renderRampUp()}if(!$('vPom').hidden&&!$('psTime').hidden)renderPoolTime();if(!$('vUp').hidden)renderUp()};
 /*repadd*/
 // Automatic emails: setup status, a test send to Callum, and the Monday switch
 async function mailPanel(){const el=$('chkMailAuto');if(!el)return;let st;try{st=await get('/api/mail/status')}catch(e){el.innerHTML='';return}
