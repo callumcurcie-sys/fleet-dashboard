@@ -283,7 +283,7 @@ async function buildUpdate(b, vs) {
     set('ownership', b.ownership, 'ownership');
   }
   if ('odometer' in b) {
-    const o = Number(b.odometer);
+    const o = Math.round(Number(String(b.odometer).replace(/[,\s]|mi$/gi, '')));
     if (!Number.isInteger(o) || o < 0 || o > 2000000) throw new Error('Odometer must be a whole number of miles.');
     body.odometerReading = o; set('currentOdometerReading', o, 'odometer=' + o);
   }
@@ -302,7 +302,7 @@ async function sendUpdate({ id, cur, body, changed }) {
   const r = await azuga('/trackees/' + encodeURIComponent(id) + '.json', body, 'PUT');
   if (azErr(r)) throw new Error('Azuga rejected the change: ' + JSON.stringify(azErr(r)).slice(0, 200));
   const mine = list(cache.get('fresh')?.data).find(v => v.trackeeId === id);
-  if (mine) Object.assign(mine, body);
+  if (mine) { Object.assign(mine, body); if (body.odometerReading != null) { mine.vehicleDeviceCurrentodoReading = body.odometerReading; mine.odoSource = 'User input'; } }
   cache.delete('vehicles'); cache.delete('locations');
   console.log(new Date().toISOString(), 'Azuga updated', cur.name, '->', changed.join(', '));
   return changed;
@@ -909,10 +909,11 @@ const CAP_EVENTS = 3;   // each kind of event counts at most 3 times (phone use:
 // assigned driver, else the name the camera stamped. The camera stamp is often wrong (a camera can be registered
 // to someone else's login), so it is only the last resort.
 const truckDrivers = () => cached('truckDrivers', 300, async () => {
-  const [vs, at] = await Promise.all([routes['/api/vehicles']().then(list).catch(() => []), AIRTABLE_TOKEN ? atLinks().catch(() => ({ links: {} })) : { links: {} }]);
+  const [vs, at, ad] = await Promise.all([routes['/api/vehicles']().then(list).catch(() => []), AIRTABLE_TOKEN ? atLinks().catch(() => ({ links: {} })) : { links: {} }, AIRTABLE_TOKEN ? atData().catch(() => ({ trucks: [] })) : { trucks: [] }]);
   const m = {};
   vs.forEach(v => { const L = at.links && at.links[v.trackeeId];
-    m[v.trackeeId] = (L && L.linked && L.truck.driver && L.truck.driver.name) || v.userName || [v.userFirstName, v.userLastName].filter(Boolean).join(' '); });
+    const hand = !(L && L.linked) && (((cache.get('camSync') || {}).data || {}).manual || {})[v.trackeeId], ht = hand && ad.trucks.find(t => t.id === hand);   // camera given a truck by hand in Airtable
+    m[v.trackeeId] = (L && L.linked && L.truck.driver && L.truck.driver.name) || (ht && ht.driver && ht.driver.name) || v.userName || [v.userFirstName, v.userLastName].filter(Boolean).join(' '); });
   return m;
 });
 const camName = x => [x.firstName, x.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, '') || x.driverName || '';
@@ -2289,7 +2290,7 @@ const saveUp = d => { cache.set('upkeep', { data: d, t: Date.now() }); saveSnap(
 const etNow = () => new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
 const weekKey = () => { const d = etNow(); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.toLocaleDateString('en-CA'); };
 const tname = t => (t.truckNo ? '#' + t.truckNo.split(/[ ~(]/)[0] + ' ' : '') + ([t.year, t.make, t.model].filter(Boolean).join(' ') || 'Truck');
-const vOdo = r => Math.round((r.odo_support && +r.vehicleSupportedOdoValue) || +r.vehicleDeviceCurrentodoReading || +r.totalDistanceTravelled || +r.odometerReading || 0);
+const vOdo = r => Math.round(+r.vehicleDeviceCurrentodoReading || (r.odo_support && +r.vehicleSupportedOdoValue) || +r.totalDistanceTravelled || +r.odometerReading || 0);   // the truck's own value is sometimes in km, so the current (entered + GPS) reading comes first
 const fleetPairs = async () => { const [vs, L] = await Promise.all([routes['/api/vehicles']().then(list), atLinks()]);
   return vs.map(v => { const l = L.links && L.links[v.trackeeId]; return l && l.linked ? { v, t: l.truck, odo: vOdo(v) } : null; }).filter(Boolean); };
 async function myEmail() {
@@ -2626,14 +2627,19 @@ async function syncCameras() {
   if (camBusy || !AIRTABLE_TOKEN) return { busy: camBusy }; camBusy = true;
   const out = { trackers: 0, cameras: 0, events: 0, at: Date.now() };
   try {
-    const [vs, L, at, td, evs] = await Promise.all([routes['/api/vehicles']().then(list), atLinks(), atData(), truckDrivers(), events30()]);
-    const links = L.links || {}, truckOf = v => { const l = links[v.trackeeId]; return l && l.linked ? l.truck : null; };
+    const [vs, L, at, evs, old] = await Promise.all([routes['/api/vehicles']().then(list), atLinks(), atData(), events30(), atAll(AT_CAMS, Object.values(CAM))]);
+    // A camera whose Azuga vehicle isn't matched to a truck can be given one by hand in the Cameras table; that choice is kept
+    const links = L.links || {}, manual = {};
+    old.forEach(r => { const id = clean(r.fields[CAM.azId]), tk = (r.fields[CAM.truck] || [])[0], l = links[id]; if (id && tk && !(l && l.linked) && at.trucks.some(t => t.id === tk)) manual[id] = tk; });
+    { const c = cache.get('camSync') || { data: { keys: [] } }; c.data = { ...c.data, manual }; c.t = Date.now(); cache.set('camSync', c); cache.delete('truckDrivers'); }
+    const td = await truckDrivers();
+    const truckOf = v => { const l = links[v.trackeeId]; return l && l.linked ? l.truck : manual[v.trackeeId] ? at.trucks.find(t => t.id === manual[v.trackeeId]) : null; };
     // 1. Trucks: tick "Has Azuga tracker" for every truck matched to a tracker, untick the rest
-    const withT = new Set(vs.map(truckOf).filter(Boolean).map(t => t.id)), fix = at.trucks.filter(t => t.hasTracker !== withT.has(t.id)).map(t => ({ id: t.id, fields: { [F.hasTracker]: withT.has(t.id) } }));
+    const withT = new Set(vs.map(v => { const l = links[v.trackeeId]; return l && l.linked ? l.truck.id : null; }).filter(Boolean)), fix = at.trucks.filter(t => t.hasTracker !== withT.has(t.id)).map(t => ({ id: t.id, fields: { [F.hasTracker]: withT.has(t.id) } }));
     for (let i = 0; i < fix.length; i += 10) { await airtable(AT_TRUCKS, { method: 'PATCH', body: JSON.stringify({ records: fix.slice(i, i + 10) }) }); await sleep(250); }
     out.trackers = fix.length; if (fix.length) cache.delete('airtable');
     // 2. Cameras: one row per SafetyCam (matched on its serial); Broken / Spare / Removed set by hand are kept
-    const old = await atAll(AT_CAMS, Object.values(CAM)), byName = Object.fromEntries(old.map(r => [clean(r.fields[CAM.name]), r]));
+    const byName = Object.fromEntries(old.map(r => [clean(r.fields[CAM.name]), r]));
     const since = Date.now() - 30 * 864e5, perV = {};
     evs.forEach(x => { const t = x.t || evTime(x); if (t < since || !eventKind(x.eventType).pts) return; const p = perV[x.vehicleId] = perV[x.vehicleId] || { n: 0, last: 0 }; p.n++; p.last = Math.max(p.last, t); });
     const cams = vs.filter(v => clean(v.safetyCamSerialNumber || v.safetyCam)), seen = new Set(), recs = [];
@@ -2646,7 +2652,7 @@ async function syncCameras() {
     }
     old.filter(r => !seen.has(clean(r.fields[CAM.name])) && /installed|not linked/i.test(((r.fields[CAM.status] || {}).name || r.fields[CAM.status] || ''))).forEach(r => recs.push({ fields: { [CAM.name]: clean(r.fields[CAM.name]), [CAM.status]: 'Removed', [CAM.synced]: new Date().toISOString() } }));
     for (let i = 0; i < recs.length; i += 10) { await airtable(AT_CAMS, { method: 'PATCH', body: JSON.stringify({ performUpsert: { fieldsToMergeOn: [CAM.name] }, typecast: true, records: recs.slice(i, i + 10) }) }); await sleep(250); }
-    out.cameras = cams.length;
+    out.cameras = cams.length; out.byHand = Object.keys(manual).length;
     // 3. Camera events: last 30 days, real alerts only (camera notices skipped), each added once
     const camRecs = await atAll(AT_CAMS, [CAM.name, CAM.azId]), camOf = Object.fromEntries(camRecs.map(r => [clean(r.fields[CAM.azId]), r.id]));
     const st = camState(), done = new Set(st.keys), recent = list(await routes['/api/videos'](new URLSearchParams()).catch(() => [])), full = {};
@@ -2668,7 +2674,7 @@ async function syncCameras() {
     }
     out.events = add.length;
     const keep = [...done].filter(k => +k.split('|')[1] > Date.now() - 45 * 864e5);
-    const ns = { keys: keep, at: out.at, last: out }; cache.set('camSync', { data: ns, t: Date.now() }); saveSnap('camSync', ns);
+    const ns = { keys: keep, at: out.at, last: out, manual }; cache.set('camSync', { data: ns, t: Date.now() }); saveSnap('camSync', ns);
     console.log(new Date().toISOString(), 'Airtable cameras synced:', JSON.stringify(out));
   } catch (e) { out.error = e.message; console.error('Camera sync:', e.message); } finally { camBusy = false; }
   return out;
@@ -3292,9 +3298,9 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;bor
 .plist .pn{flex:none;width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:800;background:#fff;color:#0369a1;box-shadow:inset 0 0 0 1.5px #7dd3fc}
 .plist li.done .pn{background:#22c55e;color:#fff;box-shadow:none}.plist li div{flex:1;min-width:0}.plist li b{display:block;font-size:13px}.plist li span{display:block;font-size:12px;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .plist li em{font-style:normal;font-size:12px;font-weight:600;color:#0369a1;text-align:right}.plist li.done em{color:#15803d}.plist li em small{display:block;font-weight:500;color:#94a3b8}
-.poolpin span{display:grid;place-items:center;width:22px;height:16px;border-radius:6px;background:linear-gradient(180deg,#67e8f9,#0891b2);border:2px solid #fff;box-shadow:0 2px 6px rgba(8,51,68,.35);font-size:10px;color:#fff;font-weight:800;position:relative;overflow:hidden}
+.poolpin span{display:grid;place-items:center;width:32px;height:24px;border-radius:8px;background:linear-gradient(180deg,#67e8f9,#0891b2);border:2.5px solid #fff;box-shadow:0 0 0 3px rgba(8,145,178,.35),0 3px 10px rgba(8,51,68,.45);font-size:13px;color:#fff;font-weight:800;position:relative;overflow:hidden}
 .poolpin span::after{content:'';position:absolute;left:-4px;right:-4px;top:4px;height:3px;border-radius:50%;border-top:1.5px solid rgba(255,255,255,.7)}
-.poolpin.done span{background:linear-gradient(180deg,#86efac,#16a34a)}.poolpin.done span::after{display:none}
+.poolpin.done span{background:linear-gradient(180deg,#86efac,#16a34a);box-shadow:0 0 0 3px rgba(22,163,74,.3),0 3px 10px rgba(8,51,68,.4)}.poolpin:not(.done):not(.sm) span{animation:poolPulse 2.4s ease-in-out infinite}@keyframes poolPulse{50%{box-shadow:0 0 0 7px rgba(8,145,178,.12),0 3px 10px rgba(8,51,68,.45)}}.poolpin.sm span{width:12px;height:12px;border-radius:50%;border-width:2px;box-shadow:0 1px 4px rgba(8,51,68,.5)}.poolpin.sm span::after{display:none}.pplab{position:absolute;top:27px;left:50%;transform:translateX(-50%);white-space:nowrap;font:700 11px/1.2 system-ui,sans-serif;color:#0b4a63;background:rgba(255,255,255,.92);padding:2px 6px;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.2);pointer-events:none}.poolpin.done span::after{display:none}
 
 /* breadcrumb trail controls */
 .trailbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:10px 0 2px;font-size:12.5px}.trailbar>span{font-weight:700;color:#334155;margin-right:2px}
@@ -3779,9 +3785,9 @@ const azSub=r=>{const t=atTitle(vid(r));return t&&t.toLowerCase()!==vname(r).toL
 const who=r=>{const L=link(vid(r));if(L&&L.linked)return L.truck.driver?L.truck.driver.name:'';const d=dname(r);return /[a-z]/i.test(d)?d:''};
 const dname=v=>{const n=String(pick(v,'driverName','userName','driverFullName')||[v.driverFirstName,v.driverLastName].filter(Boolean).join(' ')).replace(/[ .]+$/,'').trim();return n};
 const initials=n=>/[a-z]/i.test(n)?n.split(/ +/).map(w=>w[0]).slice(0,2).join('').toUpperCase():'?';
-// Azuga sends several odometers: prefer the truck's own reading, then Azuga's current estimate.
+// Azuga sends several odometers: prefer the current reading (what was entered here, plus GPS miles since), then the truck's own (sometimes in km).
 // (vehicleDeviceOdoReading is the reading at tracker install, so it's stale.)
-const odo=r=>{const v=(r.odo_support&&+r.vehicleSupportedOdoValue)||+r.vehicleDeviceCurrentodoReading||+r.totalDistanceTravelled||+r.odometerReading;return v>0?Math.round(v).toLocaleString()+' mi'+(r.odo_support?'':' (Azuga estimate)'):'Not reported yet'};
+const odo=r=>{const cur=+r.vehicleDeviceCurrentodoReading,v=cur>0?cur:(r.odo_support&&+r.vehicleSupportedOdoValue)||+r.totalDistanceTravelled||+r.odometerReading;return v>0?Math.round(v).toLocaleString()+' mi'+(cur>0&&r.odoSource==='User input'?' (entered + GPS)':cur>0?'':' (from the truck)'):'Not reported yet'};
 const when=t=>+t>1e11?new Date(+t).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):(t||'');
 // Azuga sends km/h unless a unit field says miles; convert to mph
 const speed=r=>{const s=+pick(r,'speed')||0;return /mi|mph/i.test(String(pick(r,'speedUnit','speedUom','unitOfMeasure','distanceUnit')||''))?s:s*0.621371};
@@ -4344,10 +4350,11 @@ async function pomBox(id,name,date){const el=$('pomBox');if(!el)return;if(!name)
 let POMDAY=null;
 // Pools on the map once you zoom in: every tech's stops for today
 const poolLayer=L.layerGroup();
-const poolIcon=s=>L.divIcon({className:'poolpin'+(s.done?' done':''),html:'<span>'+(s.done?'\u2713':'')+'</span>',iconSize:[22,16],iconAnchor:[11,8]});
+const poolIcon=(s,z)=>{z=z||16;const small=z<13,lab=z>=15&&s.customer?'<b class="pplab">'+esc(String(s.customer).slice(0,22))+'</b>':'';
+  return L.divIcon({className:'poolpin'+(s.done?' done':'')+(small?' sm':''),html:'<span>'+(small?'':s.done?'\u2713':'\u{1F3CA}')+'</span>'+lab,iconSize:small?[12,12]:[32,24],iconAnchor:small?[6,6]:[16,12]})};
 async function loadPools(){try{const r=await get('/api/pom/stops');if(!r.connected)return;POMSTOPS=r.stops;showPools()}catch(e){}}
-function showPools(){if(!POMSTOPS)return;const on=map.getZoom()>=13;if(on&&!map.hasLayer(poolLayer)){poolLayer.addTo(map)}else if(!on&&map.hasLayer(poolLayer)){map.removeLayer(poolLayer);return}
-  poolLayer.clearLayers();POMSTOPS.forEach(s=>L.marker([s.lat,s.lng],{icon:poolIcon(s),keyboard:false,zIndexOffset:-500}).bindTooltip('<b>'+esc(s.customer||'Pool')+'</b><br>'+esc(s.address)+'<br>'+(s.type?'<i>'+esc(s.type)+'</i><br>':'')+esc(s.tech||'')+' · '+(s.done?'Done':'Not done yet'),{direction:'top',offset:[0,-8]}).addTo(poolLayer))}
+function showPools(){if(!POMSTOPS)return;const z=map.getZoom(),on=z>=10;if(on&&!map.hasLayer(poolLayer)){poolLayer.addTo(map)}else if(!on&&map.hasLayer(poolLayer)){map.removeLayer(poolLayer);return}
+  poolLayer.clearLayers();POMSTOPS.forEach(s=>L.marker([s.lat,s.lng],{icon:poolIcon(s,z),keyboard:false,zIndexOffset:z>=13?200:-500}).bindTooltip('<b>'+esc(s.customer||'Pool')+'</b><br>'+esc(s.address)+'<br>'+(s.type?'<i>'+esc(s.type)+'</i><br>':'')+esc(s.tech||'')+' · '+(s.done?'Done':'Not done yet'),{direction:'top',offset:[0,-8]}).addTo(poolLayer))}
 map.on('zoomend',showPools);setTimeout(loadPools,2000);setInterval(loadPools,3*60e3);
 // Breadcrumb trail: colored by speed, dots where it started and where it is now, small stops where it sat 10+ minutes
 const trailLayer=L.layerGroup();
