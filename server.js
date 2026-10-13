@@ -2637,6 +2637,23 @@ async function media(u, req, res) {
 http.createServer(async (req, res) => {
   const base = (req.headers['x-forwarded-proto'] || 'http') + '://' + (req.headers.host || 'localhost');
   if (!process.env.PUBLIC_URL && req.headers.host && !/localhost|127\.0\.0\.1/.test(req.headers.host)) lastBase = base;
+  // Public SMS policy pages (needed for the Textedly / carrier 10DLC registration). No login.
+  if (req.url === '/privacy' || req.url === '/terms') {
+    const page = (title, body) => '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + title + ' · Millennial Pools</title><style>body{margin:0;font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a;background:#eef6f9}.w{max-width:760px;margin:0 auto;padding:32px 20px 60px}.c{background:#fff;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(15,23,42,.06)}h1{margin:0 0 4px;font-size:26px}h2{font-size:17px;margin:22px 0 6px}.m{color:#64748b;font-size:14px}</style></head><body><div class="w"><div class="c"><h1>' + title + '</h1><p class="m">Millennial Pool Management LLC · 1041 Glassboro Road, Monroe Township, NJ 08094 · contact@millennialpools.com · Updated October 2026</p>' + body + '</div></div></body></html>';
+    const privacy = '<p>This policy covers the text messages (SMS) Millennial Pools sends to its own employees about their work vehicles.</p>'
+      + '<h2>What we collect</h2><p>Your name and mobile phone number, which you give us as an employee, and the record of the texts we send you and any replies.</p>'
+      + '<h2>How we use it</h2><p>Only to send work texts such as weekly truck check-up reminders, vehicle maintenance reminders and truck assignment confirmations.</p>'
+      + '<h2>Sharing</h2><p>We do not sell, rent or share your phone number or opt-in consent with any third party or affiliate for marketing. Your number is shared only with our texting provider (Textedly) so it can deliver our messages.</p>'
+      + '<h2>Opting out</h2><p>Reply STOP to any message to stop receiving texts. Reply HELP for help, or email contact@millennialpools.com.</p>';
+    const terms = '<h2>Program</h2><p>Millennial Pools Work Alerts: text messages to Millennial Pools employees about their work vehicles, such as weekly truck check-up reminders, maintenance reminders and truck assignment confirmations.</p>'
+      + '<h2>Signing up</h2><p>Employees opt in by texting the keyword TRUCK to (609) 640-3140. You will get a confirmation text.</p>'
+      + '<h2>Message frequency</h2><p>Message frequency varies, usually 1 to 2 messages per week.</p>'
+      + '<h2>Costs</h2><p>Message and data rates may apply. Carriers are not liable for delayed or undelivered messages.</p>'
+      + '<h2>Help and stopping</h2><p>Reply HELP for help or contact contact@millennialpools.com. Reply STOP at any time to cancel; you will get one final message confirming you are unsubscribed.</p>'
+      + '<h2>Privacy</h2><p>See our <a href="/privacy">Privacy Policy</a>.</p>';
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
+    return res.end(req.url === '/privacy' ? page('Privacy Policy', privacy) : page('SMS Terms and Conditions', terms));
+  }
   if (req.url.startsWith('/r/')) {   // shared report: no login, but only with a valid signed link
     const [tok, sub] = req.url.slice(3).split('?')[0].split('/'), o = readShare(tok);
     if (!o) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('This report link is invalid or has expired. Ask for a new one.'); }
