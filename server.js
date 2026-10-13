@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv', 'upkeep', 'gasChk2', 'geo']);
+const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist2', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv', 'upkeep', 'gasChk2', 'geo']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -787,16 +787,18 @@ const scoreRows = () => cached('scores', 1800, async () => list(await azuga('htt
   .map(r => ({ userId: r.userId, firstName: r.firstName, lastName: r.lastName, vehicleId: r.vehicleId, score: r.score, distanceTravelled: r.distanceTravelled })));
 // Past drivers per truck: Azuga's Scores report month by month for the last 12 months shows who drove each
 // tracker and how far. Sticker sign-ins (truckSwap) add to it from now on. Trucks with no tracker only have sign-ins.
-const drvHistory = () => cached('drvHist', 12 * 3600, async () => {
-  const by = {};   // trackeeId -> { nameKey: { name, from, to, miles } }
+const drvHistory = () => cached('drvHist2', 12 * 3600, async () => {
+  const by = { _tot: {} };   // trackeeId -> { nameKey: { name, from, to, miles, mo: { monthsAgo: miles } } }; _tot: trackeeId -> all miles
   for (let m = 0; m < 12; m++) {
     const start = daysAgo(30 * (m + 1)), end = daysAgo(30 * m);
     const rows = list(await azuga('https://services.azuga.com/reports/v3/reports/score?appId=FLEET', { startDate: azIso(start), endDate: azIso(end), browserTimezone: 'US/Eastern', reportFilter: 'default', index: 0, size: 500, desc: false, filter: { orFilter: {}, matchFilter: {} } }));
     for (const r of rows) {
       const name = [r.firstName, r.lastName].filter(Boolean).join(' ').replace(/[ .]+$/, ''), mi = +r.distanceTravelled || 0;
-      if (!/[a-z]/i.test(name) || !r.vehicleId || mi < 1) continue;   // Azuga shows a number when nobody was logged in
-      const tv = by[r.vehicleId] = by[r.vehicleId] || {}, h = tv[dupeName(name)] = tv[dupeName(name)] || { name, from: +start, to: +end, miles: 0 };
-      h.from = Math.min(h.from, +start); h.to = Math.max(h.to, +end); h.miles += mi;
+      if (!r.vehicleId || mi < 1) continue;
+      by._tot[r.vehicleId] = (by._tot[r.vehicleId] || 0) + mi;
+      if (!/[a-z]/i.test(name)) continue;   // Azuga shows a number when nobody was logged in
+      const tv = by[r.vehicleId] = by[r.vehicleId] || {}, h = tv[dupeName(name)] = tv[dupeName(name)] || { name, from: +start, to: +end, miles: 0, mo: {} };
+      h.from = Math.min(h.from, +start); h.to = Math.max(h.to, +end); h.miles += mi; h.mo[m] = (h.mo[m] || 0) + mi;
     }
     await sleep(1500);
   }
@@ -2051,7 +2053,7 @@ async function serveCheckup(res, id) {
   const send = (code, h) => { res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }); res.end(h); };
   const shell = (title, body) => `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${H(title)}</title><style>${REPORT_CSS}
 .ans{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}.ans div{background:#f8fafc;border-radius:12px;padding:10px 14px}.ans span{display:block;font-size:12px;color:#64748b;font-weight:600}.ans b{font-size:16px}
-.yes{color:#15803d}.no{color:#dc2626}.pics{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.pics figure{margin:0;background:#f1f5f9;border-radius:12px;overflow:hidden}.pics img{width:100%;height:180px;object-fit:cover;display:block}.pics figcaption{padding:8px 10px;font-size:12.5px;color:#475569}</style></head>
+.yes{color:#15803d}.no{color:#dc2626}.pws{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}.pw{border-radius:14px;padding:14px 16px;border:2px solid #e2e8f0;background:#f8fafc}.pw.reg{background:#eff6ff}.pw.ins{background:#f5f3ff}.pw-h{display:flex;align-items:center;gap:8px;font-weight:800;font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:#334155}.pw-i{font-size:18px}.pw-d{font-size:22px;font-weight:800;margin:6px 0 2px}.pw-s{font-weight:700;font-size:13.5px}.pw.good{border-color:#86efac}.pw.good .pw-s{color:#15803d}.pw.warn{border-color:#fdba74}.pw.warn .pw-s{color:#c2410c}.pw.bad{border-color:#ef4444;background:#fef2f2}.pw.bad .pw-s{color:#b91c1c}.pw.none .pw-s{color:#64748b}.pw-w{margin-top:8px;font-size:12.5px;color:#92400e;background:#fffbeb;border-radius:8px;padding:6px 8px}.pics{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.pics figure{margin:0;background:#f1f5f9;border-radius:12px;overflow:hidden}.pics img{width:100%;height:180px;object-fit:cover;display:block}.pics figcaption{padding:8px 10px;font-size:12.5px;color:#475569}</style></head>
 <body><div class="wrap"><div class="top"><div class="logo">MP</div><div><h1>${H(title)}</h1><p>Millennial Pools fleet · weekly truck check-up from Pool Office Manager</p></div></div>${body}</div></body></html>`;
   try {
     if (!clean(process.env.POM_API_KEY)) return send(503, shell('Check-up', '<div class="card">Pool Office Manager is not connected.</div>'));
@@ -2068,11 +2070,19 @@ async function serveCheckup(res, id) {
       ...(v.pictures || []).filter(x => x.file && x.file.url).map(x => ({ url: x.file.url, full: x.file.url, cap: x.description || '' }))]
       .filter((x, i, a) => a.findIndex(y => y.full.split('/').pop() === x.full.split('/').pop()) === i);   // POM lists each photo twice (media + pictures)
     const shown = new Set(pics.map(x => x.cap.toLowerCase()));
-    const ans = (v.customFields || []).map(c => { const f = c.newCustomField || c.customField || {}; if (!f.name || shown.has(f.name.toLowerCase())) return '';   // photo questions appear with their photo below
+    const ans = (v.customFields || []).map(c => { const f = c.newCustomField || c.customField || {}; if (!f.name || shown.has(f.name.toLowerCase()) || /regist|insur/i.test(f.name)) return '';   // photo questions appear with their photo below; paperwork has its own card
       return '<div><span>' + H(f.name) + '</span>' + val(f, c.value) + '</div>'; }).join('');
     const notes = [v.customerNotes, v.internalNotes].filter(x => clean(x));
+    // Registration and insurance side by side, each with its own status, so an expired one can't be missed
+    const A = ansOf(v), sub = Date.parse(v.endTime || v.startTime || v.createdAt) || Date.now(), rg = ymdOf(ansGet(A, /regist/i)), ic = ymdOf(ansGet(A, /insur/i));
+    const box = (label, icon, dt, chk, cls) => { const left = dt ? Math.round((Date.parse(dt + 'T12:00') - Date.now()) / 864e5) : null;
+      const st = left === null ? ['none', 'Not filled in'] : left < 0 ? ['bad', 'EXPIRED ' + (-left) + ' days ago'] : left <= 30 ? ['warn', 'Expires in ' + left + ' days'] : ['good', 'Valid · ' + (left >= 60 ? Math.round(left / 30.4) + ' months left' : left + ' days left')];
+      return '<div class="pw ' + cls + ' ' + st[0] + '"><div class="pw-h"><span class="pw-i">' + icon + '</span>' + label + '</div><div class="pw-d">' + (dt ? H(new Date(dt + 'T12:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })) : '–') + '</div><div class="pw-s">' + st[1] + '</div>'
+        + (chk && chk.warn.length ? '<div class="pw-w">⚠ ' + H(chk.warn.join('; ')) + '</div>' : '') + '</div>'; };
+    const paper = (rg || ic || Object.keys(A).some(n => /regist|insur/i.test(n))) ? '<div class="card"><h3 style="margin-top:0">Paperwork the tech entered</h3><div class="pws">'
+      + box('Registration', '🪪', rg, paperCheck(rg, ic, 'reg', sub), 'reg') + box('Insurance card', '🛡️', ic, paperCheck(ic, rg, 'ins', sub), 'ins') + '</div></div>' : '';
     const body = `<div class="card"><div class="head"><span class="score good" style="font-size:20px">✓<i>done</i></span><div><h2>${H(who)}</h2><div class="muted">Submitted ${H(when(v.endTime || v.startTime || v.createdAt))}${truck ? ' · ' + H([truck.truckNo && '#' + truck.truckNo.split(/[ ~(]/)[0], truck.year, truck.make, truck.model].filter(Boolean).join(' ')) : ''}${v.customServiceReport && v.customServiceReport.name ? ' · ' + H(v.customServiceReport.name) : ''}</div></div></div></div>`
-      + `<div class="card"><h3 style="margin-top:0">Answers</h3>${ans ? '<div class="ans">' + ans + '</div>' : '<p class="muted">No form answers on this submission.</p>'}</div>`
+      + paper + `<div class="card"><h3 style="margin-top:0">Answers</h3>${ans ? '<div class="ans">' + ans + '</div>' : '<p class="muted">No form answers on this submission.</p>'}</div>`
       + `<div class="card"><h3 style="margin-top:0">Photos</h3>${pics.length ? '<div class="pics">' + pics.map(x => `<figure><a href="${H(x.full)}" target="_blank" rel="noopener"><img src="${H(x.url)}" alt="${H(x.cap || 'Check-up photo')}" loading="lazy"></a>${x.cap ? '<figcaption>' + H(x.cap) + '</figcaption>' : ''}</figure>`).join('') + '</div>' : '<p class="muted">No photos were added.</p>'}</div>`
       + (notes.length ? `<div class="card"><h3 style="margin-top:0">Notes</h3>${notes.map(n => '<p>' + H(n) + '</p>').join('')}</div>` : '')
       + truckNotesCard(at.trucks, truck, who, v, when);
@@ -2267,32 +2277,54 @@ const emailOf = async name => { const at = await atData(), d = at.drivers.find(x
 // gas = each person's Ramp gas split over the trucks they drove by Azuga miles, miles = Azuga's monthly score report.
 const REP_LINE = /^([A-Z][a-z]{2} \d{1,2}, \d{4}) · From (.+?) (invoice|estimate)([^:]*): (.*)$/;
 const noteRepairs = t => String(t.notes || '').split('\n').map(l => REP_LINE.exec(l)).filter(m => m && m[3] === 'invoice')
-  .map(m => { const tm = /Total \$([\d,]+\.\d\d)/.exec(m[5]); return { ts: Date.parse(m[1]), amount: tm ? +tm[1].replace(/,/g, '') : 0 }; });
-const truckCost = () => cached('truckCost', 3600, async () => {
-  const yr = Date.now() - 365 * 864e5;
-  const [at, pairs, hist, rr, y] = await Promise.all([atData(), fleetPairs().catch(() => []), drvHistory().catch(() => ({})), rampRepairs().catch(() => []), rampYear().catch(() => ({ card: [], reimb: [] }))]);
-  const byT = Object.fromEntries(pairs.map(p => [p.t.id, p])), rows = {};
-  at.trucks.forEach(t => rows[t.id] = { id: t.id, name: tname(t), year: +t.year || null, driver: t.driver ? t.driver.name : '', active: t.active, odo: byT[t.id] ? byT[t.id].odo : 0, repairs: 0, nRep: 0, gas: 0, miles: 0 });
+  .map(m => { const tm = /Total \$([\d,]+\.\d\d)/.exec(m[5]); return { ts: Date.parse(m[1]), amount: tm ? +tm[1].replace(/,/g, '') : 0, shop: m[2], work: m[5].replace(/\.? ?Total[^]*$/, '').slice(0, 90) }; });
+// A pickup burns about $0.22 of gas a mile (17 mpg at $3.70). Gas far above that for a truck's miles went somewhere else
+// (gas cans, another vehicle, a card used for someone else's truck), so it is shown but not counted in cost per mile.
+const GAS_PER_MILE = +process.env.GAS_PER_MILE || 0.22;
+const truckCost = () => cached('truckCost2', 3600, async () => {
+  const yr = Date.now() - 365 * 864e5, mo = 30 * 864e5;
+  const [at, pairs, hist, rr, y] = await Promise.all([atData(), fleetPairs().catch(() => []), drvHistory().catch(() => ({})), rampRepairs().catch(() => []), rampYear().catch(() => ({ card: [], reimb: [] }))]), gchk = gasChk();
+  const byT = Object.fromEntries(pairs.map(p => [p.t.id, p])), rows = {}, same = (a, b) => !!matchPerson([{ name: a }], b);
+  at.trucks.forEach(t => rows[t.id] = { id: t.id, name: tname(t), year: +t.year || null, driver: t.driver ? t.driver.name : '', active: t.active, odo: byT[t.id] ? byT[t.id].odo : 0,
+    repairs: 0, nRep: 0, rep: [], gas: 0, gasBy: {}, how: {}, miles: 0, milesNamed: 0, warn: [] });
   for (const t of at.trucks) {
     const nr = noteRepairs(t).filter(r => r.ts > yr), row = rows[t.id];
-    nr.forEach(r => { row.repairs += r.amount; row.nRep++; });
+    nr.forEach(r => { row.repairs += r.amount; row.nRep++; row.rep.push({ d: new Date(r.ts).toISOString().slice(0, 10), what: r.work || 'Invoice', where: r.shop, amt: r.amount, src: 'Invoice in truck notes' }); });
     rr.filter(x => x.truckId === t.id && Date.parse(x.date) > yr && !nr.some(n => Math.abs(n.amount - x.amount) <= x.amount * 0.03 && Math.abs(n.ts - Date.parse(x.date)) < 6 * 864e5))
-      .forEach(x => { row.repairs += x.amount; row.nRep++; });
+      .forEach(x => { row.repairs += x.amount; row.nRep++; row.rep.push({ d: x.date, what: x.memo || 'Card payment', where: x.merchant, amt: x.amount,
+        src: 'Ramp, ' + x.who + (x.how === 'memo' ? ' (truck # in memo)' : ' (paid by this truck’s driver, so it may be for another truck)') }); });
   }
-  const share = {};   // person -> { truckId: miles }
-  for (const p of pairs) for (const h of Object.values(hist[p.v.trackeeId] || {})) {
-    rows[p.t.id].miles += h.miles; const s = share[dupeName(h.name)] = share[dupeName(h.name)] || {}; s[p.t.id] = (s[p.t.id] || 0) + h.miles; }
-  const cur = {}; at.trucks.forEach(t => t.driver && (cur[dupeName(t.driver.name)] = t.id));
+  const drove = {};   // card holder -> [{ id, h }] trucks they drove in Azuga
+  const droveBy = who => drove[who] = drove[who] || pairs.flatMap(p => Object.values(hist[p.v.trackeeId] || {}).filter(h => same(h.name, who)).map(h => ({ id: p.t.id, h })));
+  for (const p of pairs) { const named = Object.values(hist[p.v.trackeeId] || {}).reduce((a, h) => a + h.miles, 0);
+    rows[p.t.id].milesNamed = named; rows[p.t.id].miles = Math.max(named, (hist._tot || {})[p.v.trackeeId] || 0); }
+  const cur = who => at.trucks.find(t => t.driver && same(t.driver.name, who));
   let unassigned = 0;
+  const give = (id, g, amt, how) => { const r = rows[id]; r.gas += amt; const b = r.gasBy[g.who || 'Unknown'] = r.gasBy[g.who || 'Unknown'] || { amt: 0, n: 0 }; b.amt += amt; b.n += amt / g.amount; r.how[how] = (r.how[how] || 0) + amt; };
   for (const g of y.card.concat(y.reimb).filter(x => x.gas && x.amount > 0)) {
-    const k = dupeName(g.who), s = share[k], tot = s ? Object.values(s).reduce((a, b) => a + b, 0) : 0;
-    if (tot) Object.entries(s).forEach(([id, m]) => rows[id].gas += g.amount * m / tot); else if (cur[k]) rows[cur[k]].gas += g.amount; else unassigned += g.amount;
+    const c = gchk[g.id], m = Math.min(11, Math.floor((Date.now() - Date.parse(g.at)) / mo)), d = droveBy(g.who);
+    if (c && c.truckId && rows[c.truckId] && (c.verdict === 'ok' || c.verdict === 'moving')) { give(c.truckId, g, g.amount, 'gps'); continue; }   // GPS put the truck at the pump
+    let parts = d.filter(x => x.h.mo && x.h.mo[m] > 0).map(x => [x.id, x.h.mo[m]]), how = 'month';
+    if (!parts.length) { parts = d.map(x => [x.id, x.h.miles]); how = 'year'; }
+    const tot = parts.reduce((a, x) => a + x[1], 0);
+    if (tot) parts.forEach(([id, mi]) => give(id, g, g.amount * mi / tot, how));
+    else { const t = cur(g.who); if (t) give(t.id, g, g.amount, 'driver'); else unassigned += g.amount; }
   }
-  const out = Object.values(rows).map(r => ({ ...r, miles: Math.round(r.miles), repairs: Math.round(r.repairs), gas: Math.round(r.gas), total: Math.round(r.repairs + r.gas),
-    cpm: r.miles >= 100 ? Math.round((r.repairs + r.gas) / r.miles * 100) / 100 : null, age: r.year ? new Date().getFullYear() - r.year : null }))
-    .filter(r => r.total || r.miles).sort((a, b) => (b.cpm ?? -1) - (a.cpm ?? -1) || b.total - a.total);
-  return { rows: out, unassignedGas: Math.round(unassigned) };
+  const out = Object.values(rows).map(r => {
+    const expect = r.miles * GAS_PER_MILE, extra = r.gas > 300 && r.gas > Math.max(2 * expect, expect + 400) ? r.gas - 1.5 * expect : 0, counted = r.gas - extra;
+    if (extra) r.warn.push(d0s(r.gas) + ' of gas for ' + Math.round(r.miles).toLocaleString() + ' miles. That many miles should use about ' + d0s(expect) + ', so ' + d0s(extra) + ' probably went into other vehicles or gas cans. It is left out of the cost per mile.');
+    if (r.miles && r.milesNamed < r.miles * 0.5) r.warn.push('Most of this truck’s miles had nobody logged in to Azuga, so its gas can’t all be traced to a driver.');
+    if (!byT[r.id]) r.warn.push('No Azuga tracker linked, so miles are unknown.');
+    if (r.rep.some(x => /may be for another truck/.test(x.src))) r.warn.push('Some repairs were matched only by who paid. Check they were for this truck.');
+    return { id: r.id, name: r.name, year: r.year, driver: r.driver, active: r.active, odo: r.odo, age: r.year ? new Date().getFullYear() - r.year : null,
+      miles: Math.round(r.miles), repairs: Math.round(r.repairs), nRep: r.nRep, gas: Math.round(r.gas), gasExtra: Math.round(extra), gasCounted: Math.round(counted), expectGas: Math.round(expect),
+      total: Math.round(r.repairs + counted), cpm: r.miles >= 100 ? Math.round((r.repairs + counted) / r.miles * 100) / 100 : null,
+      rep: r.rep.sort((a, b) => b.amt - a.amt).slice(0, 12), gasBy: Object.entries(r.gasBy).map(([who, b]) => ({ who, amt: Math.round(b.amt), n: Math.round(b.n * 10) / 10 })).sort((a, b) => b.amt - a.amt).slice(0, 8),
+      how: Object.fromEntries(Object.entries(r.how).map(([k, v]) => [k, Math.round(v)])), warn: r.warn };
+  }).filter(r => r.total || r.miles || r.gas).sort((a, b) => (b.cpm ?? -1) - (a.cpm ?? -1) || b.total - a.total);
+  return { rows: out, unassignedGas: Math.round(unassigned), gasPerMile: GAS_PER_MILE };
 });
+const d0s = n => '$' + Math.round(n || 0).toLocaleString();
 
 // Gas fill-ups checked against GPS: was the person's truck stopped near that station within 30 minutes of the charge?
 // Also flags more gallons than the tank holds and a 2nd fill-up within 24 hours with little driving between.
@@ -2433,6 +2465,43 @@ async function setRenewal(b) {
   if (!(await atData()).trucks.some(t => t.id === id)) throw new Error('Unknown truck');
   await airtable(AT_TRUCKS, { method: 'PATCH', body: JSON.stringify({ records: [{ id, fields: f }] }) }); cache.delete('airtable'); return { ok: true };
 }
+// Registration / insurance dates the techs type into their weekly truck check-up (POM), sanity-checked before use
+const paperCheck = (dt, other, kind, when) => { if (!dt) return null; const ms = Date.parse(dt + 'T12:00'), w = [];
+  if (ms > when + (kind === 'reg' ? 800 : 500) * 864e5) w.push('more than ' + (kind === 'reg' ? '2 years' : '16 months') + ' out, probably a typo');
+  if (ms < when - 400 * 864e5) w.push('over a year old, probably a typo');
+  if (Math.abs(ms - when) < 2 * 864e5) w.push('same day as the check-up, probably not read off the card');
+  if (other && other === dt) w.push('same date as the ' + (kind === 'reg' ? 'insurance' : 'registration') + ', one of them is likely wrong');
+  return { date: dt, warn: w }; };
+const ansOf = v => { const a = {}; (v.customFields || []).forEach(c => { const f = c.newCustomField || c.customField || {}; if (f.name) a[f.name] = c.value; }); return a; };
+const ansGet = (a, re) => { const k = Object.keys(a).find(n => re.test(n)); return k ? clean(a[k]) : ''; };
+const ymdOf = x => { const ms = Date.parse(x); return ms ? new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) : ''; };
+const svcSeen = new Map();
+const checkupPaperwork = () => cached('ckPaper', 3 * 3600, async () => {
+  if (!clean(process.env.POM_API_KEY)) return {};
+  const d = await routes['/api/pom/checkups'](new URLSearchParams('weeks=6')), at = await atData(), out = {}, latest = {};
+  const drivers = at.trucks.filter(t => t.driver && t.driver.name).map(t => ({ name: t.driver.name, t }));
+  for (const c of d.checkups || []) if (c.done && c.service && !latest[c.tech]) latest[c.tech] = c;   // newest first
+  for (const c of Object.values(latest)) {
+    let v = svcSeen.get(c.service); if (!v) { v = await pomService(c.service).catch(() => null); if (v) svcSeen.set(c.service, v); await sleep(250); }
+    if (!v) continue;
+    const a = ansOf(v), which = ansGet(a, /which truck/i), when = Date.parse(v.endTime || v.startTime || c.time) || Date.now();
+    const vin = (which.toUpperCase().match(/[A-HJ-NPR-Z0-9]{17}/) || [])[0], num = (which.match(/^\s*#?\s*(\d{1,2})\b/) || [])[1];
+    const t = (vin && at.trucks.find(x => x.vin === vin)) || (num && at.trucks.find(x => parseInt(x.truckNo) === +num)) || (rampMatch(drivers, c.tech) || {}).t;
+    if (!t || (out[t.id] && out[t.id].when > when)) continue;
+    const reg = ymdOf(ansGet(a, /regist/i)), ins = ymdOf(ansGet(a, /insur/i)), by = { who: c.tech, on: new Date(when).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }), service: c.service };
+    out[t.id] = { when, reg: reg && { ...paperCheck(reg, ins, 'reg', when), ...by }, ins: ins && { ...paperCheck(ins, reg, 'ins', when), ...by } };
+  }
+  return out;
+});
+// Each truck's dates: the later of the Airtable date (from the card / registration file) and a check-up date that passed the checks
+async function renewRows() {
+  const at = await atData(), ck = await checkupPaperwork().catch(e => { console.error('Check-up paperwork:', e.message); return {}; });
+  return at.trucks.map(t => { const c = ck[t.id] || {};
+    const pick = (air, tech) => tech && tech.date && !tech.warn.length && (!air || tech.date > air) ? { date: tech.date, src: 'checkup' } : { date: air || '', src: air ? 'airtable' : '' };
+    const ins = pick(t.insExp, c.ins), reg = pick(t.regExp, c.reg);
+    return { t, id: t.id, name: tname(t), plate: t.plate, policy: t.policy, ins: ins.date, insSrc: ins.src, insAir: t.insExp, insTech: c.ins || null, insLeft: daysTo(ins.date),
+      reg: reg.date, regSrc: reg.src, regAir: t.regExp, regTech: c.reg || null, regLeft: daysTo(reg.date), card: (t.insCard[0] || {}).url || '' }; });
+}
 const daysTo = d => d ? Math.round((Date.parse(d + 'T12:00') - Date.now()) / 864e5) : null;
 async function attach(t, kind) {   // the card the date came from, else the first insurance card
   const st = upState(), name = (st.src[t.id] || {})[kind], f = t.insCard.concat(t.files).find(x => x.name === name) || (kind === 'ins' ? t.insCard[0] : t.files.find(x => /reg/i.test(x.name)));
@@ -2441,7 +2510,7 @@ async function attach(t, kind) {   // the card the date came from, else the firs
 }
 async function renewalMail(force) {
   const st = upState(), at = await atData(), to = UPKEEP_TO, sent = [];
-  for (const t of at.trucks) for (const [kind, d, label] of [['ins', t.insExp, 'Insurance'], ['reg', t.regExp, 'Registration']]) {
+  for (const x of await renewRows()) for (const [kind, d, label] of [['ins', x.ins, 'Insurance'], ['reg', x.reg, 'Registration']]) { const t = x.t;
     const left = daysTo(d), key = 'renew:' + t.id + ':' + kind + ':' + d;
     if (left === null || left > 30 || left < -30 || (st.sent[key] && !force)) continue;
     await sendMail(to, label + (left < 0 ? ' expired' : ' renews in ' + left + ' day' + (left === 1 ? '' : 's')) + ': ' + tname(t),
@@ -2502,7 +2571,7 @@ routes['/api/upkeep'] = async () => {
   const [cost, oil] = await Promise.all([truckCost().catch(e => ({ error: e.message })), oilList().catch(e => ({ error: e.message }))]);
   const tk = Object.fromEntries(at.trucks.map(t => [t.id, t]));
   const gas = Object.entries(done).map(([id, x]) => ({ id, ...x, truck: tk[x.truckId] ? tname(tk[x.truckId]) : '', tank: tankOf(tk[x.truckId]), link: 'https://app.ramp.com/business-overview/transactions/' + id })).sort((a, b) => b.flags.length - a.flags.length || Date.parse(b.at) - Date.parse(a.at));
-  const renew = at.trucks.map(t => ({ id: t.id, name: tname(t), plate: t.plate, policy: t.policy, ins: t.insExp, reg: t.regExp, insLeft: daysTo(t.insExp), regLeft: daysTo(t.regExp), card: (t.insCard[0] || {}).url || '' }));
+  const renew = (await renewRows()).map(({ t, ...x }) => x);
   return { cost, oil, oilMiles: OIL_MI, gas, gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew }, mail: mailReady(), ai: !!AI_KEY() };
 };
 routes['/api/upkeep/flags'] = () => ({ gas: Object.values(gasChk()).filter(x => x.verdict === 'far').length });
@@ -3352,6 +3421,13 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .rbars>div{position:relative}.rbars>div em{position:absolute;top:-16px;left:50%;transform:translateX(-50%);font-size:9.5px;font-style:normal;color:#64748b;white-space:nowrap;opacity:0;transition:opacity .2s}.rbars>div:hover em,.rbars>div.hi em,.rbars>div.cur em{opacity:1}.rbars>div.hi i{background:linear-gradient(180deg,#f59e0b,#ea580c)!important}.rbars>div.cur i{outline:2px dashed #0891b2;outline-offset:1px}
 .rpl{position:relative;display:flex;align-items:center;gap:8px;padding:8px 6px;border-top:1px solid #f1f5f9;font-size:13px;overflow:hidden}.rpl>div{flex:1;min-width:0;position:relative;z-index:1}.rpl small{display:block;color:#64748b;font-size:11.5px}.rpl>span{font-weight:700;position:relative;z-index:1}.rpl>i{position:absolute;left:0;bottom:0;height:3px;background:linear-gradient(90deg,#22d3ee,#0e7490);border-radius:2px}.rwarn{color:#b45309;font-weight:700}
 .rfl{display:flex;align-items:center;gap:8px;padding:8px 4px;border-top:1px dashed #e2e8f0;font-size:13px}.rfl>div{flex:1}.rfl small{display:block;color:#b45309;font-size:12px}.rfl .btn2{padding:4px 9px;font-size:12px;text-decoration:none}.rgnote{font-size:12.5px;margin:-4px 0 12px}
+.split .xgas{background:repeating-linear-gradient(45deg,#7dd3fc 0 4px,#e0f2fe 4px 8px)}.ukc-f s{text-decoration:none;color:#b45309;font-weight:700}
+.ukwarn{font-size:12.5px;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:7px 9px;line-height:1.4}
+.ukd summary{cursor:pointer;font-weight:700;font-size:13px;color:#0e7490;list-style:none;padding:6px 0 0;border-top:1px dashed #e2e8f0}.ukd summary::-webkit-details-marker{display:none}.ukd summary::before{content:"▸ ";display:inline-block;transition:transform .2s}.ukd[open] summary::before{transform:rotate(90deg)}
+.bd h4{display:flex;justify-content:space-between;margin:12px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#64748b}.bd h4 span{color:#0f172a}.bdr{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-top:1px solid #f1f5f9;font-size:13px}.bdr>div{min-width:0}.bdr small{display:block;color:#64748b;font-size:12px}.bdr.extra{color:#b45309}.bdn{font-size:12.5px;margin:6px 0 0}.bdw{margin:8px 0 0;padding-left:18px;font-size:12.5px;color:#92400e}
+.rblks{display:grid;gap:8px}.rblk{border-radius:12px;padding:10px 12px;border:2px solid #e2e8f0}.rblk.reg{background:#eff6ff}.rblk.ins{background:#f5f3ff}.rblk.bad{border-color:#ef4444;background:#fef2f2}.rblk.warn{border-color:#fdba74}.rblk.ok{border-color:#bbf7d0}
+.rblk-h{display:flex;justify-content:space-between;align-items:center;gap:8px;font-weight:800;font-size:12.5px;text-transform:uppercase;letter-spacing:.04em;color:#334155}.rblk-d{font-size:19px;font-weight:800;color:#0f172a;margin:4px 0 2px}.rblk.none .rblk-d{color:#94a3b8}.rsrc{font-size:12px;color:#64748b}
+.rtech{font-size:12px;color:#334155;background:rgba(255,255,255,.7);border-radius:8px;padding:5px 7px;margin-top:6px}.rtech.w{color:#92400e;background:#fffbeb}.rblk input{width:100%;box-sizing:border-box;margin-top:8px;font:inherit;font-size:13px;border:1px solid #cbd5e1;border-radius:8px;padding:4px 6px;background:#fff}.rblk input.saved{background:#dcfce7}
 .ukk{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:14px}.ukk>div{background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 2px 10px rgba(15,23,42,.06);border-left:5px solid #0e7490;animation:rqIn .35s ease both}
 .ukk b{display:block;font-size:26px;font-weight:800;color:#0b4a63;line-height:1.1}.ukk span{font-size:12.5px;color:#64748b}.ukk .bad{border-color:#ef4444}.ukk .bad b{color:#b91c1c}.ukk .warn{border-color:#f59e0b}.ukk .warn b{color:#b45309}.ukk .good{border-color:#22c55e}.ukk .good b{color:#15803d}
 .ukbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 12px}.ukchips{display:flex;flex-wrap:wrap;gap:6px}.ukchips button{font:inherit;font-size:13px;font-weight:700;border:1px solid #cbd5e1;background:#fff;color:#334155;border-radius:20px;padding:6px 12px;cursor:pointer;transition:all .15s}.ukchips button i{font-style:normal;background:#e2e8f0;border-radius:10px;padding:0 6px;margin-left:3px;font-size:11.5px}.ukchips button.on{background:#0e7490;border-color:#0e7490;color:#fff}.ukchips button.on i{background:rgba(255,255,255,.25)}
@@ -4701,19 +4777,31 @@ const upq=()=>$('q').value.trim().toLowerCase(),upf=x=>{const q=upq();return !q|
 const kpis=a=>'<div class="ukk">'+a.map(([v,l,c])=>'<div class="'+(c||'')+'"><b>'+v+'</b><span>'+l+'</span></div>').join('')+'</div>';
 const chips=(attr,cur,list)=>'<div class="ukchips">'+list.map(([k,l,n])=>'<button data-'+attr+'="'+k+'" class="'+(k===cur?'on':'')+'">'+l+(n!=null?' <i>'+n+'</i>':'')+'</button>').join('')+'</div>';
 const dueChip=n=>n===null||n===undefined?'<span class="dchip none">No date</span>':n<0?'<span class="dchip bad">Expired '+(-n)+' d ago</span>':n<=30?'<span class="dchip warn">'+(n===0?'Today':'In '+n+' days')+'</span>':'<span class="dchip ok">'+(n>=60?Math.round(n/30.4)+' months':n+' days')+' left</span>';
+const costWhy=(r,gpm)=>{const h=r.how||{},ht=Object.values(h).reduce((a,b)=>a+b,0)||1,lab={gps:'GPS put this truck at the pump',month:'card holder drove this truck that month',year:'card holder drove this truck during the year',driver:'card holder’s assigned truck'};
+  const row=(a,b,amt,cls)=>'<div class="bdr'+(cls?' '+cls:'')+'"><div><b>'+a+'</b>'+(b?'<small>'+b+'</small>':'')+'</div><b>'+amt+'</b></div>';
+  return '<div class="bd"><h4>Repairs <span>'+d0(r.repairs)+'</span></h4>'+(r.rep&&r.rep.length?r.rep.map(x=>row(esc(x.what),fdate(x.d)+' · '+esc(x.where)+' · '+esc(x.src),money(x.amt))).join(''):'<p class="muted bdn">No repairs in the last 12 months.</p>')
+   +'<h4>Gas <span>'+d0(r.gas)+'</span></h4>'+row('Expected for '+r.miles.toLocaleString()+' miles','about $'+gpm.toFixed(2)+' a mile for a pickup',d0(r.expectGas))
+   +(r.gasBy||[]).map(x=>row(esc(x.who),'about '+x.n+' fill-up'+(x.n==1?'':'s')+' put on this truck',d0(x.amt))).join('')
+   +(r.gasExtra?row('Left out of cost per mile','more gas than the miles explain','−'+d0(r.gasExtra),'extra'):'')
+   +(ht>1?'<p class="muted bdn">How the gas was matched to this truck: '+Object.entries(h).map(([k,v])=>Math.round(v/ht*100)+'% '+lab[k]).join(', ')+'.</p>':'')
+   +(r.warn&&r.warn.length?'<ul class="bdw">'+r.warn.map(w=>'<li>'+esc(w)+'</li>').join('')+'</ul>':'')
+   +'<h4>Cost per mile</h4><p class="bdn">('+d0(r.repairs)+' repairs + '+d0(r.gasCounted??r.gas)+' gas) ÷ '+r.miles.toLocaleString()+' miles'+(r.cpm!==null?' = <b>$'+r.cpm.toFixed(2)+'</b>':'')+'</p></div>'};
 function renderRampUp(){if(!UP)return;
   // Cost per truck
   const c=UP.cost;if(c.error)$('rsCost').innerHTML='<div class="empty">'+esc(c.error)+'</div>';else{
     const all=c.rows,tot=all.reduce((a,r)=>a+r.total,0),mi=all.reduce((a,r)=>a+r.miles,0),avg=mi?tot/mi:0;
     const key={cpm:r=>r.cpm??-1,total:r=>r.total,repairs:r=>r.repairs,miles:r=>r.miles}[CSORT],rows=all.filter(upf).slice().sort((a,b)=>key(b)-key(a));
     const worst=all.filter(r=>r.cpm!==null).sort((a,b)=>b.cpm-a.cpm)[0];
-    $('rsCost').innerHTML=kpis([[d0(tot),'repairs + gas, last 12 months'],[avg?'$'+avg.toFixed(2):'–','fleet cost per mile'],[mi.toLocaleString(),'miles driven'],worst?['$'+worst.cpm.toFixed(2),'highest: '+esc(worst.name),'bad']:null].filter(Boolean))
+    const extraAll=all.reduce((a,r)=>a+(r.gasExtra||0),0);
+    $('rsCost').innerHTML=kpis([[d0(tot),'repairs + gas, last 12 months'],[avg?'$'+avg.toFixed(2):'–','fleet cost per mile'],[mi.toLocaleString(),'miles driven'],worst?['$'+worst.cpm.toFixed(2),'highest: '+esc(worst.name),'bad']:null,extraAll?[d0(extraAll),'gas the miles don’t explain (left out)','warn']:null].filter(Boolean))
       +'<div class="ukbar"><span class="muted">Sort by</span>'+chips('cs',CSORT,[['cpm','Cost per mile'],['total','Total cost'],['repairs','Repairs'],['miles','Miles']])+'<span class="uklegend"><i class="dot rep"></i>Repairs <i class="dot gas"></i>Gas</span></div>'
-      +'<div class="ukg">'+rows.map((r,i)=>{const vs=r.cpm!==null&&avg?Math.round((r.cpm/avg-1)*100):null,t=Math.max(1,r.repairs+r.gas),hot=vs!==null&&vs>=40;
+      +'<div class="ukg">'+rows.map((r,i)=>{const vs=r.cpm!==null&&avg?Math.round((r.cpm/avg-1)*100):null,t=Math.max(1,r.repairs+r.gas),hot=vs!==null&&vs>=40,gc=r.gasCounted??r.gas;
         return '<div class="ukc'+(hot?' hot':vs!==null&&vs<=-20?' good':'')+'"><div class="ukc-h"><div><b>'+esc(r.name)+'</b><small>'+esc(r.driver||'No driver')+(r.age!==null?' · '+r.age+' yrs old':'')+(r.odo?' · '+r.odo.toLocaleString()+' mi':'')+'</small></div>'+(CSORT==='cpm'&&i<3&&r.cpm!==null?'<span class="rank">#'+(i+1)+'</span>':'')+'</div>'
           +'<div class="ukc-big">'+(r.cpm!==null?'<b>$'+r.cpm.toFixed(2)+'</b><span>per mile</span>'+(vs!==null?'<em class="'+(vs>0?'up':'down')+'">'+(vs>0?'+':'')+vs+'% vs fleet</em>':''):'<b class="muted">–</b><span>under 100 miles tracked</span>')+'</div>'
-          +'<div class="split"><i class="rep" style="width:'+(r.repairs/t*100)+'%"></i><i class="gas" style="width:'+(r.gas/t*100)+'%"></i></div>'
-          +'<div class="ukc-f"><span><i class="dot rep"></i>'+d0(r.repairs)+(r.nRep?' · '+r.nRep+' repair'+(r.nRep>1?'s':''):'')+'</span><span><i class="dot gas"></i>'+d0(r.gas)+'</span><span>'+r.miles.toLocaleString()+' mi</span></div></div>'}).join('')+'</div>'
+          +'<div class="split"><i class="rep" style="width:'+(r.repairs/t*100)+'%"></i><i class="gas" style="width:'+(gc/t*100)+'%"></i><i class="xgas" style="width:'+((r.gasExtra||0)/t*100)+'%"></i></div>'
+          +'<div class="ukc-f"><span><i class="dot rep"></i>'+d0(r.repairs)+(r.nRep?' · '+r.nRep+' repair'+(r.nRep>1?'s':''):'')+'</span><span><i class="dot gas"></i>'+d0(gc)+(r.gasExtra?' <s title="Gas the miles don’t explain">+'+d0(r.gasExtra)+'</s>':'')+'</span><span>'+r.miles.toLocaleString()+' mi</span></div>'
+          +(r.warn&&r.warn.length?'<div class="ukwarn">⚠ '+esc(r.warn[0])+'</div>':'')
+          +'<details class="ukd"><summary>Why does it cost this much?</summary>'+costWhy(r,c.gasPerMile||0.22)+'</details></div>'}).join('')+'</div>'
       +(c.unassignedGas?'<p class="muted rgnote">'+d0(c.unassignedGas)+' of gas could not be matched to a truck (card holders with no truck).</p>':'')}
   // Gas vs GPS
   const g=UP.gas.filter(upf),cnt=k=>g.filter(k).length,isFar=x=>x.flags.length>0,isUnv=x=>!x.flags.length&&x.unverified,isOk=x=>!x.flags.length&&!x.unverified;
@@ -4740,9 +4828,14 @@ function renderUp(){const u=UP;if(!u)return;let h='';
         +'<div class="oilbar"><i style="width:'+Math.min(100,pct/1.3)+'%"></i><em style="left:'+(100/1.3)+'%"></em></div>'
         +'<div class="ukc-f"><span>Last: '+fdate(x.oilDate)+(x.oilMiles?' at '+Number(x.oilMiles).toLocaleString()+' mi':'')+'</span>'+(x.days!==null&&x.since!==null?'<span>'+x.days+' days ago</span>':'')+'<span>Now '+(x.odo?x.odo.toLocaleString()+' mi':'–')+'</span></div></div>'}).join('')+'</div>'}
   if(USEC==='ren'){const r=u.renew.filter(upf),soon=x=>x!==null&&x<=30,need=x=>soon(x.insLeft)||soon(x.regLeft),miss=x=>!need(x)&&(!x.ins||!x.reg);
-    $('upCount').textContent='Dates are read from the insurance cards and registration files in Airtable · fix any date right on the card';
+    $('upCount').textContent='Registration and insurance dates come from the files in Airtable and from what techs enter in their weekly check-up · fix any date right on the card';
+    const blk=(x,k)=>{const n=x[k+'Left'],d=x[k],src=x[k+'Src'],tech=x[k+'Tech'],st=n===null?'none':n<0?'bad':n<=30?'warn':'ok';
+      const from=src==='checkup'?'From '+esc(tech.who)+'’s check-up on '+fdate(tech.on):src==='airtable'?'From the '+(k==='ins'?'insurance card':'registration file')+' in Airtable':'Not on file';
+      const tl=tech&&tech.date&&src!=='checkup'?'<div class="rtech'+(tech.warn.length?' w':'')+'">'+esc(tech.who)+' entered '+fdate(tech.date)+' in their '+fdate(tech.on)+' check-up'+(tech.warn.length?'<br>⚠ Not used: '+esc(tech.warn.join('; ')):'')+'</div>':'';
+      return '<div class="rblk '+k+' '+st+'"><div class="rblk-h"><span>'+(k==='reg'?'🪪 Registration':'🛡️ Insurance')+'</span>'+dueChip(n)+'</div><div class="rblk-d">'+(d?fdate(d):'No date')+'</div><div class="rsrc">'+from+'</div>'+tl
+        +'<input type="date" data-ren="'+k+'" data-id="'+x.id+'" value="'+esc(x[k+'Air']||'')+'" aria-label="'+(k==='reg'?'Registration':'Insurance')+' expires (Airtable)" title="Airtable date"></div>'};
     const card=x=>'<div class="ukc ren'+(need(x)?' hot':'')+'"><div class="ukc-h"><div><b>'+esc(x.name)+'</b><small>'+esc(x.plate||'No plate')+(x.policy?' · '+esc(x.policy):'')+'</small></div>'+(x.card?'<a class="btn2" href="'+esc(x.card)+'" target="_blank" rel="noopener">Card ↗</a>':'')+'</div>'
-      +[['ins','Insurance',x.ins,x.insLeft],['reg','Registration',x.reg,x.regLeft]].map(([k,l,d,n])=>'<div class="renrow"><span>'+l+'</span>'+dueChip(n)+'<input type="date" data-ren="'+k+'" data-id="'+x.id+'" value="'+esc(d||'')+'" aria-label="'+l+' expires"></div>').join('')+'</div>';
+      +'<div class="rblks">'+blk(x,'reg')+blk(x,'ins')+'</div></div>';
     const grp=(t,list,cls)=>list.length?'<h3 class="ukgh '+cls+'">'+t+' <i>'+list.length+'</i></h3><div class="ukg">'+list.map(card).join('')+'</div>':'';
     const lt=x=>Math.min(x.insLeft??1e4,x.regLeft??1e4);
     h=kpis([[r.filter(x=>soon(x.insLeft)).length,'insurance due in 30 days','bad'],[r.filter(x=>soon(x.regLeft)).length,'registrations due in 30 days','bad'],[r.filter(x=>!x.reg).length,'trucks with no registration date','warn'],[r.filter(x=>x.ins&&x.reg&&!need(x)).length,'all set','good']])
@@ -4770,7 +4863,7 @@ document.addEventListener('click',async e=>{const n=e.target.closest('#upNav [da
 });
 document.addEventListener('change',async e=>{const t=e.target,map={upOilOn:'oil',upRenOn:'renew',upSafOn:'safety'};
   if(map[t.id]){try{UP.settings=await post('/api/upkeep/settings',{[map[t.id]]:t.checked})}catch(err){alert(err.message);t.checked=!t.checked}return}
-  if(t.dataset&&t.dataset.ren){try{await post('/api/upkeep/renewal',{id:t.dataset.id,[t.dataset.ren]:t.value});const x=UP.renew.find(r=>r.id===t.dataset.id);x[t.dataset.ren]=t.value;x[t.dataset.ren+'Left']=t.value?Math.round((Date.parse(t.value+'T12:00')-Date.now())/864e5):null;t.classList.add('saved');setTimeout(renderUp,700)}catch(err){alert(err.message)}}});
+  if(t.dataset&&t.dataset.ren){try{await post('/api/upkeep/renewal',{id:t.dataset.id,[t.dataset.ren]:t.value});const x=UP.renew.find(r=>r.id===t.dataset.id);x[t.dataset.ren+'Air']=t.value;if(!x[t.dataset.ren]||x[t.dataset.ren+'Src']!=='checkup'||t.value>x[t.dataset.ren]){x[t.dataset.ren]=t.value;x[t.dataset.ren+'Src']=t.value?'airtable':''}x[t.dataset.ren+'Left']=x[t.dataset.ren]?Math.round((Date.parse(x[t.dataset.ren]+'T12:00')-Date.now())/864e5):null;t.classList.add('saved');setTimeout(renderUp,700)}catch(err){alert(err.message)}}});
 // ---- Purchases tab: hardware-store receipts from Ramp, item by item, with season-end return status ----
 let BUY=null,BUYF='Out';
 async function loadBuy(){if(!BUY)$('buyCount').textContent='Loading Ramp purchases...';try{BUY=await get('/api/purchases')}catch(e){$('buyCount').textContent='Could not load purchases: '+e.message;return}renderBuy()}
