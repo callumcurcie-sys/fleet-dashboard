@@ -179,7 +179,7 @@ const routes = {
   '/api/ramp/overview': () => RAMP_CLIENT_ID && RAMP_CLIENT_SECRET ? rampOverview() : { connected: false },
   '/api/truck/requests': () => swapReqs(),
   '/api/truck/history': q => truckHistory(q),
-  '/api/mail/status': () => { const st = mailState(); return { ready: mailReady(), from: mailFrom(), auto: !!st.auto, week: st.week, sent: st.sent || [], bounced: st.bounced || [], bounceErr: st.bounceErr || '', sms: !!st.sms, smsReady: !!TXT_KEY(), texted: st.texted && st.texted.day === new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) ? st.texted.names : [] }; },
+  '/api/mail/status': () => { const st = mailState(); return { ready: mailReady(), from: mailFrom(), auto: !!st.auto, week: st.week, sent: st.sent || [], bounced: st.bounced || [], bounceErr: st.bounceErr || '', sms: !!st.sms, smsReady: !!TXT_KEY(), svc: !!(st.svc && st.svc.on), svcToday: st.svc && st.svc.day === etDay().ymd ? Object.keys(st.svc.sent || {}).length : 0, eod: !!(st.eod && st.eod.on), eodToday: st.eod && st.eod.day === etDay().ymd ? (st.eod.sent || []) : null, texted: st.texted && st.texted.day === new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) ? st.texted.names : [] }; },
   '/api/repairs': async () => { if (!AIRTABLE_TOKEN) return { connected: false };
     const at = await atData(), ramp = RAMP_CLIENT_ID && RAMP_CLIENT_SECRET ? await rampRepairs().catch(e => ({ error: e.message })) : null;
     return { connected: true, ramp, trucks: at.trucks.map(t => ({ id: t.id, truckNo: t.truckNo, desc: [t.year, t.make, t.model].filter(Boolean).join(' '),
@@ -1061,7 +1061,7 @@ function visitAt(stop, pts) {
     const leave = best[best.length - 1].t;
     const ft = stop.lat && stop.lng ? Math.round(Math.min(...best.map(p => miles(p, stop))) * 5280) : null;
     const kind = how === 'wide' && ft <= AT_POOL_MI[0] * 5280 ? '' : how;   // parked close, just stepped out of the small circle for a bit
-    return { arrive: off.t, leave, mins: Math.max(0, Math.round((leave - off.t) / 6e4)), visits: real.length, ft, how: kind, wide: !!kind, parkedAt: off.addr, lat: off.lat, lng: off.lng };
+    return { away: pts.some(p => p.t > leave + 60e3), arrive: off.t, leave, mins: Math.max(0, Math.round((leave - off.t) / 6e4)), visits: real.length, ft, how: kind, wide: !!kind, parkedAt: off.addr, lat: off.lat, lng: off.lng };
   }
   return null;
 }
@@ -1366,6 +1366,69 @@ async function textTest() {
   if (ph.length !== 10) throw new Error('No phone number for Callum Curcie in the Drivers table in Airtable.');
   await sendText('+1' + ph, 'Test from the Millennial Pools fleet dashboard. Check-up reminder texts are working.');
   return { to: '(***) ***-' + ph.slice(-4) };
+}
+// ---- Service report reminder: after a tech's truck leaves a pool (Azuga GPS) and the POM service still isn't completed, email them once
+const SVC_WAIT_MIN = +process.env.SVC_REMINDER_MIN || 20;   // minutes after leaving before the reminder goes out
+const svcText = (tech, s) => { const first = tech.split(' ')[0], t = new Date(s.visit.leave).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+  return { subject: 'Submit your POM report: ' + (s.customer || 'pool') + ' (left ' + t + ')',
+    body: 'Hi ' + first + ',\n\nYou left ' + (s.customer || 'a pool') + (s.address ? ' (' + s.address + ')' : '') + ' at ' + t + ", but the service hasn't been submitted in Pool Office Manager yet.\n\nPlease open the POM app and complete it now while it's fresh.\n\nThanks,\nMillennial Pools" }; };
+async function svcCheck(dry) {
+  const st = mailState(), day = etDay().ymd, sv = st.svc = st.svc && st.svc.day === day ? { ...st.svc } : { on: !!(st.svc && st.svc.on), day, sent: {} }, out = [];
+  if (!dry && (!sv.on || !mailReady())) return out;
+  const stops = (await pomToday()).map(pomStop).filter(x => !pomCheckup(x) && x.tech), techs = [...new Set(stops.filter(x => !x.done).map(x => x.tech))];
+  const at = await atData().catch(() => ({ drivers: [] })), users = await pomUsers().catch(() => []), bad = (st.bounced || []);
+  for (const tech of techs) {
+    const v = await visitsFor(tech, day).catch(() => null); if (!v || !v.trucks || !v.trucks.length) continue;
+    const d = matchPerson(at.drivers.filter(x => x.status !== 'Inactive'), tech), u = matchPerson(users, tech), email = (d && d.email) || (u && u.email) || '';
+    for (const s of v.stops) {
+      if (s.done || !s.visit || !s.visit.away || sv.sent[s.id] || Date.now() - s.visit.leave < SVC_WAIT_MIN * 6e4 || Date.now() - s.visit.leave > 4 * 3600e3) continue;
+      out.push({ tech, email, customer: s.customer, left: s.visit.leave, id: s.id });
+      if (dry || !email || bad.includes(email.toLowerCase())) continue;
+      const m = svcText(tech, s);
+      try { await sendMail(email, m.subject, m.body); sv.sent[s.id] = Date.now(); console.log(new Date().toISOString(), 'Service report reminder sent to', tech, 'for', s.customer); }
+      catch (e) { console.error('Service reminder to', tech, 'failed:', e.message); }
+    }
+    await sleep(500);
+  }
+  if (!dry) saveMail(st);
+  return out;
+}
+if (process.argv[2] !== 'test') setInterval(() => { const h = +new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }); if (h >= 7 && h < 21) svcCheck().catch(e => console.error('Service reminders:', e.message)); }, 15 * 60e3);
+async function svcTest() {
+  const at = await atData(), me = at.drivers.find(d => dupeName(d.name) === dupeName('Callum Curcie')), to = (me && me.email) || 'callum@millennialpools.com', list = await svcCheck(true), x = list[0];
+  const m = x ? svcText(x.tech, { customer: x.customer, address: '', visit: { leave: x.left } }) : svcText('Callum Curcie', { customer: 'Sunset Village Pool', address: '1 Main St, Williamstown, NJ', visit: { leave: Date.now() - 25 * 6e4 } });
+  await sendMail(to, 'SAMPLE · ' + m.subject, m.body + '\n\n(Sample. ' + (list.length ? list.length + ' tech' + (list.length > 1 ? 's' : '') + ' would get one right now: ' + list.map(y => y.tech + ' (' + y.customer + ')').join(', ') : 'Nobody would get one right now.') + ')');
+  return { to, waiting: list.map(y => ({ tech: y.tech, customer: y.customer, email: !!y.email })) };
+}
+// ---- End of day: each tech with services still not submitted in POM today gets one email listing them
+const EOD_HOUR = +process.env.EOD_REMINDER_HOUR || 18;   // 6 PM New Jersey time
+async function eodCheck(dry) {
+  const st = mailState(), day = etDay().ymd, out = [];
+  st.eod = st.eod && typeof st.eod === 'object' ? st.eod : { on: false };
+  if (!dry && (!st.eod.on || !mailReady() || st.eod.day === day)) return out;
+  const stops = (await pomToday()).map(pomStop).filter(x => !pomCheckup(x) && x.tech && !x.done && Date.parse(x.time) < Date.now());
+  const at = await atData().catch(() => ({ drivers: [] })), users = await pomUsers().catch(() => []), bad = st.bounced || [];
+  const tm = t => new Date(t).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+  for (const tech of [...new Set(stops.map(x => x.tech))]) {
+    const mine = stops.filter(x => x.tech === tech), v = await visitsFor(tech, day).catch(() => null), vis = Object.fromEntries(((v && v.stops) || []).map(x => [x.id, x.visit]));
+    const d = matchPerson(at.drivers.filter(x => x.status !== 'Inactive'), tech), u = matchPerson(users, tech), email = (d && d.email) || (u && u.email) || '';
+    const lines = mine.map(x => { const w = vis[x.id]; return '• ' + (x.customer || 'Pool') + (x.address ? ', ' + x.address : '') + (w ? '  (you were there ' + tm(w.arrive) + '–' + tm(w.leave) + ')' : ''); });
+    const first = tech.split(' ')[0], n = mine.length;
+    out.push({ tech, email, n, subject: n + ' POM service' + (n > 1 ? 's' : '') + ' not submitted today', body: 'Hi ' + first + ',\n\nThese services from today still haven\'t been submitted in Pool Office Manager:\n\n' + lines.join('\n') + '\n\nPlease open the POM app and complete ' + (n > 1 ? 'them' : 'it') + ' tonight. If you didn\'t get to a pool, mark it so the office knows.\n\nThanks,\nMillennial Pools' });
+    await sleep(300);
+  }
+  if (dry) return out;
+  for (const m of out) { if (!m.email || bad.includes(m.email.toLowerCase())) continue;
+    try { await sendMail(m.email, m.subject, m.body); console.log(new Date().toISOString(), 'End-of-day POM email sent to', m.tech, '(' + m.n + ')'); } catch (e) { console.error('End-of-day email to', m.tech, 'failed:', e.message); } }
+  st.eod.day = day; st.eod.sent = out.filter(m => m.email).map(m => m.tech); saveMail(st);
+  return out;
+}
+if (process.argv[2] !== 'test') setInterval(() => { const h = +new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }); if (h >= EOD_HOUR && h < 23) eodCheck().catch(e => console.error('End-of-day POM emails:', e.message)); }, 10 * 60e3);
+async function eodTest() {
+  const at = await atData(), me = at.drivers.find(d => dupeName(d.name) === dupeName('Callum Curcie')), to = (me && me.email) || 'callum@millennialpools.com', list = await eodCheck(true);
+  const m = list[0] || { subject: '2 POM services not submitted today', body: 'Hi Callum,\n\nThese services from today still haven\'t been submitted in Pool Office Manager:\n\n• Sunset Village Pool, 1 Main St  (you were there 1:10 PM–1:42 PM)\n• Oak Ridge HOA, 2 Oak Ave\n\nPlease open the POM app and complete them tonight.\n\nThanks,\nMillennial Pools' };
+  await sendMail(to, 'SAMPLE · ' + m.subject, m.body + '\n\n(Sample' + (list[0] ? ' of ' + list[0].tech + '’s email' : '') + '. Right now ' + (list.length ? list.length + ' tech' + (list.length > 1 ? 's' : '') + ' have unsubmitted services: ' + list.map(x => x.tech + ' (' + x.n + ')').join(', ') : 'nobody has unsubmitted services') + '.)');
+  return { to, waiting: list.map(x => ({ tech: x.tech, n: x.n, email: !!x.email })) };
 }
 const MAIL_SLOTS = d => d >= 1 && d <= 3 ? [12] : [9, 15];
 async function autoMail() {
@@ -2767,7 +2830,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/svc/test': () => svcTest(), '/api/eod/test': () => eodTest(), '/api/eod/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.eod = { ...(st.eod || {}), on: b.on === true }; saveMail(st); return { on: st.eod.on }; }, '/api/svc/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.svc = { ...(st.svc || { day: '', sent: {} }), on: b.on === true }; saveMail(st); return { on: st.svc.on }; }, '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   Object.assign(POSTS, UPKEEP_POSTS);
@@ -3551,6 +3614,8 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .rtech{font-size:12px;color:#334155;background:rgba(255,255,255,.7);border-radius:8px;padding:5px 7px;margin-top:6px}.rtech.w{color:#92400e;background:#fffbeb}.rblk input{width:100%;box-sizing:border-box;margin-top:8px;font:inherit;font-size:13px;border:1px solid #cbd5e1;border-radius:8px;padding:4px 6px;background:#fff}.rblk input.saved{background:#dcfce7}
 .camload{display:inline-flex;align-items:center;gap:6px;margin-left:6px;color:#0e7490;font-weight:600}
 .camat{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#475569;background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:5px 11px}.camdot{width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.2)}.camdot.bad{background:#ef4444;box-shadow:0 0 0 3px rgba(239,68,68,.2)}.camdot.off{background:#94a3b8;box-shadow:none}.camdot.spin{background:#0ea5e9;animation:gbPulse 1s ease-in-out infinite}
+.cm-eod{width:100%;display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:10px;padding-top:10px;border-top:1px dashed #a5f3fc}.cm-eod>div{flex:1;min-width:220px}.cm-eod b{display:block}
+.cm-svc{margin-top:10px;border-left:4px solid #06b6d4;background:linear-gradient(90deg,#ecfeff,#fff 60%)}
 .cm-sms{margin-top:10px;border-left:4px solid #8b5cf6;background:linear-gradient(90deg,#f5f3ff,#fff 60%)}
 .ukk{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:14px}.ukk>div{background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 2px 10px rgba(15,23,42,.06);border-left:5px solid #0e7490;animation:rqIn .35s ease both}
 .ukk b{display:block;font-size:26px;font-weight:800;color:#0b4a63;line-height:1.1}.ukk span{font-size:12.5px;color:#64748b}.ukk .bad{border-color:#ef4444}.ukk .bad b{color:#b91c1c}.ukk .warn{border-color:#f59e0b}.ukk .warn b{color:#b45309}.ukk .good{border-color:#22c55e}.ukk .good b{color:#15803d}
@@ -4801,6 +4866,13 @@ async function mailPanel(){const el=$('chkMailAuto');if(!el)return;let st;try{st
     +'<button class="btn2" id="mailTest"'+(st.ready?'':' disabled')+'>Send test email to me</button><label class="cauto"><input type="checkbox" id="mailAuto"'+(st.auto?' checked':'')+(st.ready?'':' disabled')+'> Email automatically</label><button class="btn2 pri" id="mailNow"'+(st.ready?'':' disabled')+'>Send reminders now</button><span class="muted" id="mailMsg" style="width:100%;font-size:12.5px"></span></div>';
   el.insertAdjacentHTML('beforeend','<div class="cm-auto cm-sms"><div><b>📱 Text reminders</b><span class="muted">'+(st.smsReady?'Sent with Textedly to each tech’s phone in Airtable, once a day while their check-up is missing.'+(st.texted&&st.texted.length?' Texted today: '+st.texted.map(esc).join(', ')+'.':''):'Not set up: add TEXTEDLY_API_KEY in Render.')+'</span></div>'
     +'<button class="btn2" id="smsTest"'+(st.smsReady?'':' disabled')+'>Send test text to me</button><label class="cauto"><input type="checkbox" id="smsAuto"'+(st.sms?' checked':'')+(st.smsReady?'':' disabled')+'> Text automatically</label><button class="btn2 pri" id="smsNow"'+(st.smsReady?'':' disabled')+'>Text reminders now</button><span class="muted" id="smsMsg" style="width:100%;font-size:12.5px"></span></div>');
+  el.insertAdjacentHTML('beforeend','<div class="cm-auto cm-svc"><div><b>🏊 Service report reminders</b><span class="muted">'+(st.ready?'Emails a tech '+20+' minutes after their truck leaves a pool if that service still isn’t submitted in POM. One email per pool.'+(st.svcToday?' Sent today: '+st.svcToday+'.':''):'Needs the Outlook email settings in Render.')+'</span></div>'
+    +'<button class="btn2" id="svcTest"'+(st.ready?'':' disabled')+'>Send me a sample</button><label class="cauto"><input type="checkbox" id="svcAuto"'+(st.svc?' checked':'')+(st.ready?'':' disabled')+'> Remind automatically</label><span class="muted" id="svcMsg" style="width:100%;font-size:12.5px"></span>'
+    +'<div class="cm-eod"><div><b>🌙 End-of-day email</b><span class="muted">At 6 PM, each tech with services still not submitted today gets one email listing them.'+(st.eodToday?' Sent today: '+(st.eodToday.length?st.eodToday.map(esc).join(', '):'nobody needed one')+'.':'')+'</span></div><button class="btn2" id="eodTest"'+(st.ready?'':' disabled')+'>Send me a sample</button><label class="cauto"><input type="checkbox" id="eodAuto"'+(st.eod?' checked':'')+(st.ready?'':' disabled')+'> Send at end of day</label><span class="muted" id="eodMsg" style="width:100%;font-size:12.5px"></span></div></div>');
+  $('eodTest').onclick=async e=>{const b=e.currentTarget;b.disabled=true;$('eodMsg').textContent='Checking and sending...';try{const r=await post('/api/eod/test',{});$('eodMsg').textContent='Sample sent to '+r.to+'. '+(r.waiting.length?'Right now: '+r.waiting.map(w=>w.tech+' ('+w.n+')'+(w.email?'':' – no email')).join(', '):'Nobody has unsubmitted services right now.')}catch(err){$('eodMsg').textContent=err.message}b.disabled=false};
+  $('eodAuto').onchange=async e=>{try{const r=await post('/api/eod/auto',{on:e.target.checked});$('eodMsg').textContent=r.on?'On: goes out once a day at 6 PM.':'Off.'}catch(err){e.target.checked=!e.target.checked;$('eodMsg').textContent=err.message}};
+  $('svcTest').onclick=async e=>{const b=e.currentTarget;b.disabled=true;$('svcMsg').textContent='Checking and sending...';try{const r=await post('/api/svc/test',{});$('svcMsg').textContent='Sample sent to '+r.to+'. '+(r.waiting.length?'Right now '+r.waiting.length+' would get one: '+r.waiting.map(w=>w.tech+' ('+w.customer+')'+(w.email?'':' – no email')).join(', '):'Nobody has left a pool without submitting right now.')}catch(err){$('svcMsg').textContent=err.message}b.disabled=false};
+  $('svcAuto').onchange=async e=>{try{const r=await post('/api/svc/auto',{on:e.target.checked});$('svcMsg').textContent=r.on?'On: checked every 15 minutes, 7 AM to 9 PM.':'Off.'}catch(err){e.target.checked=!e.target.checked;$('svcMsg').textContent=err.message}};
   $('smsTest').onclick=async e=>{const b=e.currentTarget;b.disabled=true;$('smsMsg').textContent='Sending...';try{const r=await post('/api/text/test',{});$('smsMsg').textContent='Test text sent to '+r.to+'.'}catch(err){$('smsMsg').textContent=err.message}b.disabled=false};
   $('smsNow').onclick=async e=>{if(!confirm('Text everyone who hasn\u2019t submitted this week\u2019s check-up right now? (Anyone already texted today is skipped.)'))return;const b=e.currentTarget;b.disabled=true;$('smsMsg').textContent='Sending...';try{const r=await post('/api/text/now',{confirm:'SEND'});$('smsMsg').textContent='Texted '+r.sent.length+(r.sent.length?': '+r.sent.join(', '):'')+'.'+(r.failed.length?' Failed: '+r.failed.map(f=>f.name+' ('+f.error+')').join('; '):'');mailPanel()}catch(err){$('smsMsg').textContent=err.message;b.disabled=false}};
   $('smsAuto').onchange=async e=>{try{const r=await post('/api/text/auto',{on:e.target.checked});$('smsMsg').textContent=r.sms?'On: one text a day to anyone still missing their check-up.':'Off.'}catch(err){e.target.checked=!e.target.checked;$('smsMsg').textContent=err.message}};
