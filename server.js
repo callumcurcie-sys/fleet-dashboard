@@ -179,7 +179,7 @@ const routes = {
   '/api/ramp/overview': () => RAMP_CLIENT_ID && RAMP_CLIENT_SECRET ? rampOverview() : { connected: false },
   '/api/truck/requests': () => swapReqs(),
   '/api/truck/history': q => truckHistory(q),
-  '/api/mail/status': () => { const st = mailState(); return { ready: mailReady(), from: mailFrom(), auto: !!st.auto, week: st.week, sent: st.sent || [], bounced: st.bounced || [], bounceErr: st.bounceErr || '' }; },
+  '/api/mail/status': () => { const st = mailState(); return { ready: mailReady(), from: mailFrom(), auto: !!st.auto, week: st.week, sent: st.sent || [], bounced: st.bounced || [], bounceErr: st.bounceErr || '', sms: !!st.sms, smsReady: !!TXT_KEY(), texted: st.texted && st.texted.day === new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) ? st.texted.names : [] }; },
   '/api/repairs': async () => { if (!AIRTABLE_TOKEN) return { connected: false };
     const at = await atData(), ramp = RAMP_CLIENT_ID && RAMP_CLIENT_SECRET ? await rampRepairs().catch(e => ({ error: e.message })) : null;
     return { connected: true, ramp, trucks: at.trucks.map(t => ({ id: t.id, truckNo: t.truckNo, desc: [t.year, t.make, t.model].filter(Boolean).join(' '),
@@ -1327,21 +1327,49 @@ async function checkBounces(st) {
   } catch (e) { console.error('Bounce check:', e.message); }
   return st.bounced;
 }
+// ---- Texts (Textedly). Key in Render as TEXTEDLY_API_KEY. Check-up reminder texts go once a day per person (the Bronze plan has 1,000 texts a month).
+const TXT_KEY = () => clean(process.env.TEXTEDLY_API_KEY), TXT_BASE = clean(process.env.TEXTEDLY_BASE) || 'https://application.textedly.com/api-v2/v1';
+async function sendText(to, message) {
+  if (!TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.');
+  if (!/^\+1\d{10}$/.test(to)) throw new Error('Not a US mobile number: ' + to);
+  const r = await fetch(TXT_BASE + '/messages', { method: 'POST', headers: { Authorization: 'Bearer ' + TXT_KEY(), 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ to, message: message.slice(0, 600) }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error('Textedly ' + r.status + ': ' + String(j.message || j.error || j.detail || JSON.stringify(j)).slice(0, 200));
+  return j;
+}
+async function textMissed(force) {   // one text per person per day, the first reminder slot of the day
+  const st = mailState(), day = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }), sent = [], failed = [];
+  st.texted = st.texted && st.texted.day === day ? st.texted : { day, names: [] };
+  for (const t of (await routes['/api/texts/missed-checkups']()).texts || []) {
+    if (!t.phone || st.texted.names.includes(t.name)) continue;
+    try { await sendText(t.phone, t.message); st.texted.names.push(t.name); sent.push(t.name); console.log(new Date().toISOString(), 'Check-up text sent to', t.name); }
+    catch (e) { failed.push({ name: t.name, error: e.message }); console.error('Check-up text to', t.name, 'failed:', e.message); }
+    await sleep(200);
+  }
+  saveMail(st); return { sent, failed };
+}
+async function textTest() {
+  const at = await atData(), d = at.drivers.find(x => dupeName(x.name) === dupeName('Callum Curcie')), ph = String((d && d.phone) || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+  if (ph.length !== 10) throw new Error('No phone number for Callum Curcie in the Drivers table in Airtable.');
+  await sendText('+1' + ph, 'Test from the Millennial Pools fleet dashboard. Check-up reminder texts are working.');
+  return { to: '(***) ***-' + ph.slice(-4) };
+}
 const MAIL_SLOTS = d => d >= 1 && d <= 3 ? [12] : [9, 15];
 async function autoMail() {
-  const st = mailState(); if (!st.auto || !mailReady()) return;
+  const st = mailState(); if (!(st.auto && mailReady()) && !(st.sms && TXT_KEY())) return;
   const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })), wd = et.getDay(), h = et.getHours();
   const due = MAIL_SLOTS(wd).filter(x => x <= h).pop(); if (due == null) return;
   const mon = new Date(et); mon.setDate(mon.getDate() - ((wd + 6) % 7)); const week = mon.toLocaleDateString('en-CA');
   const slot = et.toLocaleDateString('en-CA') + ' ' + due;
   if (st.week !== week) { st.week = week; st.sent = []; st.slots = {}; }
   st.slots = st.slots || {}; if (st.slots[slot]) return;
-  try { const r = await routes['/api/texts/missed-checkups'](), done = [], bad = await checkBounces(st);
+  if (st.auto && mailReady()) try { const r = await routes['/api/texts/missed-checkups'](), done = [], bad = await checkBounces(st);
     for (const t of r.texts || []) { if (!t.email || bad.includes(t.email.toLowerCase())) continue;
       try { await sendMail(t.email, t.subject, t.body); done.push(t.name); if (!st.sent.includes(t.name)) st.sent.push(t.name); console.log(new Date().toISOString(), 'Check-up email sent to', t.name); }
       catch (e) { console.error('Check-up email to', t.name, 'failed:', e.message); } }
     st.slots[slot] = done; saveMail(st);
   } catch (e) { console.error('Check-up emails:', e.message); }
+  if (st.sms && TXT_KEY()) { await textMissed().catch(e => console.error('Check-up texts:', e.message)); const m = mailState(); m.slots = m.slots || {}; m.slots[slot] = m.slots[slot] || []; saveMail(m); }
 }
 // Send a round right now (button on the Check-ups tab), counted as the current reminder time
 async function mailNow() {
@@ -2646,7 +2674,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/text/test': () => textTest(), '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   Object.assign(POSTS, UPKEEP_POSTS);
@@ -3428,6 +3456,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .rblks{display:grid;gap:8px}.rblk{border-radius:12px;padding:10px 12px;border:2px solid #e2e8f0}.rblk.reg{background:#eff6ff}.rblk.ins{background:#f5f3ff}.rblk.bad{border-color:#ef4444;background:#fef2f2}.rblk.warn{border-color:#fdba74}.rblk.ok{border-color:#bbf7d0}
 .rblk-h{display:flex;justify-content:space-between;align-items:center;gap:8px;font-weight:800;font-size:12.5px;text-transform:uppercase;letter-spacing:.04em;color:#334155}.rblk-d{font-size:19px;font-weight:800;color:#0f172a;margin:4px 0 2px}.rblk.none .rblk-d{color:#94a3b8}.rsrc{font-size:12px;color:#64748b}
 .rtech{font-size:12px;color:#334155;background:rgba(255,255,255,.7);border-radius:8px;padding:5px 7px;margin-top:6px}.rtech.w{color:#92400e;background:#fffbeb}.rblk input{width:100%;box-sizing:border-box;margin-top:8px;font:inherit;font-size:13px;border:1px solid #cbd5e1;border-radius:8px;padding:4px 6px;background:#fff}.rblk input.saved{background:#dcfce7}
+.cm-sms{margin-top:10px;border-left:4px solid #8b5cf6;background:linear-gradient(90deg,#f5f3ff,#fff 60%)}
 .ukk{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:14px}.ukk>div{background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 2px 10px rgba(15,23,42,.06);border-left:5px solid #0e7490;animation:rqIn .35s ease both}
 .ukk b{display:block;font-size:26px;font-weight:800;color:#0b4a63;line-height:1.1}.ukk span{font-size:12.5px;color:#64748b}.ukk .bad{border-color:#ef4444}.ukk .bad b{color:#b91c1c}.ukk .warn{border-color:#f59e0b}.ukk .warn b{color:#b45309}.ukk .good{border-color:#22c55e}.ukk .good b{color:#15803d}
 .ukbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 12px}.ukchips{display:flex;flex-wrap:wrap;gap:6px}.ukchips button{font:inherit;font-size:13px;font-weight:700;border:1px solid #cbd5e1;background:#fff;color:#334155;border-radius:20px;padding:6px 12px;cursor:pointer;transition:all .15s}.ukchips button i{font-style:normal;background:#e2e8f0;border-radius:10px;padding:0 6px;margin-left:3px;font-size:11.5px}.ukchips button.on{background:#0e7490;border-color:#0e7490;color:#fff}.ukchips button.on i{background:rgba(255,255,255,.25)}
@@ -4663,6 +4692,11 @@ $('q').oninput=()=>{render();if(!$('vEdit').hidden)renderEdit();if(!$('vDrv').hi
 async function mailPanel(){const el=$('chkMailAuto');if(!el)return;let st;try{st=await get('/api/mail/status')}catch(e){el.innerHTML='';return}
   el.innerHTML='<div class="cm-auto"><div><b>Automatic emails</b><span class="muted">'+(st.ready?'Sent from '+esc(st.from)+' to anyone who hasn’t submitted: Mon–Wed at noon, Thu–Sun at 9 AM and 3 PM, until they do.'+(st.sent&&st.sent.length?' This week: '+st.sent.map(esc).join(', ')+'.':'')+(st.bounced&&st.bounced.length?'</span><span class="cm-bounce">Bounced, not emailed again: '+st.bounced.map(esc).join(', ')+'. Fix the address in Airtable.':'')+(st.bounceErr?'</span><span class="cm-bounce">'+esc(st.bounceErr):''):'Not set up yet: add the Outlook settings in Render (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, MAIL_FROM).')+'</span></div>'
     +'<button class="btn2" id="mailTest"'+(st.ready?'':' disabled')+'>Send test email to me</button><label class="cauto"><input type="checkbox" id="mailAuto"'+(st.auto?' checked':'')+(st.ready?'':' disabled')+'> Email automatically</label><button class="btn2 pri" id="mailNow"'+(st.ready?'':' disabled')+'>Send reminders now</button><span class="muted" id="mailMsg" style="width:100%;font-size:12.5px"></span></div>';
+  el.insertAdjacentHTML('beforeend','<div class="cm-auto cm-sms"><div><b>📱 Text reminders</b><span class="muted">'+(st.smsReady?'Sent with Textedly to each tech’s phone in Airtable, once a day while their check-up is missing.'+(st.texted&&st.texted.length?' Texted today: '+st.texted.map(esc).join(', ')+'.':''):'Not set up: add TEXTEDLY_API_KEY in Render.')+'</span></div>'
+    +'<button class="btn2" id="smsTest"'+(st.smsReady?'':' disabled')+'>Send test text to me</button><label class="cauto"><input type="checkbox" id="smsAuto"'+(st.sms?' checked':'')+(st.smsReady?'':' disabled')+'> Text automatically</label><button class="btn2 pri" id="smsNow"'+(st.smsReady?'':' disabled')+'>Text reminders now</button><span class="muted" id="smsMsg" style="width:100%;font-size:12.5px"></span></div>');
+  $('smsTest').onclick=async e=>{const b=e.currentTarget;b.disabled=true;$('smsMsg').textContent='Sending...';try{const r=await post('/api/text/test',{});$('smsMsg').textContent='Test text sent to '+r.to+'.'}catch(err){$('smsMsg').textContent=err.message}b.disabled=false};
+  $('smsNow').onclick=async e=>{if(!confirm('Text everyone who hasn\u2019t submitted this week\u2019s check-up right now? (Anyone already texted today is skipped.)'))return;const b=e.currentTarget;b.disabled=true;$('smsMsg').textContent='Sending...';try{const r=await post('/api/text/now',{confirm:'SEND'});$('smsMsg').textContent='Texted '+r.sent.length+(r.sent.length?': '+r.sent.join(', '):'')+'.'+(r.failed.length?' Failed: '+r.failed.map(f=>f.name+' ('+f.error+')').join('; '):'');mailPanel()}catch(err){$('smsMsg').textContent=err.message;b.disabled=false}};
+  $('smsAuto').onchange=async e=>{try{const r=await post('/api/text/auto',{on:e.target.checked});$('smsMsg').textContent=r.sms?'On: one text a day to anyone still missing their check-up.':'Off.'}catch(err){e.target.checked=!e.target.checked;$('smsMsg').textContent=err.message}};
   $('mailTest').onclick=async e=>{const b=e.currentTarget;b.disabled=true;$('mailMsg').textContent='Sending...';try{const r=await post('/api/mail/test',{});$('mailMsg').textContent='Test email sent to '+r.to+'. Check that inbox (and spam).'}catch(err){$('mailMsg').textContent=err.message}b.disabled=false};
   $('mailNow').onclick=async e=>{if(!confirm('Email everyone who hasn\u2019t submitted this week\u2019s check-up right now?'))return;const b=e.currentTarget;b.disabled=true;$('mailMsg').textContent='Sending...';try{const r=await post('/api/mail/now',{confirm:'SEND'});$('mailMsg').textContent='Sent to '+r.sent.length+(r.sent.length?': '+r.sent.join(', '):'')+'.'+(r.failed.length?' Failed: '+r.failed.map(f=>f.name+' ('+f.error+')').join('; '):'')+(r.noEmail.length?' No email: '+r.noEmail.join(', '):'');mailPanel()}catch(err){$('mailMsg').textContent=err.message;b.disabled=false}};
   $('mailAuto').onchange=async e=>{try{const r=await post('/api/mail/auto',{on:e.target.checked});$('mailMsg').textContent=r.auto?'On: emails go out Mondays at noon.':'Off.'}catch(err){e.target.checked=!e.target.checked;$('mailMsg').textContent=err.message}}}
@@ -4832,7 +4866,7 @@ function renderUp(){const u=UP;if(!u)return;let h='';
     const blk=(x,k)=>{const n=x[k+'Left'],d=x[k],src=x[k+'Src'],tech=x[k+'Tech'],st=n===null?'none':n<0?'bad':n<=30?'warn':'ok';
       const from=src==='checkup'?'From '+esc(tech.who)+'’s check-up on '+fdate(tech.on):src==='airtable'?'From the '+(k==='ins'?'insurance card':'registration file')+' in Airtable':'Not on file';
       const tl=tech&&tech.date&&src!=='checkup'?'<div class="rtech'+(tech.warn.length?' w':'')+'">'+esc(tech.who)+' entered '+fdate(tech.date)+' in their '+fdate(tech.on)+' check-up'+(tech.warn.length?'<br>⚠ Not used: '+esc(tech.warn.join('; ')):'')+'</div>':'';
-      return '<div class="rblk '+k+' '+st+'"><div class="rblk-h"><span>'+(k==='reg'?'🪪 Registration':'🛡️ Insurance')+'</span>'+dueChip(n)+'</div><div class="rblk-d">'+(d?fdate(d):'No date')+'</div><div class="rsrc">'+from+'</div>'+tl
+      return '<div class="rblk '+k+' '+st+'"><div class="rblk-h"><span>'+(k==='reg'?'🪪 Registration':'🛡️ Insurance')+'</span>'+(n===null?'':dueChip(n))+'</div><div class="rblk-d">'+(d?fdate(d):'No date')+'</div><div class="rsrc">'+from+'</div>'+tl
         +'<input type="date" data-ren="'+k+'" data-id="'+x.id+'" value="'+esc(x[k+'Air']||'')+'" aria-label="'+(k==='reg'?'Registration':'Insurance')+' expires (Airtable)" title="Airtable date"></div>'};
     const card=x=>'<div class="ukc ren'+(need(x)?' hot':'')+'"><div class="ukc-h"><div><b>'+esc(x.name)+'</b><small>'+esc(x.plate||'No plate')+(x.policy?' · '+esc(x.policy):'')+'</small></div>'+(x.card?'<a class="btn2" href="'+esc(x.card)+'" target="_blank" rel="noopener">Card ↗</a>':'')+'</div>'
       +'<div class="rblks">'+blk(x,'reg')+blk(x,'ins')+'</div></div>';
