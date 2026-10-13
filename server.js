@@ -191,6 +191,17 @@ const routes = {
     catch (e) { return { error: e.message }; } },
   '/api/score/status': () => ({ jobs: WARM, events: Object.keys(EVA.ev).length, weeksBackfilled: EVA.weeks, miles: !!(cache.get('scores') || {}).data }),
   '/api/score': q => scoreFor(q.get('vehicleId') || '', q.get('name') || ''),
+  // Older footage for the Cameras tab, one week at a time (w=1 is 7-14 days ago). Only events whose clip or photos Azuga still has.
+  '/api/videos/week': q => {
+    const w = Math.max(1, Math.min(104, parseInt(q.get('w')) || 1)), body = { startTime: fmt(daysAgo(7 * (w + 1))), endTime: fmt(daysAgo(7 * w)), page: 1, limit: 100 };
+    return cached('vidwk:' + w + ':' + new Date().toISOString().slice(0, 10), 6 * 3600, async () => {
+      let ev = [];
+      for (let page = 1; page <= 15; page++) { const p = list(await azuga('/eventVideos.json?videoType=eventVideo', { ...body, page })); ev = ev.concat(p); if (p.length < body.limit) break; await sleep(400); }
+      addEvents(ev);
+      const kept = ev.filter(x => camMedia(x));
+      return { w, from: body.startTime, total: ev.length, events: kept };
+    });
+  },
   '/api/videos': q => {
     const id = q.get('vehicleId') || '';
     const body = { startTime: fmt(daysAgo(7)), endTime: fmt(new Date()), page: 1, limit: 100, ...(id ? { vehiclesIds: id } : {}) };
@@ -3538,6 +3549,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .rblks{display:grid;gap:8px}.rblk{border-radius:12px;padding:10px 12px;border:2px solid #e2e8f0}.rblk.reg{background:#eff6ff}.rblk.ins{background:#f5f3ff}.rblk.bad{border-color:#ef4444;background:#fef2f2}.rblk.warn{border-color:#fdba74}.rblk.ok{border-color:#bbf7d0}
 .rblk-h{display:flex;justify-content:space-between;align-items:center;gap:8px;font-weight:800;font-size:12.5px;text-transform:uppercase;letter-spacing:.04em;color:#334155}.rblk-d{font-size:19px;font-weight:800;color:#0f172a;margin:4px 0 2px}.rblk.none .rblk-d{color:#94a3b8}.rsrc{font-size:12px;color:#64748b}
 .rtech{font-size:12px;color:#334155;background:rgba(255,255,255,.7);border-radius:8px;padding:5px 7px;margin-top:6px}.rtech.w{color:#92400e;background:#fffbeb}.rblk input{width:100%;box-sizing:border-box;margin-top:8px;font:inherit;font-size:13px;border:1px solid #cbd5e1;border-radius:8px;padding:4px 6px;background:#fff}.rblk input.saved{background:#dcfce7}
+.camload{display:inline-flex;align-items:center;gap:6px;margin-left:6px;color:#0e7490;font-weight:600}
 .camat{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#475569;background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:5px 11px}.camdot{width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.2)}.camdot.bad{background:#ef4444;box-shadow:0 0 0 3px rgba(239,68,68,.2)}.camdot.off{background:#94a3b8;box-shadow:none}.camdot.spin{background:#0ea5e9;animation:gbPulse 1s ease-in-out infinite}
 .cm-sms{margin-top:10px;border-left:4px solid #8b5cf6;background:linear-gradient(90deg,#f5f3ff,#fff 60%)}
 .ukk{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:14px}.ukk>div{background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 2px 10px rgba(15,23,42,.06);border-left:5px solid #0e7490;animation:rqIn .35s ease both}
@@ -4728,10 +4740,17 @@ function renderChk(){const r=CHK;if(!r)return;
     :'<div class="empty">'+(q?'No drivers match your search.':'No truck check-ups found in Pool Office Manager.')+'</div>'}
 // ---- Cameras tab: every camera event in the fleet, filter by type and driver ----
 let CAMALL=[],camTabType='';
+// Older footage: after the last 7 days load, keep pulling a week at a time while Azuga still has clips or photos
+let CAMOLD=[],CAMBACK=0,CAMOLDBUSY=false;
+async function loadOlderCams(){if(CAMOLDBUSY||CAMBACK<0)return;CAMOLDBUSY=true;let empty=0;const seen=new Set(CAMALL.concat(CAMOLD).map(x=>[x.vehicleId,pick(x,'eventTime','startTime'),pick(x,'eventType','eventName')].join('|')));
+  for(let w=CAMBACK+1;w<=104&&empty<3;w++){let r;try{r=await get('/api/videos/week?w='+w)}catch(e){break}CAMBACK=w;
+    const add=(r.events||[]).filter(x=>{const k=[x.vehicleId,pick(x,'eventTime','startTime'),pick(x,'eventType','eventName')].join('|');if(seen.has(k))return false;seen.add(k);return true});
+    empty=add.length?0:empty+1;if(add.length){CAMOLD=CAMOLD.concat(add);if(!$('vCam').hidden)renderCamTab()}else if(!$('vCam').hidden)renderCamTab()}
+  if(empty>=3)CAMBACK=-CAMBACK;CAMOLDBUSY=false;if(!$('vCam').hidden)renderCamTab()}
 async function loadCamTab(){if(!CAMALL.length)$('cgrid').innerHTML='<div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div>';
-  try{CAMALL=await fleetVids();renderCamTab()}catch(e){$('cgrid').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
+  try{CAMALL=await fleetVids();renderCamTab();loadOlderCams()}catch(e){$('cgrid').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
 $('camDrv').onchange=()=>renderCamTab();$('camSer').onclick=()=>{const b=$('camSer'),on=b.getAttribute('aria-pressed')!=='true';b.setAttribute('aria-pressed',on);renderCamTab()};
-function renderCamTab(){const ev=CAMALL,q=$('q').value.trim().toLowerCase(),dv=$('camDrv').value;
+function renderCamTab(){const ev=CAMALL.concat(CAMOLD),q=$('q').value.trim().toLowerCase(),dv=$('camDrv').value;
   const truckOf=x=>{const r=all().find(v=>vid(v)==x.vehicleId);return r?title(r):''};
   const drivers=[...new Set(ev.map(x=>evDriver(x).name).filter(Boolean))].sort();
   $('camDrv').innerHTML='<option value="">All drivers</option>'+drivers.map(d=>'<option'+(d===dv?' selected':'')+'>'+esc(d)+'</option>').join('');
@@ -4740,13 +4759,14 @@ function renderCamTab(){const ev=CAMALL,q=$('q').value.trim().toLowerCase(),dv=$
   $('camTypes').innerHTML='<button class="cchip'+(camTabType?'':' on')+'" data-ct="">All <b>'+byDrv.length+'</b></button>'+Object.entries(c).sort((a,b)=>b[1]-a[1]).map(([t,n])=>'<button class="cchip pill '+evClass(t)+(camTabType===t?' on':'')+'" data-ct="'+esc(t)+'">'+esc(t)+' <b>'+n+'</b></button>').join('');
   const serOnly=$('camSer').getAttribute('aria-pressed')==='true';
   VIDS=byDrv.filter(x=>(!serOnly||isSerious(x))&&(!camTabType||evName(pick(x,'eventType','eventName'))===camTabType)&&(!q||(evDriver(x).name+' '+truckOf(x)+' '+evName(pick(x,'eventType','eventName'))+' '+(pick(x,'address')||'')).toLowerCase().includes(q)));
-  $('camCount').textContent=ev.length+' events across the fleet · last 7 days';
+  const wk=Math.abs(CAMBACK),oldest=ev.reduce((m,x)=>{const v=pick(x,'eventTime','startTime'),t=+v||Date.parse(v)||0;return t&&t<m?t:m},Date.now());
+  $('camCount').innerHTML=ev.length+' events across the fleet · '+(CAMOLD.length?'footage back to <b>'+new Date(oldest).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})+'</b>':'last 7 days')+(CAMOLDBUSY?' <span class="camload"><i class="camdot spin"></i>looking further back (week '+(wk+1)+')...</span>':CAMBACK<0?' · everything Azuga still has':'');
   // one row per driver: who they are and what they're doing on the left, their events as big photo cards on the right
   const tOf=x=>{const v=pick(x,'eventTime','startTime');return +v||Date.parse(v)||0},by={};
   VIDS.sort((a,b)=>tOf(b)-tOf(a)).forEach((x,i)=>{const n=evDriver(x).name||'Unknown driver';(by[n]=by[n]||[]).push(i)});
   const rows=Object.entries(by).map(([n,ix])=>({n,ix,ser:ix.filter(i=>isSerious(VIDS[i])).length})).sort((a,b)=>b.ser-a.ser||b.ix.length-a.ix.length);
   const ser=VIDS.filter(isSerious).length;
-  const hm=t=>t?new Date(t).toLocaleString([],{weekday:'short',hour:'numeric',minute:'2-digit'}):'';
+  const hm=t=>t?new Date(t).toLocaleString([],Date.now()-t>6*864e5?{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}:{weekday:'short',hour:'numeric',minute:'2-digit'}):'';
   $('cgrid').innerHTML=rows.length?'<div class="csum"><div><b>'+VIDS.length+'</b><span>events</span></div><div class="red"><b>'+ser+'</b><span>serious</span></div><div><b>'+rows.length+'</b><span>drivers</span></div><div><b>'+VIDS.filter(x=>evMedia(x).videos.length).length+'</b><span>with video</span></div></div>'
     +rows.map(r=>{const tr=[...new Set(r.ix.map(i=>truckOf(VIDS[i])).filter(Boolean))],c={};r.ix.forEach(i=>{const t=evName(pick(VIDS[i],'eventType','eventName'));c[t]=(c[t]||0)+1});
       const top=Object.entries(c).sort((a,b)=>b[1]-a[1]);
