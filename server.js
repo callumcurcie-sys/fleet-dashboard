@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist2', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv', 'upkeep', 'gasChk2', 'geo']);
+const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist2', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv', 'upkeep', 'gasChk2', 'geo', 'camSync']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -313,7 +313,7 @@ const { AIRTABLE_TOKEN } = process.env;
 const AT_BASE = 'appxOcqhRSdoWgHE3', AT_TRUCKS = 'tbl3aU0dRPvn79Ba1', AT_DRIVERS = 'tbl9oEuseNwk23jdg';
 const F = { vin: 'fldT4fSSnXnZuj2Jr', year: 'fldqjqyAK1ZJfn0oT', make: 'fldOhan3is4yEhucl', model: 'fldM01jCShSILujYB',
   truckNo: 'fldYmYqWTfoYoRvjB', policy: 'fldWlS28YbpsipR7r', driver: 'fldEO66ezgMWnguAu', plate: 'fldLGLwnLOAfpw88W',
-  insCard: 'fldH0Pe6EKyQEBmMR', files: 'fldS5YJgDrLDbxSiK', regRenew: 'fldjFFBZ0UoO4SUXV', ezpass: 'fld1utE81nDdDiqgi', active: 'fldBpQ0MA5cD9YJ06', snap: 'fldOaFfl7ZzS72xLK', notes: 'fldkWorOJHdYaLCy5', oilDate: 'fldGdTd6Vk2w7lyrn', oilMiles: 'fldKXcXo3MPHkkfC4', insExp: 'fldITfdiPBIa3oMd8', regExp: 'fldjZ4AIbigbm6PPX' };
+  insCard: 'fldH0Pe6EKyQEBmMR', files: 'fldS5YJgDrLDbxSiK', regRenew: 'fldjFFBZ0UoO4SUXV', ezpass: 'fld1utE81nDdDiqgi', active: 'fldBpQ0MA5cD9YJ06', snap: 'fldOaFfl7ZzS72xLK', notes: 'fldkWorOJHdYaLCy5', oilDate: 'fldGdTd6Vk2w7lyrn', oilMiles: 'fldKXcXo3MPHkkfC4', insExp: 'fldITfdiPBIa3oMd8', regExp: 'fldjZ4AIbigbm6PPX', hasTracker: 'fld9r34OVpY2kPEom' };
 // Drivers. Date of birth is only ever written (new driver form), never read or shown.
 const D = { name: 'fldMrVtrXN6WDaOjj', license: 'fldcSIYqy5FCEC0Xn', state: 'fld1NdVP4v6QcckK2', pic: 'fldZeCHS22kI7Ythi',
   policy: 'fldVo5IrWedsKvumK', trucks: 'fld47HPqHRrw9GUL7', notes: 'fldSnexzpxIG22gF0', status: 'fldVuSDYSZVHk0fWN',
@@ -361,7 +361,7 @@ const atData = () => cached('airtable', 60, async () => {
       truckNo: clean(f[F.truckNo]), policy: clean(f[F.policy]?.name ?? f[F.policy]), plate: clean(f[F.plate]),
       regRenew: clean(f[F.regRenew]), ezpass: clean(f[F.ezpass]), active: !!f[F.active],
       driver: (f[F.driver] || []).map(id => byId[id]).filter(Boolean)[0] || null, snap: parseSnap(f[F.snap]),
-      insCard: att(f[F.insCard]), files: att(f[F.files]), notes: String(f[F.notes] || ''), oilDate: f[F.oilDate] || '', oilMiles: f[F.oilMiles] || null, insExp: f[F.insExp] || '', regExp: f[F.regExp] || '',
+      insCard: att(f[F.insCard]), files: att(f[F.files]), notes: String(f[F.notes] || ''), oilDate: f[F.oilDate] || '', oilMiles: f[F.oilMiles] || null, insExp: f[F.insExp] || '', regExp: f[F.regExp] || '', hasTracker: !!f[F.hasTracker],
     }; }),
   };
 });
@@ -2617,6 +2617,64 @@ const UPKEEP_POSTS = {
   '/api/upkeep/renewal-test': async () => renewalMail(true),
 };
 
+// ---------------- Airtable "Cameras" + "Camera events" tables and the Trucks "Has Azuga tracker" box (hourly) ----------------
+const AT_CAMS = 'tblLoVcQu5D9NDk77', CAM = { name: 'fldgORV66c1z9CWmb', truck: 'fldjyBQUVhW3aUClx', vehicle: 'fldd8MIj3pHn5A9HC', azId: 'fldsCnZn9qjDFn21j', driver: 'fld6IKjNDKuSHko8d', status: 'fldaxpmk2NHXqq7F4', n30: 'fldLn2wzxzeQxrKkd', last: 'fldUFpdFHxO5GZD7O', synced: 'fldoW0d4i2ACxQOZq' };
+const AT_CAMEV = 'tblin63fFw2KKRfoo', CEV = { name: 'fldUAQznI5JnZIsSZ', key: 'fldXuDDvWND9qDZzw', when: 'fldNE0teW4wtmc3ii', type: 'fld31MQ0JclIgXv3H', pts: 'fld8mu2qOmRybBL6n', driver: 'fldYEjamgXSgnnHDR', truck: 'fldnErQwM6AEfv5d8', camera: 'fldiLX1kwXa3XbtFo', where: 'fldSnO5oNWAIqlLfb', mph: 'fldlf3Dv41n1dIhvL' };
+const camState = () => (cache.get('camSync') || {}).data || { keys: [], at: 0, last: null };
+let camBusy = false;
+async function syncCameras() {
+  if (camBusy || !AIRTABLE_TOKEN) return { busy: camBusy }; camBusy = true;
+  const out = { trackers: 0, cameras: 0, events: 0, at: Date.now() };
+  try {
+    const [vs, L, at, td, evs] = await Promise.all([routes['/api/vehicles']().then(list), atLinks(), atData(), truckDrivers(), events30()]);
+    const links = L.links || {}, truckOf = v => { const l = links[v.trackeeId]; return l && l.linked ? l.truck : null; };
+    // 1. Trucks: tick "Has Azuga tracker" for every truck matched to a tracker, untick the rest
+    const withT = new Set(vs.map(truckOf).filter(Boolean).map(t => t.id)), fix = at.trucks.filter(t => t.hasTracker !== withT.has(t.id)).map(t => ({ id: t.id, fields: { [F.hasTracker]: withT.has(t.id) } }));
+    for (let i = 0; i < fix.length; i += 10) { await airtable(AT_TRUCKS, { method: 'PATCH', body: JSON.stringify({ records: fix.slice(i, i + 10) }) }); await sleep(250); }
+    out.trackers = fix.length; if (fix.length) cache.delete('airtable');
+    // 2. Cameras: one row per SafetyCam (matched on its serial); Broken / Spare / Removed set by hand are kept
+    const old = await atAll(AT_CAMS, Object.values(CAM)), byName = Object.fromEntries(old.map(r => [clean(r.fields[CAM.name]), r]));
+    const since = Date.now() - 30 * 864e5, perV = {};
+    evs.forEach(x => { const t = x.t || evTime(x); if (t < since || !eventKind(x.eventType).pts) return; const p = perV[x.vehicleId] = perV[x.vehicleId] || { n: 0, last: 0 }; p.n++; p.last = Math.max(p.last, t); });
+    const cams = vs.filter(v => clean(v.safetyCamSerialNumber || v.safetyCam)), seen = new Set(), recs = [];
+    for (const v of cams) {
+      const serial = clean(v.safetyCamSerialNumber || v.safetyCam), t = truckOf(v), prev = byName[serial], keep = prev && /broken|spare|removed/i.test((prev.fields[CAM.status] || {}).name || prev.fields[CAM.status] || '');
+      seen.add(serial);
+      recs.push({ fields: { [CAM.name]: serial, [CAM.truck]: t ? [t.id] : [], [CAM.vehicle]: clean(v.name || v.trackeeName || v.vehicleName), [CAM.azId]: String(v.trackeeId), [CAM.driver]: clean(td[v.trackeeId]),
+        ...(keep ? {} : { [CAM.status]: t ? 'Installed' : 'Not linked to a truck' }), [CAM.n30]: (perV[v.trackeeId] || {}).n || 0,
+        [CAM.last]: (perV[v.trackeeId] || {}).last ? new Date(perV[v.trackeeId].last).toISOString() : null, [CAM.synced]: new Date().toISOString() } });
+    }
+    old.filter(r => !seen.has(clean(r.fields[CAM.name])) && /installed|not linked/i.test(((r.fields[CAM.status] || {}).name || r.fields[CAM.status] || ''))).forEach(r => recs.push({ fields: { [CAM.name]: clean(r.fields[CAM.name]), [CAM.status]: 'Removed', [CAM.synced]: new Date().toISOString() } }));
+    for (let i = 0; i < recs.length; i += 10) { await airtable(AT_CAMS, { method: 'PATCH', body: JSON.stringify({ performUpsert: { fieldsToMergeOn: [CAM.name] }, typecast: true, records: recs.slice(i, i + 10) }) }); await sleep(250); }
+    out.cameras = cams.length;
+    // 3. Camera events: last 30 days, real alerts only (camera notices skipped), each added once
+    const camRecs = await atAll(AT_CAMS, [CAM.name, CAM.azId]), camOf = Object.fromEntries(camRecs.map(r => [clean(r.fields[CAM.azId]), r.id]));
+    const st = camState(), done = new Set(st.keys), recent = list(await routes['/api/videos'](new URLSearchParams()).catch(() => [])), full = {};
+    recent.forEach(x => { full[[x.vehicleId, evTime(x), x.eventType].join('|')] = x; });
+    const vByT = Object.fromEntries(vs.map(v => [String(v.trackeeId), v])), add = [];
+    for (const x of evs.filter(x => (x.t || evTime(x)) >= since).sort((a, b) => (a.t || evTime(a)) - (b.t || evTime(b)))) {
+      const t = x.t || evTime(x), k = [x.vehicleId, t, x.eventType].join('|'), kind = eventKind(x.eventType);
+      if (done.has(k) || !kind.pts) continue;
+      const v = vByT[String(x.vehicleId)], tr = v && truckOf(v), f = full[k] || {}, who = eventOwner(x, td);
+      add.push({ k, fields: { [CEV.name]: (kind.label || 'Event') + ' · ' + (who || 'Unknown') + ' · ' + new Date(t).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }),
+        [CEV.key]: k, [CEV.when]: new Date(t).toISOString(), [CEV.type]: kind.label || clean(x.eventType), [CEV.pts]: kind.pts, [CEV.driver]: who,
+        ...(tr ? { [CEV.truck]: [tr.id] } : {}), ...(camOf[String(x.vehicleId)] ? { [CEV.camera]: [camOf[String(x.vehicleId)]] } : {}),
+        [CEV.where]: clean(f.address || f.location || ''), ...(f.speed ? { [CEV.mph]: Math.round(+f.speed * 0.621371) } : {}) } });
+    }
+    for (let i = 0; i < add.length; i += 10) {
+      const part = add.slice(i, i + 10);
+      await airtable(AT_CAMEV, { method: 'PATCH', body: JSON.stringify({ performUpsert: { fieldsToMergeOn: [CEV.key] }, typecast: true, records: part.map(a => ({ fields: a.fields })) }) });
+      part.forEach(a => done.add(a.k)); await sleep(250);
+    }
+    out.events = add.length;
+    const keep = [...done].filter(k => +k.split('|')[1] > Date.now() - 45 * 864e5);
+    const ns = { keys: keep, at: out.at, last: out }; cache.set('camSync', { data: ns, t: Date.now() }); saveSnap('camSync', ns);
+    console.log(new Date().toISOString(), 'Airtable cameras synced:', JSON.stringify(out));
+  } catch (e) { out.error = e.message; console.error('Camera sync:', e.message); } finally { camBusy = false; }
+  return out;
+}
+if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) { setTimeout(() => syncCameras(), 4 * 60e3); setInterval(() => syncCameras(), 60 * 60e3); }
+routes['/api/cameras/sync-status'] = () => ({ busy: camBusy, ...camState(), keys: undefined });
 // Azuga's camera storage only serves files to pages on azuga.com, so the server fetches them
 // and passes them through. Locked to Azuga's recording bucket so it can't fetch anything else.
 async function media(u, req, res) {
@@ -2692,7 +2750,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/text/test': () => textTest(), '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   Object.assign(POSTS, UPKEEP_POSTS);
@@ -3474,6 +3532,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .rblks{display:grid;gap:8px}.rblk{border-radius:12px;padding:10px 12px;border:2px solid #e2e8f0}.rblk.reg{background:#eff6ff}.rblk.ins{background:#f5f3ff}.rblk.bad{border-color:#ef4444;background:#fef2f2}.rblk.warn{border-color:#fdba74}.rblk.ok{border-color:#bbf7d0}
 .rblk-h{display:flex;justify-content:space-between;align-items:center;gap:8px;font-weight:800;font-size:12.5px;text-transform:uppercase;letter-spacing:.04em;color:#334155}.rblk-d{font-size:19px;font-weight:800;color:#0f172a;margin:4px 0 2px}.rblk.none .rblk-d{color:#94a3b8}.rsrc{font-size:12px;color:#64748b}
 .rtech{font-size:12px;color:#334155;background:rgba(255,255,255,.7);border-radius:8px;padding:5px 7px;margin-top:6px}.rtech.w{color:#92400e;background:#fffbeb}.rblk input{width:100%;box-sizing:border-box;margin-top:8px;font:inherit;font-size:13px;border:1px solid #cbd5e1;border-radius:8px;padding:4px 6px;background:#fff}.rblk input.saved{background:#dcfce7}
+.camat{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#475569;background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:5px 11px}.camdot{width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.2)}.camdot.bad{background:#ef4444;box-shadow:0 0 0 3px rgba(239,68,68,.2)}.camdot.off{background:#94a3b8;box-shadow:none}.camdot.spin{background:#0ea5e9;animation:gbPulse 1s ease-in-out infinite}
 .cm-sms{margin-top:10px;border-left:4px solid #8b5cf6;background:linear-gradient(90deg,#f5f3ff,#fff 60%)}
 .ukk{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:14px}.ukk>div{background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 2px 10px rgba(15,23,42,.06);border-left:5px solid #0e7490;animation:rqIn .35s ease both}
 .ukk b{display:block;font-size:26px;font-weight:800;color:#0b4a63;line-height:1.1}.ukk span{font-size:12.5px;color:#64748b}.ukk .bad{border-color:#ef4444}.ukk .bad b{color:#b91c1c}.ukk .warn{border-color:#f59e0b}.ukk .warn b{color:#b45309}.ukk .good{border-color:#22c55e}.ukk .good b{color:#15803d}
@@ -3689,7 +3748,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 </div>
 <div id="vCam" hidden>
  <div class="crewhead"><div><h2>Camera events</h2><p id="camCount" class="muted">Loading the last 7 days from Azuga...</p></div><span style="flex:1"></span>
-  <button class="btn2" id="camSer" aria-pressed="false">Serious only</button><select id="camDrv" aria-label="Filter by driver"><option value="">All drivers</option></select></div>
+  <span class="camat" id="camAt" title="Cameras and camera events are copied to Airtable every hour">Airtable</span><button class="btn2" id="camSync">⟳ Sync to Airtable</button><button class="btn2" id="camSer" aria-pressed="false">Serious only</button><select id="camDrv" aria-label="Filter by driver"><option value="">All drivers</option></select></div>
  <div id="camTypes" class="ctypes"></div><div id="cgrid" class="cboard"></div>
 </div>
 <div id="vEdit" hidden><div class="ed">
@@ -3956,6 +4015,9 @@ async function swapPanel(){const el=$('swapBox');if(!el)return;let l=[],rq=[];tr
   el.innerHTML=(rq.length?'<div class="rqbox"><b>Sign-in requests <span>'+rq.length+'</span></b>'+rq.map(r=>'<div class="rqi"><div><b>'+esc(r.who)+'</b> wants '+esc(r.truck)+'<small>'+new Date(r.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+'</small></div><button class="btn2 pri" data-rq="'+esc(r.id)+'" data-ok="1">Approve</button><button class="btn2" data-rq="'+esc(r.id)+'">Deny</button></div>').join('')+'<div id="rqMsg" class="muted" style="font-size:12px"></div></div>':'')+(l.length?'<details class="swaps"><summary>Recent truck sign-ins <span>'+l.length+'</span></summary>'+l.slice(0,25).map(x=>'<div class="swp'+(x.out?' o':'')+'"><b>'+esc(x.who)+'</b> '+(x.denied?'denied for':x.out?'signed out of':'→')+' '+esc(x.truck)+(x.was?' <small>('+esc(x.was)+' bumped)</small>':'')+'<small>'+new Date(x.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+'</small></div>').join('')+'</details>':'');
   el.querySelectorAll('[data-rq]').forEach(b=>b.onclick=async()=>{el.querySelectorAll('[data-rq]').forEach(x=>x.disabled=true);try{const r=await post('/api/truck/request',{id:b.dataset.rq,approve:!!b.dataset.ok});if(r.who)toast(r.who+' is now in '+r.truck+(r.left&&r.left.length?' (moved off '+r.left.join(', ')+')':''));await loadAT()}catch(err){$('rqMsg').textContent=err.message;el.querySelectorAll('[data-rq]').forEach(x=>x.disabled=false)}})}
 setInterval(swapPanel,60000);
+async function camAtLabel(){try{const r=await get('/api/cameras/sync-status'),el=$('camAt');if(!el)return;const l=r.last;el.innerHTML=r.busy?'<i class="camdot spin"></i>Syncing to Airtable...':l?'<i class="camdot'+(l.error?' bad':'')+'"></i>'+(l.error?'Airtable sync failed: '+esc(l.error):'Airtable synced '+new Date(l.at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})+' · '+l.cameras+' cameras'+(l.events?' · +'+l.events+' events':'')):'<i class="camdot off"></i>Not synced to Airtable yet'}catch(e){}}
+setTimeout(camAtLabel,4000);setInterval(camAtLabel,5*60e3);
+document.addEventListener('click',async e=>{const b=e.target.closest('#camSync');if(!b)return;b.disabled=true;$('camAt').innerHTML='<i class="camdot spin"></i>Syncing to Airtable...';try{const r=await post('/api/cameras/sync',{});$('camAt').innerHTML=r.error?'<i class="camdot bad"></i>'+esc(r.error):r.busy?'<i class="camdot spin"></i>Already syncing...':'<i class="camdot"></i>Synced: '+r.cameras+' cameras, '+r.events+' new events, '+r.trackers+' tracker boxes updated'}catch(err){$('camAt').textContent=err.message}b.disabled=false});
 async function upBadge(){try{const r=await get('/api/upkeep/flags'),tab=document.querySelector('.tabs button[data-v=vBuy]');if(!tab)return;let b=tab.querySelector('.gbadge');if(!b){b=document.createElement('span');b.className='rqb gbadge';b.title='Fill-ups where the truck was not near the card';tab.appendChild(b)}b.textContent=r.gas;b.hidden=!r.gas}catch(e){}}
 setTimeout(upBadge,3000);setInterval(upBadge,5*60e3);
 async function loadAT(){swapPanel();try{AT=await get('/api/airtable')}catch(e){AT={connected:true,error:e.message,links:{}}}if(!$('vEdit').hidden)renderEdit();if(vehicles.length||locs.length)render()}
