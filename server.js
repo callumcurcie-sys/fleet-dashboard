@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv', 'upkeep', 'gasChk', 'geo']);
+const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv', 'upkeep', 'gasChk2', 'geo']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -2260,7 +2260,7 @@ async function myEmail() {
   if (u && u.email) return u.email;
   throw new Error('Could not find an email for Callum Curcie (Drivers table in Airtable).');
 }
-const UPKEEP_TO = clean(process.env.UPKEEP_EMAIL) || 'callum@millennialpools.com';   // every Upkeep email goes here, not to the drivers
+const UPKEEP_TO = clean(process.env.UPKEEP_EMAIL) || 'callum@millennialpools.com';   // renewal + oil emails and samples go here; safety emails go to each driver
 const emailOf = async name => { const at = await atData(), d = at.drivers.find(x => dupeName(x.name) === dupeName(name)); return d && d.status !== 'Inactive' ? d.email : ''; };
 
 // Cost per truck (last 12 months): invoices saved in the truck's notes + Ramp repair payments not already in the notes,
@@ -2299,70 +2299,83 @@ const truckCost = () => cached('truckCost', 3600, async () => {
 // Tank sizes by model (Azuga doesn't report them); the biggest tank option is used so only clear overfills show.
 const TANKS = [[/ranger/i, 21], [/maverick/i, 13.8], [/colorado|canyon/i, 21], [/tacoma/i, 21], [/frontier/i, 21], [/f-?150/i, 36], [/silverado|sierra/i, 28], [/\bram\b|1500/i, 33], [/transit/i, 31], [/ridgeline/i, 19.5], [/gladiator/i, 22]];
 const tankOf = t => { const h = t && TANKS.find(([re]) => re.test(t.make + ' ' + t.model)); return h ? h[1] : 0; };
-const gasChk = () => (cache.get('gasChk') || {}).data || {};
+// Results are kept packed (one short array per fill-up) so 60 days fit in one "Dashboard cache" row
+const GPACK = ['verdict', 'at', 'who', 'merchant', 'amount', 'gal', 'truckId', 'flags', 'unverified', 'mi'];
+const gasChk = () => Object.fromEntries(Object.entries((cache.get('gasChk2') || {}).data || {}).map(([id, a]) => [id, Object.fromEntries(GPACK.map((k, i) => [k, k === 'at' ? new Date(a[i] * 1000).toISOString() : a[i]]))]));
+const saveGasChk = done => { const d = Object.fromEntries(Object.entries(done).map(([id, x]) => [id, GPACK.map(k => k === 'at' ? Math.round(Date.parse(x.at) / 1000) : k === 'merchant' ? String(x.merchant).slice(0, 28) : x[k] ?? (k === 'flags' ? [] : ''))]));
+  cache.set('gasChk2', { data: d, t: Date.now() }); saveSnap('gasChk2', d); };
 const geoCache = () => (cache.get('geo') || {}).data || {};
 async function geocode(loc) {
   const q = loc.zip ? loc.zip + ', USA' : loc.city + ', ' + loc.state + ', USA', g = geoCache();
   if (q in g) return g[q];
   await sleep(1100);   // Nominatim allows 1 lookup a second
   const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=' + encodeURIComponent(q), { headers: { 'User-Agent': 'MillennialPools-FleetDashboard/1.0' } });
-  const j = r.ok ? await r.json() : []; g[q] = j[0] ? { lat: +j[0].lat, lng: +j[0].lon } : null;
+  if (!r.ok) throw new Error('Geocode ' + r.status);   // not cached, tried again next run
+  const j = await r.json(); g[q] = j[0] ? { lat: +j[0].lat, lng: +j[0].lon } : null;
   cache.set('geo', { data: g, t: Date.now() }); saveSnap('geo', g); return g[q];
 }
 const trailMiles = pts => pts.reduce((s, p, i) => i ? s + miles(pts[i - 1], p) : 0, 0);
+const NEAR_ZIP_MI = 6, NEAR_CITY_MI = 10;   // the station is placed at its ZIP / town centre, so allow that much slack
 let gasBusy = false;
-async function checkGas(max = 30) {
+async function checkGas(max = 40) {
   if (gasBusy || !RAMP_CLIENT_ID) return; gasBusy = true;
   try {
     const [y, pairs, hist, at] = await Promise.all([rampYear(), fleetPairs(), drvHistory().catch(() => ({})), atData()]), done = gasChk(), gx = gasRx();
     const since = Date.now() - 60 * 864e5, byTruck = Object.fromEntries(pairs.map(p => [p.t.id, p]));
-    const trucksOf = who => { const k = dupeName(who), c = {};   // the person's Airtable truck first, then trucks they drove most (Azuga)
-      at.trucks.filter(t => t.driver && dupeName(t.driver.name) === k).forEach(t => c[t.id] = 1e9);
-      pairs.forEach(p => { const h = (hist[p.v.trackeeId] || {})[k]; if (h) c[p.t.id] = (c[p.t.id] || 0) + h.miles; });
-      return Object.entries(c).sort((a, b) => b[1] - a[1]).map(x => byTruck[x[0]]).filter(Boolean).slice(0, 2); };
+    const same = (a, b) => !!matchPerson([{ name: a }], b);   // Ramp "Matt Wonski" = Airtable "Matthew Wonski"
+    // Trucks the card holder could have been in: their Airtable truck, sticker sign-ins, then trucks Azuga shows them driving
+    const trucksOf = (who, ts) => { const c = {};
+      at.trucks.filter(t => t.driver && same(t.driver.name, who)).forEach(t => c[t.id] = 1e9);
+      swapLog().filter(x => !x.out && x.at < ts && x.at > ts - 30 * 864e5 && same(x.who, who)).forEach(x => c[x.tid] = (c[x.tid] || 0) + 1e8);
+      pairs.forEach(p => Object.values(hist[p.v.trackeeId] || {}).forEach(h => { if (same(h.name, who)) c[p.t.id] = (c[p.t.id] || 0) + h.miles * (ts >= h.from - 864e5 && ts <= h.to + 864e5 ? 10 : 1); }));
+      return Object.entries(c).sort((a, b) => b[1] - a[1]).map(x => byTruck[x[0]]).filter(Boolean).slice(0, 4); };
     const gas = y.card.filter(t => t.gas && t.amount >= 10 && Date.parse(t.at) > since).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     let n = 0;
     for (const t of gas) {
-      if ((done[t.id] && done[t.id].v2) || n >= max) continue; n++;
-      const ts = Date.parse(t.at), rx = gx[t.id.slice(0, 10)], r = { v2: 1, at: t.at, who: t.who, merchant: t.merchant, amount: t.amount, gal: rx && rx[0] || 0, flags: [] };
-      const cands = trucksOf(t.who);
+      if ((done[t.id] && done[t.id].verdict !== 'notruck') || n >= max) continue;   // no-truck ones are retried (cheap) in case Airtable gets updated
+      const ts = Date.parse(t.at), rx = gx[t.id.slice(0, 10)], r = { at: t.at, who: t.who, merchant: t.merchant, amount: t.amount, gal: rx && rx[0] || 0, flags: [] };
+      const cands = trucksOf(t.who, ts);
       if (!cands.length) { r.verdict = 'notruck'; r.unverified = 'No truck found for ' + (t.who || 'this card'); done[t.id] = r; continue; }
-      const here = t.loc && await geocode(t.loc).catch(() => null);
-      let best = null;
-      for (const p of cands) {
-        let pts = await trailRange(p.v.trackeeId, new Date(ts - 30 * 6e4), new Date(ts + 30 * 6e4), true).catch(() => []), parked = false;
-        if (!pts.length) {   // engine off the whole hour: use where the truck was parked (last point before the charge, else first after)
-          const wide = await trailRange(p.v.trackeeId, new Date(ts - 12 * 36e5), new Date(ts + 2 * 36e5), true).catch(() => []);
-          const at = wide.filter(x => x.t <= ts).pop() || wide.find(x => x.t > ts);
-          if (at) { pts = [{ ...at, mph: 0 }]; parked = true; }
+      n++;
+      let here = null, best = null;
+      try {   // an Azuga or map lookup that fails is retried next run, never counted as "not near"
+        here = t.loc ? await geocode(t.loc) : null;
+        for (const p of cands) {
+          let pts = await trailRange(p.v.trackeeId, new Date(ts - 30 * 6e4), new Date(ts + 30 * 6e4), true), parked = false;
+          if (!pts.length) {   // engine off the whole hour: use where the truck was parked (last point before the charge, else first after)
+            const wide = await trailRange(p.v.trackeeId, new Date(ts - 12 * 36e5), new Date(ts + 2 * 36e5), true);
+            const spot = wide.filter(x => x.t <= ts).pop() || wide.find(x => x.t > ts);
+            if (spot) { pts = [{ ...spot, mph: 0 }]; parked = true; }
+          }
+          if (!pts.length) { best = best || { p, nogps: true }; continue; }
+          const stopped = pts.filter(x => x.mph < 3), look = stopped.length ? stopped : pts;
+          const byText = t.loc && look.some(x => (t.loc.zip && x.addr.includes(t.loc.zip)) || (t.loc.city && x.addr.toUpperCase().includes(t.loc.city.toUpperCase())));
+          const mi = here ? Math.min(...look.map(x => miles(x, here))) : null;
+          const c = { p, mi, parked, ok: byText || (mi !== null && mi <= (t.loc.zip ? NEAR_ZIP_MI : NEAR_CITY_MI)), stopped: stopped.length > 0 };
+          if (!best || best.nogps || c.ok && !best.ok || (!best.ok && mi !== null && (best.mi == null || mi < best.mi))) best = c;
+          if (c.ok) break;
         }
-        if (!pts.length) { best = best || { p, nogps: true }; continue; }
-        const stopped = pts.filter(x => x.mph < 3), look = stopped.length ? stopped : pts;
-        const byText = t.loc && look.some(x => (t.loc.zip && x.addr.includes(t.loc.zip)) || (t.loc.city && x.addr.toUpperCase().includes(t.loc.city)));
-        const mi = here ? Math.min(...look.map(x => miles(x, here))) : null;
-        const c = { p, mi, parked, ok: byText || (mi !== null && mi <= 5), stopped: stopped.length > 0 };
-        if (!best || best.nogps || c.ok && !best.ok || (!best.ok && mi !== null && (best.mi === null || mi < best.mi))) best = c;
-        if (c.ok) break;
-      }
-      r.truck = tname(best.p.t); r.truckId = best.p.t.id;
-      if (best.nogps) { r.verdict = 'nogps'; r.unverified = 'No GPS from the truck in the 12 hours before'; }
-      else if (!t.loc) { r.verdict = 'noloc'; r.unverified = 'Ramp gave no station location'; }
+      } catch (e) { console.error('Gas check paused (will retry):', e.message); break; }
+      r.truckId = best.p.t.id;
+      if (!t.loc) { r.verdict = 'noloc'; r.unverified = 'Ramp gave no station location'; }
+      else if (best.nogps) { r.verdict = 'nogps'; r.unverified = 'No GPS from ' + tname(best.p.t) + ' in the 12 hours before'; }
       else if (best.ok) r.verdict = best.stopped ? 'ok' : 'moving';
-      else { r.verdict = 'far'; r.mi = best.mi !== null ? Math.round(best.mi) : null;
-        r.flags.push((best.parked ? 'Truck was parked ' : 'Truck was ') + (r.mi !== null ? r.mi + ' miles from the station' : 'not in ' + t.loc.city + ', ' + t.loc.state)); }
+      else if (best.mi === null) { r.verdict = 'noloc'; r.unverified = 'Could not place ' + t.loc.city + ' ' + t.loc.state + ' on the map'; }
+      else { r.verdict = 'far'; r.mi = Math.round(best.mi);
+        r.flags.push((best.parked ? 'Truck was parked ' : 'Truck was ') + r.mi + ' miles from the station' + (cands.length > 1 ? ' (checked ' + cands.length + ' trucks they drive)' : '')); }
       if (r.verdict === 'moving') r.flags.push('Truck was driving, never stopped near the station');
-      const tank = tankOf(best.p.t); r.tank = tank;
+      const tank = tankOf(best.p.t);
       if (r.gal && tank && r.gal > tank * 1.05) r.flags.push(r.gal.toFixed(1) + ' gal into a ' + tank + ' gal tank');
-      const prev = Object.entries(done).map(([id, x]) => ({ id, ...x })).filter(x => x.who === t.who && x.truckId === r.truckId && ts - Date.parse(x.at) > 0 && ts - Date.parse(x.at) < 24 * 36e5).pop();
+      const prev = Object.values(done).filter(x => x.who === t.who && x.truckId === r.truckId && ts - Date.parse(x.at) > 0 && ts - Date.parse(x.at) < 24 * 36e5).pop();
       if (prev && !best.nogps) {
-        const d = trailMiles(await trailRange(best.p.v.trackeeId, new Date(Date.parse(prev.at)), new Date(ts), true).catch(() => []));
+        const d = trailMiles(await trailRange(best.p.v.trackeeId, new Date(Date.parse(prev.at)), new Date(ts), true).catch(() => null) || [1e9]);
         if (d < 60) r.flags.push('2nd fill-up in ' + Math.round((ts - Date.parse(prev.at)) / 36e5) + ' h with only ' + Math.round(d) + ' miles driven');
       }
       done[t.id] = r;
       await sleep(1500);
     }
-    Object.keys(done).forEach(id => { if (Date.parse(done[id].at) < Date.now() - 120 * 864e5) delete done[id]; });
-    cache.set('gasChk', { data: done, t: Date.now() }); saveSnap('gasChk', done);
+    Object.keys(done).forEach(id => { if (Date.parse(done[id].at) < since) delete done[id]; });
+    saveGasChk(done);
   } catch (e) { console.error('Gas check:', e.message); } finally { gasBusy = false; }
 }
 
@@ -2455,9 +2468,10 @@ async function safetyText(name, fleet) {
 async function safetyMail() {
   const st = upState(), fleet = await fleetReport(), sent = [], skipped = [];
   for (const row of fleet) { const key = 'safety:' + weekKey() + ':' + dupeName(row.name); if (st.sent[key]) continue;
-    const to = UPKEEP_TO;
+    const to = await emailOf(row.name), bad = ((mailState().bounced) || []);   // safety emails go to the driver themselves
+    if (!to || bad.includes(to.toLowerCase())) { skipped.push(row.name); continue; }
     const m = await safetyText(row.name, fleet);
-    try { await sendMail(to, m.name + ' · ' + m.subject, m.body); st.sent[key] = Date.now(); sent.push(row.name); } catch (e) { console.error('Safety email', row.name, e.message); }
+    try { await sendMail(to, m.subject, m.body); st.sent[key] = Date.now(); sent.push(row.name); } catch (e) { console.error('Safety email', row.name, e.message); }
   }
   saveUp(st); return { sent, skipped };
 }
@@ -2486,7 +2500,8 @@ if (process.argv[2] !== 'test') {
 routes['/api/upkeep'] = async () => {
   const st = upState(), at = await atData(), done = gasChk();
   const [cost, oil] = await Promise.all([truckCost().catch(e => ({ error: e.message })), oilList().catch(e => ({ error: e.message }))]);
-  const gas = Object.entries(done).map(([id, x]) => ({ id, ...x, link: 'https://app.ramp.com/business-overview/transactions/' + id })).sort((a, b) => b.flags.length - a.flags.length || Date.parse(b.at) - Date.parse(a.at));
+  const tk = Object.fromEntries(at.trucks.map(t => [t.id, t]));
+  const gas = Object.entries(done).map(([id, x]) => ({ id, ...x, truck: tk[x.truckId] ? tname(tk[x.truckId]) : '', tank: tankOf(tk[x.truckId]), link: 'https://app.ramp.com/business-overview/transactions/' + id })).sort((a, b) => b.flags.length - a.flags.length || Date.parse(b.at) - Date.parse(a.at));
   const renew = at.trucks.map(t => ({ id: t.id, name: tname(t), plate: t.plate, policy: t.policy, ins: t.insExp, reg: t.regExp, insLeft: daysTo(t.insExp), regLeft: daysTo(t.regExp), card: (t.insCard[0] || {}).url || '' }));
   return { cost, oil, oilMiles: OIL_MI, gas, gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew }, mail: mailReady(), ai: !!AI_KEY() };
 };
@@ -4682,7 +4697,7 @@ function renderUp(){const u=UP;if(!u)return;const q=$('q').value.trim().toLowerC
      +'<table class="utab"><tr><th>Truck</th><th>Insurance expires</th><th>Registration expires</th><th>Card</th></tr>'+r.map(x=>'<tr class="'+(soon(x.insLeft)||soon(x.regLeft)?'hot':'')+'"><td><b>'+esc(x.name)+'</b><div class="muted">'+esc(x.plate||'')+(x.policy?' · '+esc(x.policy):'')+'</div></td>'
        +'<td><input type="date" data-ren="ins" data-id="'+x.id+'" value="'+esc(x.ins||'')+'"> <span class="muted">'+leftTxt(x.insLeft)+'</span></td><td><input type="date" data-ren="reg" data-id="'+x.id+'" value="'+esc(x.reg||'')+'"> <span class="muted">'+leftTxt(x.regLeft)+'</span></td><td>'+(x.card?'<a class="btn2" href="'+esc(x.card)+'" target="_blank" rel="noopener">Open ↗</a>':'<span class="muted">none</span>')+'</td></tr>').join('')+'</table>'}
   if(USEC==='saf'){$('upCount').textContent='Every Monday each driver gets their own score, rank and worst camera event of the week';
-    h='<div class="utog"><label><input type="checkbox" id="upSafOn"'+(u.settings.safety?' checked':'')+'> Send each driver\\'s weekly safety email to callum@millennialpools.com (Mondays, 8 AM)</label></div>'
+    h='<div class="utog"><label><input type="checkbox" id="upSafOn"'+(u.settings.safety?' checked':'')+'> Send the weekly safety email to every driver (Mondays, 8 AM)</label></div>'
      +'<div class="utog"><input id="upSafName" placeholder="Driver name" value="Callum Curcie" style="font:inherit;padding:8px 10px;border:1px solid #cbd5e1;border-radius:10px"><button class="btn2" id="upSafPrev">Preview</button><button class="btn2" id="upSafTest">Send this to me</button><span id="upSafMsg" class="muted"></span></div><div id="upSafOut"></div>'}
   if(!u.mail&&USEC!=='cost'&&USEC!=='gas')h='<p class="muted">Email isn\\'t set up in Render yet, so nothing will be sent.</p>'+h;
   $('usBody').innerHTML=h}
