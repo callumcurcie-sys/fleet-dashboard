@@ -3800,7 +3800,7 @@ const initials=n=>/[a-z]/i.test(n)?n.split(/ +/).map(w=>w[0]).slice(0,2).join(''
 // Azuga sends several odometers: prefer the current reading (what was entered here, plus GPS miles since), then the truck's own (sometimes in km).
 // (vehicleDeviceOdoReading is the reading at tracker install, so it's stale.)
 const odo=r=>{const cur=+r.vehicleDeviceCurrentodoReading,v=cur>0?cur:(r.odo_support&&+r.vehicleSupportedOdoValue)||+r.totalDistanceTravelled||+r.odometerReading;return v>0?Math.round(v).toLocaleString()+' mi'+(cur>0&&r.odoSource==='User input'?' (entered + GPS)':cur>0?'':' (from the truck)'):'Not reported yet'};
-const when=t=>+t>1e11?new Date(+t).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):(t||'');
+const when=t=>+t>1e11?new Date(+t).toLocaleString([], {weekday:'short',month:'short',day:'numeric',...(new Date(+t).getFullYear()!==new Date().getFullYear()?{year:'numeric'}:{}),hour:'numeric',minute:'2-digit'}):(t||'');
 // Azuga sends km/h unless a unit field says miles; convert to mph
 const speed=r=>{const s=+pick(r,'speed')||0;return /mi|mph/i.test(String(pick(r,'speedUnit','speedUom','unitOfMeasure','distanceUnit')||''))?s:s*0.621371};
 // Old (stored) locations and finished trips keep their last speed, so don't count them as moving
@@ -4766,7 +4766,7 @@ function renderCamTab(){const ev=CAMALL.concat(CAMOLD),q=$('q').value.trim().toL
   VIDS.sort((a,b)=>tOf(b)-tOf(a)).forEach((x,i)=>{const n=evDriver(x).name||'Unknown driver';(by[n]=by[n]||[]).push(i)});
   const rows=Object.entries(by).map(([n,ix])=>({n,ix,ser:ix.filter(i=>isSerious(VIDS[i])).length})).sort((a,b)=>b.ser-a.ser||b.ix.length-a.ix.length);
   const ser=VIDS.filter(isSerious).length;
-  const hm=t=>t?new Date(t).toLocaleString([],Date.now()-t>6*864e5?{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}:{weekday:'short',hour:'numeric',minute:'2-digit'}):'';
+  const hm=t=>t?'<b>'+new Date(t).toLocaleDateString([],{weekday:'short',month:'short',day:'numeric',...(new Date(t).getFullYear()!==new Date().getFullYear()?{year:'numeric'}:{})})+'</b> '+new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'';
   $('cgrid').innerHTML=rows.length?'<div class="csum"><div><b>'+VIDS.length+'</b><span>events</span></div><div class="red"><b>'+ser+'</b><span>serious</span></div><div><b>'+rows.length+'</b><span>drivers</span></div><div><b>'+VIDS.filter(x=>evMedia(x).videos.length).length+'</b><span>with video</span></div></div>'
     +rows.map(r=>{const tr=[...new Set(r.ix.map(i=>truckOf(VIDS[i])).filter(Boolean))],c={};r.ix.forEach(i=>{const t=evName(pick(VIDS[i],'eventType','eventName'));c[t]=(c[t]||0)+1});
       const top=Object.entries(c).sort((a,b)=>b[1]-a[1]);
