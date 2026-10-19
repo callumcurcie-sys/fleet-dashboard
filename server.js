@@ -2523,7 +2523,7 @@ const d0s = n => '$' + Math.round(n || 0).toLocaleString();
 const TANKS = [[/ranger/i, 21], [/maverick/i, 13.8], [/colorado|canyon/i, 21], [/tacoma/i, 21], [/frontier/i, 21], [/f-?150/i, 36], [/silverado|sierra/i, 28], [/\bram\b|1500/i, 33], [/transit/i, 31], [/ridgeline/i, 19.5], [/gladiator/i, 22]];
 const tankOf = t => { const h = t && TANKS.find(([re]) => re.test(t.make + ' ' + t.model)); return h ? h[1] : 0; };
 // Results are kept packed (one short array per fill-up) so 60 days fit in one "Dashboard cache" row
-const GPACK = ['verdict', 'at', 'who', 'merchant', 'amount', 'gal', 'truckId', 'flags', 'unverified', 'mi', 'fl', 'ok'];   // fl: whole-fleet check done ('-' or the truck found), ok: marked OK by hand
+const GPACK = ['verdict', 'at', 'who', 'merchant', 'amount', 'gal', 'truckId', 'flags', 'unverified', 'mi', 'fl', 'ok', 'sta', 'tat'];   // sta: where Ramp puts the station, tat: where the truck was   // fl: whole-fleet check done ('-' or the truck found), ok: marked OK by hand
 const gasChk = () => Object.fromEntries(Object.entries((cache.get('gasChk2') || {}).data || {}).map(([id, a]) => [id, Object.fromEntries(GPACK.map((k, i) => [k, k === 'at' ? new Date(a[i] * 1000).toISOString() : a[i]]))]));
 const saveGasChk = done => { const d = Object.fromEntries(Object.entries(done).map(([id, x]) => [id, GPACK.map(k => k === 'at' ? Math.round(Date.parse(x.at) / 1000) : k === 'merchant' ? String(x.merchant).slice(0, 28) : x[k] ?? (k === 'flags' ? [] : ''))]));
   cache.set('gasChk2', { data: d, t: Date.now() }); saveSnap('gasChk2', d); };
@@ -2590,12 +2590,15 @@ async function checkGas(max = 40) {
           const stopped = pts.filter(x => x.mph < 3), look = stopped.length ? stopped : pts;
           const byText = t.loc && look.some(x => (t.loc.zip && x.addr.includes(t.loc.zip)) || (t.loc.city && x.addr.toUpperCase().includes(t.loc.city.toUpperCase())));
           const mi = here ? Math.min(...look.map(x => miles(x, here))) : null;
-          const c = { p, mi, parked, ok: byText || (mi !== null && mi <= (t.loc.zip ? NEAR_ZIP_MI : NEAR_CITY_MI)), stopped: stopped.length > 0 };
+          const near = here ? look.slice().sort((a, b) => miles(a, here) - miles(b, here))[0] : look[0];
+          const c = { p, mi, parked, at: near && near.addr, ok: byText || (mi !== null && mi <= (t.loc.zip ? NEAR_ZIP_MI : NEAR_CITY_MI)), stopped: stopped.length > 0 };
           if (!best || best.nogps || c.ok && !best.ok || (!best.ok && mi !== null && (best.mi == null || mi < best.mi))) best = c;
           if (c.ok) break;
         }
       } catch (e) { console.error('Gas check paused (will retry):', e.message); break; }
       r.truckId = best.p.t.id;
+      if (t.loc) r.sta = [t.loc.city, t.loc.state].filter(Boolean).join(', ') + (t.loc.zip ? ' ' + t.loc.zip : '');
+      if (best.at) r.tat = String(best.at).slice(0, 60);
       if (!t.loc) { r.verdict = 'noloc'; r.unverified = 'Ramp gave no station location'; }
       else if (best.nogps) { r.verdict = 'nogps'; r.unverified = 'No GPS from ' + tname(best.p.t) + ' in the 12 hours before'; }
       else if (best.ok) r.verdict = best.stopped ? 'ok' : 'moving';
@@ -2617,9 +2620,10 @@ async function checkGas(max = 40) {
     // Fleet pass: anything still "not near", "no GPS" or "no truck" gets one look at every company truck
     const y2 = Object.fromEntries(gas.map(t => [t.id, t]));
     let f = 0;
-    for (const [id, r] of Object.entries(done)) {
-      if (f >= max || r.fl || !['far', 'nogps', 'notruck'].includes(r.verdict) || !y2[id] || !y2[id].loc) continue;
-      f++;
+    const order = Object.entries(done).sort((a, b) => (b[1].verdict === 'far') - (a[1].verdict === 'far'));   // red ones first
+    for (const [id, r] of order) {
+      if (f >= max * 3 || r.fl || !['far', 'nogps', 'notruck'].includes(r.verdict) || !y2[id] || !y2[id].loc) continue;
+      f++; const L = y2[id].loc; r.sta = r.sta || [L.city, L.state].filter(Boolean).join(', ') + (L.zip ? ' ' + L.zip : '');
       let hit;
       try { hit = await fleetAt(pairs, Date.parse(r.at), await geocode(y2[id].loc).catch(() => null), y2[id].loc); }
       catch (e) { console.error('Gas fleet check paused (will retry):', e.message); break; }
@@ -2798,7 +2802,7 @@ routes['/api/upkeep'] = async () => {
   const renew = (await renewRows()).map(({ t, ...x }) => x);
   return { cost, oil, oilMiles: OIL_MI, gas, gasOk: GAS_OK, gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew }, mail: mailReady(), ai: !!AI_KEY() };
 };
-routes['/api/upkeep/flags'] = () => ({ gas: Object.values(gasChk()).filter(x => x.verdict === 'far' && !x.ok).length });
+routes['/api/upkeep/flags'] = () => ({ gas: Object.values(gasChk()).filter(x => x.verdict === 'far' && !x.ok && !(x.flags || []).some(f => /^Truck was parked/.test(f))).length });
 routes['/api/upkeep/safety-preview'] = async q => (await safetyText(q.get('name') || 'Callum Curcie')) || { error: 'No score for that name yet.' };
 const GAS_OK = ['Gas cans / equipment', 'Different vehicle', 'Rental or personal car for work', 'Checked, it is fine'];
 const UPKEEP_POSTS = {
@@ -3935,6 +3939,7 @@ header .live{margin-left:8px!important}
 .gc.minor{border-left-color:#94a3b8}.gc.minor .gc-ic{background:#94a3b8}.gc.minor li{color:var(--ink2)!important}
 .gc-fl{color:var(--go)!important;font-weight:600}.gc-okd{color:var(--go)!important;font-weight:600}
 .gc-act{display:flex;flex-direction:column;gap:6px;align-items:stretch}.gc-oks{font:inherit;font-size:12.5px;padding:6px 8px;border-radius:9px;border:1px solid var(--line2);background:var(--card);color:var(--ink)}
+.gc-why{font-size:12.5px;color:var(--ink2)!important;margin:4px 0 0!important}
 /* ===== v30: calm look. Same pool colours, no moving decorations, quieter cards, more room ===== */
 :root{--deck:#f3f6f8;--deck2:#e9eef1;--line:#e2e8ec;--line2:#d3dce2;--card:#fff;--r:14px;
  --sh:0 1px 2px rgba(15,35,50,.05),0 2px 8px -4px rgba(15,35,50,.08)}
@@ -5326,22 +5331,23 @@ function renderRampUp(){if(!UP)return;
           +'<details class="ukd"><summary>Why does it cost this much?</summary>'+costWhy(r,c.gasPerMile||0.22)+'</details></div>'}).join('')+'</div>'
       +(c.unassignedGas?'<p class="muted rgnote">'+d0(c.unassignedGas)+' of gas could not be matched to a truck (card holders with no truck).</p>':'')}
   // Gas vs GPS
-  const g=UP.gas.filter(upf),cnt=k=>g.filter(k).length,isFar=x=>!x.ok&&x.flags.length>0,isUnv=x=>!x.ok&&!x.flags.length&&x.unverified,isOk=x=>x.ok||!x.flags.length&&!x.unverified,isBad=x=>!x.ok&&(x.verdict==='far'||x.verdict==='moving');
+  const g=UP.gas.filter(upf),cnt=k=>g.filter(k).length,isFar=x=>!x.ok&&x.flags.length>0,isUnv=x=>!x.ok&&!x.flags.length&&x.unverified,isOk=x=>x.ok||!x.flags.length&&!x.unverified,parkedFar=x=>x.verdict==='far'&&x.flags.some(f=>/^Truck was parked/.test(f)),isBad=x=>!x.ok&&(x.verdict==='far'&&!parkedFar(x)||x.verdict==='moving');
   const pick={far:isFar,unv:isUnv,ok:isOk,all:()=>true}[GF],list=g.filter(pick);
   const by={};g.filter(x=>x.verdict==='far'&&!x.ok).forEach(x=>{const b=by[x.who]=by[x.who]||{n:0,amt:0};b.n++;b.amt+=x.amount});const top=Object.entries(by).sort((a,b)=>b[1].n-a[1].n).slice(0,10),tmx=top.length?top[0][1].n:1;
   const when=t=>new Date(t).toLocaleString('en-US',{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
-  $('rsGps').innerHTML=kpis([[g.length,'fill-ups checked (60 days)'],[cnt(x=>x.verdict==='far'&&!x.ok),'no company truck near the card','bad'],[cnt(isFar),'to look at','warn'],[cnt(isOk),'truck was at the station','good']])
+  $('rsGps').innerHTML=kpis([[g.length,'fill-ups checked (60 days)'],[cnt(isBad),'truck was driving somewhere else','bad'],[cnt(isFar),'to look at','warn'],[cnt(isOk),'truck was at the station','good']])
     +'<div class="ukbar">'+chips('gf',GF,[['far','To look at',cnt(isFar)],['unv','Could not check',cnt(isUnv)],['ok','All good',cnt(isOk)],['all','Everything',g.length]])+'<span style="flex:1"></span><button class="btn2" id="upGasRun">'+(UP.gasBusy?'Checking...':'Check new fill-ups now')+'</button></div>'
     +'<div class="rp-grid"><div>'+(list.length?list.slice(0,150).map(x=>{const k=isBad(x)?'far':isFar(x)?'minor':isUnv(x)?'unv':'ok';
       return '<div class="gc '+k+'"><div class="gc-ic">'+(k==='far'?'!':k==='minor'?'i':k==='unv'?'?':'✓')+'</div><div class="gc-m"><div class="gc-t"><b>'+esc(x.who)+'</b><span>'+money(x.amount)+(x.gal?' · '+x.gal.toFixed(1)+' gal':'')+' at '+esc(x.merchant)+'</span></div>'
         +'<small>'+when(x.at)+(x.truck?' · '+esc(x.truck):'')+(x.tank?' ('+x.tank+' gal tank)':'')+'</small>'
+        +(x.verdict==='far'&&!x.ok&&(x.sta||x.tat)?'<p class="gc-why">'+(x.sta?'Ramp puts the station in <b>'+esc(x.sta)+'</b>':'')+(x.tat?(x.sta?'; ':'')+'the truck was at <b>'+esc(x.tat)+'</b>':'')+(x.fl==='-'?'. No other company truck was there either.':'.')+(parkedFar(x)?' Their truck sat parked the whole time, so they were most likely in another vehicle, possibly one without a tracker.':'')+'</p>':'')
         +(x.fl&&x.fl!=='-'?'<p class="gc-fl">🚚 '+esc(x.fl)+' was at the station. They used a different company truck than the one on file.</p>':'')
         +(x.ok?'<p class="gc-okd">✓ Marked OK: '+esc(x.ok)+' <button class="link" data-gok="'+esc(x.id)+'" data-why="">Undo</button></p>':'')
         +(x.flags.length&&!x.ok?'<ul>'+x.flags.map(f=>'<li>'+esc(f)+'</li>').join('')+'</ul>':x.ok?'':x.unverified?'<p>'+esc(x.unverified)+'</p>':'<p>Truck was at the station'+(x.verdict==='moving'?' (driving past)':'')+'</p>')+'</div>'
         +'<div class="gc-act"><a class="btn2" href="'+esc(x.link)+'" target="_blank" rel="noopener">Ramp ↗</a>'+(!x.ok&&(x.flags.length||x.unverified)?'<select class="gc-oks" data-gsel="'+esc(x.id)+'" aria-label="Mark this fill-up OK"><option value="">Mark OK…</option>'+(UP.gasOk||[]).map(w=>'<option>'+esc(w)+'</option>').join('')+'</select>':'')+'</div></div>'}).join('')
       :'<div class="empty">'+(g.length?'Nothing here.':'No fill-ups checked yet. The first check runs a few minutes after the server starts.')+'</div>')+'</div>'
     +'<aside><div class="panel rp-pan"><h3>Most “not near” fill-ups</h3>'+(top.length?top.map(([n,b])=>'<div class="ukrank"><div><b>'+esc(n)+'</b><small>'+b.n+' fill-up'+(b.n>1?'s':'')+' · '+money(b.amt)+'</small></div><i><b style="width:'+(b.n/tmx*100)+'%"></b></i></div>').join(''):'<div class="muted">Nobody yet.</div>')+'</div>'
-    +'<div class="panel rp-pan"><h3>How it works</h3><p class="muted" style="margin:0;font-size:13px">For every gas charge on a Ramp card, the dashboard looks at where the card holder’s trucks were (Azuga) within 30 minutes. If none of theirs was there, it checks every company truck, since crews swap trucks. Only when no company truck was stopped within about 6–10 miles is it marked red. Gallons over the tank size and a 2nd fill-up with little driving are shown in grey as things to glance at (often gas cans or equipment). Use “Mark OK” to clear anything you know is fine.</p></div></aside></div>'}
+    +'<div class="panel rp-pan"><h3>How it works</h3><p class="muted" style="margin:0;font-size:13px">For every gas charge on a Ramp card, the dashboard looks at where the card holder’s trucks were (Azuga) within 30 minutes. If none of theirs was there, it checks every company truck, since crews swap trucks. It is marked red only when their own truck was out driving somewhere else and no company truck was at the station. If their truck just sat parked, it is grey: they were most likely in another vehicle (some trucks have no tracker). Gallons over the tank size and a 2nd fill-up with little driving are shown in grey as things to glance at (often gas cans or equipment). Use “Mark OK” to clear anything you know is fine.</p></div></aside></div>'}
 const upRem=(icon,title,on,how,who,when,actions)=>'<div class="rmc wide'+(on?' live':'')+'"><div class="rmh"><span class="rmi">'+icon+'</span><div><b>'+title+'</b><small>'+how+'</small></div>'+(on?'<span class="rmpill on">● On</span>':'<span class="rmpill off">Off</span>')+'</div><dl class="rmd"><dt>About</dt><dd>'+who+'</dd><dt>When</dt><dd>'+when+'</dd></dl><div class="rma">'+actions+'</div></div>';
 function renderUp(){const u=UP;if(!u)return;let h='';
   if(USEC==='oil'){const o=Array.isArray(u.oil)?u.oil.filter(upf):[],lab={due:'Due now',soon:'Due soon',ok:'OK',unknown:'No record'};
