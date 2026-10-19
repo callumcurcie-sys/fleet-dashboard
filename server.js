@@ -701,18 +701,41 @@ async function addRepair(b) {
   const work = clean(b.work).replace(/\s+/g, ' ').trim().replace(/\.+$/, '').slice(0, 300);
   const raw = String(b.total ?? '').replace(/[$,\s]/g, ''), total = raw === '' ? null : Number(raw);
   if (total !== null && !(total >= 0 && total < 1e6)) throw new Error('Total should be a dollar amount, like 249.99.');
-  const photo = okPhoto(b.photo) ? b.photo : null;
+  const photos = invPhotos(b), photo = photos.length > 0;
   if (!photo && !work) throw new Error('Take a photo or write what was done.');
-  if (photo) {
+  for (const [i, ph] of photos.entries()) {
     const up = await fetch('https://content.airtable.com/v0/' + AT_BASE + '/' + t.id + '/' + F.files + '/uploadAttachment', {
       method: 'POST', headers: { Authorization: 'Bearer ' + AIRTABLE_TOKEN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contentType: photo.type, file: photo.data, filename: 'invoice-' + ymd + '-' + (shop.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'shop') + '.jpg' }) });
-    if (!up.ok) throw new Error('Could not save the photo to Airtable (' + up.status + '). Try again.');
+      body: JSON.stringify({ contentType: ph.type, file: ph.data, filename: 'invoice-' + ymd + '-' + (shop.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'shop') + (photos.length > 1 ? '-p' + (i + 1) : '') + '.jpg' }) });
+    if (!up.ok) throw new Error('Could not save photo ' + (i + 1) + ' to Airtable (' + up.status + '). Try again.');
   }
   const amt = total === null ? 'Total not entered' : total === 0 ? 'No charge shown' : 'Total $' + total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const r = await addTruckNote({ truckId: t.id, day: ymd, source: 'From ' + shop + (b.estimate === true ? ' estimate' : ' invoice'), text: (work || 'Invoice photo added, details to fill in') + '. ' + amt });
-  console.log(new Date().toISOString(), 'Invoice added', t.truckNo || t.id, shop, amt, photo ? 'with photo' : '');
+  console.log(new Date().toISOString(), 'Invoice added', t.truckNo || t.id, shop, amt, photos.length + ' photo(s)');
   return r;
+}
+// An invoice can be several photos (pages, or front and back). Claude reads them together and fills in the form.
+const invPhotos = b => [...(Array.isArray(b.photos) ? b.photos : []), b.photo].filter(okPhoto).slice(0, 10);
+async function readInvoice(b) {
+  const photos = invPhotos(b); if (!photos.length) throw new Error('Add a photo of the invoice first.');
+  if (!AI_KEY()) return { ai: false };
+  const a = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': AI_KEY(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    body: JSON.stringify({ model: AI_MODEL, max_tokens: 900, messages: [{ role: 'user', content: [...photos.map(p => ({ type: 'image', source: { type: 'base64', media_type: p.type, data: p.data } })), { type: 'text', text:
+      'These photos are all one vehicle repair invoice, receipt or estimate (several pages or angles of the same document). Reply with JSON only, no other text: '
+      + '{"shop":"business name","date":"YYYY-MM-DD","total":0.00,"work":"short plain list of the work done, e.g. Oil change, front brake pads and rotors, new serpentine belt","estimate":false,"vin":"","plate":"","mileage":0}. '
+      + 'total is the final amount due or paid, with tax. estimate is true only if it says estimate or quote. mileage is the odometer reading printed on it. Leave out part numbers, prices and labor codes from work. Use "" or 0 for anything not printed.' }] }] }) });
+  const j = await a.json().catch(() => ({}));
+  if (!a.ok) throw new Error('Claude could not read it (' + a.status + '): ' + String((j.error && j.error.message) || '').slice(0, 120));
+  const txt = ((j.content || []).find(c => c.type === 'text') || {}).text || '', m = txt.match(/\{[\s\S]*\}/);
+  let o = {}; try { o = m ? JSON.parse(m[0]) : {}; } catch { }
+  const at = await atData(), vin = normVin(o.vin || ''), plate = clean(o.plate || '').toUpperCase().replace(/[\s-]/g, '');
+  const t = (vin.length >= 6 && at.trucks.find(x => x.vin && (x.vin === vin || x.vin.endsWith(vin.slice(-8)))))
+    || (plate.length >= 4 && at.trucks.find(x => x.plate && x.plate.toUpperCase().replace(/[\s-]/g, '') === plate));
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }), miles = Math.round(+o.mileage || 0);
+  let work = clean(o.work || '').replace(/\s+/g, ' ').replace(/\.+$/, '').slice(0, 260);
+  if (work && miles > 100 && miles < 2e6) work += ' at ' + miles.toLocaleString('en-US') + ' mi';   // lets the oil-change log pick up the mileage
+  return { ai: true, pages: photos.length, shop: clean(o.shop || '').slice(0, 60), date: /^\d{4}-\d{2}-\d{2}$/.test(o.date || '') && o.date <= today ? o.date : '',
+    total: +o.total > 0 ? Math.round(o.total * 100) / 100 : '', work, estimate: o.estimate === true, truckId: t ? t.id : '' };
 }
 async function deleteTruckNote(b) {
   const at = await atData(), t = at.trucks.find(x => x.id === String(b.truckId || ''));
@@ -2230,16 +2253,29 @@ async function serveReport(res, kind, name, base, publicView, tok) {
 }
 // Shared invoice upload page (/r/<token> with k:'i'): anyone with the link can add an invoice to a truck, nothing else
 const INVOICE_PAGE_JS = String.raw`
-const $=id=>document.getElementById(id);let photo=null;
+const $=id=>document.getElementById(id);let photos=[],readN=0;
 const shrink=(file,max)=>new Promise((ok,no)=>{const img=new Image();img.onload=()=>{const k=Math.min(1,max/Math.max(img.width,img.height)),c=document.createElement('canvas');c.width=Math.round(img.width*k);c.height=Math.round(img.height*k);const g=c.getContext('2d');g.fillStyle='#fff';g.fillRect(0,0,c.width,c.height);g.drawImage(img,0,0,c.width,c.height);ok(c)};img.onerror=()=>no(new Error('That file is not an image.'));img.src=URL.createObjectURL(file)});
 $('date').value=new Date().toLocaleDateString('en-CA');$('date').max=$('date').value;
-$('cam').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{const c=await shrink(f,2000),u=c.toDataURL('image/jpeg',.82);photo={type:'image/jpeg',data:u.split(',')[1]};$('prev').src=u;$('prev').hidden=false;$('camt').textContent='Retake photo'}catch(err){$('msg').textContent='Could not read that photo. Try again.'}};
+const touched=new Set();['truck','date','shop','tot','work','est'].forEach(i=>$(i).addEventListener('input',()=>touched.add(i)));
+function thumbs(){$('thumbs').innerHTML=photos.map((p,i)=>'<figure><img src="data:image/jpeg;base64,'+p.data+'" alt="Page '+(i+1)+'"><button type="button" data-rm="'+i+'" aria-label="Remove page '+(i+1)+'">×</button><figcaption>Page '+(i+1)+'</figcaption></figure>').join('');
+  $('camt').textContent=photos.length?'➕ Add another page':'📷 Add photos of the invoice';$('camh').textContent=photos.length?photos.length+' photo'+(photos.length>1?'s':'')+' · add every page':'All pages: front, back, extra sheets'}
+$('thumbs').onclick=e=>{const b=e.target.closest('[data-rm]');if(!b)return;photos.splice(+b.dataset.rm,1);thumbs();if(photos.length)readAI();else $('ai').hidden=true};
+async function readAI(){const n=++readN,ai=$('ai');ai.hidden=false;ai.className='ai busy';ai.textContent='✨ Reading the invoice...';
+  try{const r=await fetch(location.pathname.replace(/\/$/,'')+'/read',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({photos})}),j=await r.json();if(n!==readN)return;
+    if(!r.ok)throw new Error(j.error||'Could not read it');if(!j.ai){ai.className='ai';ai.textContent='Fill in the details below (automatic reading is not set up yet).';return}
+    const set=(id,v)=>{if(v!==''&&v!=null&&!touched.has(id)){$(id).value=v;$(id).classList.add('filled')}};
+    set('shop',j.shop);set('date',j.date);set('tot',j.total);set('work',j.work);if(j.truckId&&!touched.has('truck')){$('truck').value=j.truckId;$('truck').classList.add('filled')}if(!touched.has('est'))$('est').checked=!!j.estimate;
+    ai.className='ai ok';ai.textContent='✨ Filled in from '+(j.pages>1?'the '+j.pages+' photos':'the photo')+'. Check it over, then save.'+(j.truckId?'':' Pick the truck.')}
+  catch(err){if(n===readN){ai.className='ai';ai.textContent='Could not read it automatically ('+err.message+'). Fill in the details below.'}}}
+$('cam').onchange=async e=>{const fs=[...e.target.files].slice(0,10-photos.length);e.target.value='';if(!fs.length)return;
+  for(const f of fs){try{const c=await shrink(f,1600);photos.push({type:'image/jpeg',data:c.toDataURL('image/jpeg',.8).split(',')[1]})}catch(err){$('msg').textContent='Could not read one of those photos.'}}
+  thumbs();readAI()};
 $('save').onclick=async()=>{const m=$('msg');m.className='msg';m.textContent='';
-  if(!$('truck').value){m.textContent='Pick the truck first.';return}if(!photo&&!$('work').value.trim()){m.textContent='Take a photo or write what was done.';return}
+  if(!$('truck').value){m.textContent='Pick the truck first.';return}if(!photos.length&&!$('work').value.trim()){m.textContent='Take a photo or write what was done.';return}
   $('save').disabled=true;$('save').textContent='Saving...';
-  try{const r=await fetch(location.pathname.replace(/\/$/,'')+'/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({truckId:$('truck').value,date:$('date').value,shop:$('shop').value,total:$('tot').value,work:$('work').value,estimate:$('est').checked,photo})}),j=await r.json();
+  try{const r=await fetch(location.pathname.replace(/\/$/,'')+'/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({truckId:$('truck').value,date:$('date').value,shop:$('shop').value,total:$('tot').value,work:$('work').value,estimate:$('est').checked,photos})}),j=await r.json();
     if(!r.ok)throw new Error(j.error||'Could not save');
-    m.className='msg ok';m.textContent='Saved. Thank you! You can add another one.';photo=null;$('prev').hidden=true;$('camt').textContent='📷 Take a photo of the invoice';['cam','shop','tot','work'].forEach(i=>$(i).value='');$('est').checked=false;scrollTo({top:0,behavior:'smooth'})}
+    m.className='msg ok';m.textContent='Saved. Thank you! You can add another one.';photos=[];readN++;thumbs();$('ai').hidden=true;touched.clear();['shop','tot','work'].forEach(i=>{$(i).value='';$(i).classList.remove('filled')});$('truck').classList.remove('filled');$('est').checked=false;scrollTo({top:0,behavior:'smooth'})}
   catch(err){m.textContent=err.message}$('save').disabled=false;$('save').textContent='Save invoice'};`;
 function invoicePage(trucks) {
   const opts = trucks.slice().sort((a, b) => (parseInt(a.truckNo) || 999) - (parseInt(b.truckNo) || 999))
@@ -2249,18 +2285,22 @@ function invoicePage(trucks) {
     + '.w{max-width:520px;margin:0 auto;padding:22px 16px 40px}h1{color:#fff;font-size:22px;margin:0 0 4px}.sub{color:#cffafe;font-size:14px;margin:0 0 18px}'
     + '.card{background:#fff;border-radius:18px;padding:16px;box-shadow:0 14px 34px -18px rgba(8,74,99,.6)}'
     + '.cam{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;min-height:140px;border:2px dashed #67e8f9;border-radius:14px;background:#ecfeff;color:#0e7490;font-weight:700;cursor:pointer;padding:10px;text-align:center;font-size:16px}'
-    + '.cam input{position:absolute;width:1px;height:1px;opacity:0}.cam img{max-width:100%;max-height:300px;border-radius:10px}'
+    + '.cam input{position:absolute;width:1px;height:1px;opacity:0}.cam small{font-weight:500;font-size:12.5px;color:#0e7490}'
+    + '#thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px;margin-top:10px}#thumbs:empty{display:none}#thumbs figure{margin:0;position:relative}#thumbs img{width:100%;height:110px;object-fit:cover;border-radius:10px;display:block;border:1px solid #cbd5e1}'
+    + '#thumbs figcaption{font-size:11.5px;color:#64748b;text-align:center;margin-top:2px}#thumbs button{position:absolute;top:4px;right:4px;width:26px;min-height:26px;height:26px;border-radius:50%;padding:0;font-size:16px;line-height:1;background:rgba(15,23,42,.75)}'
+    + '.ai{margin-top:12px;padding:10px 12px;border-radius:11px;font-size:13.5px;background:#f1f5f9;color:#334155}.ai.busy{background:#ecfeff;color:#0e7490}.ai.ok{background:#f0fdf4;color:#15803d;font-weight:600}'
+    + '.filled{border-color:#86efac!important;background:#f7fef9!important}'
     + 'label{display:flex;flex-direction:column;gap:5px;font-size:13px;font-weight:700;color:#475569;margin-top:12px}input,select{font:inherit;font-size:16px;font-weight:400;padding:11px;border:1px solid #cbd5e1;border-radius:11px;min-height:46px;box-sizing:border-box;width:100%;background:#fff;color:#0f172a}'
     + '.chk{flex-direction:row;align-items:center;gap:10px;font-weight:600}.chk input{width:22px;min-height:22px}.hint{font-size:12.5px;color:#64748b;margin:12px 0}'
     + 'button{width:100%;font:inherit;font-size:17px;font-weight:800;color:#fff;background:linear-gradient(135deg,#0891b2,#0e7490);border:0;border-radius:13px;min-height:52px;cursor:pointer}button:disabled{opacity:.6}'
     + '.msg{margin-top:10px;font-size:14px;color:#b45309;min-height:20px}.msg.ok{color:#15803d;font-weight:700}</style></head><body><div class="w">'
     + '<h1>Add a truck invoice</h1><p class="sub">Millennial Pools · photos go straight to the truck’s file</p><div class="card">'
-    + '<label class="cam" style="margin:0"><input type="file" accept="image/*" capture="environment" id="cam"><img id="prev" alt="" hidden><span id="camt">📷 Take a photo of the invoice</span></label>'
+    + '<label class="cam" style="margin:0"><input type="file" accept="image/*" multiple id="cam"><span id="camt">📷 Add photos of the invoice</span><small id="camh">All pages: front, back, extra sheets</small></label><div id="thumbs"></div><div class="ai" id="ai" hidden></div>'
     + '<label>Truck<select id="truck"><option value="">Pick the truck...</option>' + opts + '</select></label>'
     + '<label>Date<input type="date" id="date"></label><label>Shop<input id="shop" maxlength="60" placeholder="e.g. Steve’s Auto Body"></label>'
     + '<label>Total<input id="tot" inputmode="decimal" placeholder="$0.00"></label><label>Work done<input id="work" maxlength="300" placeholder="e.g. Oil change, front brake pads"></label>'
     + '<label class="chk"><input type="checkbox" id="est"> This is an estimate, not a final invoice</label>'
-    + '<p class="hint">Only the photo and truck are needed.</p><button id="save">Save invoice</button><div class="msg" id="msg"></div></div></div><script>' + INVOICE_PAGE_JS + '</script></body></html>';
+    + '<p class="hint">Add the photos and the details fill in on their own. Check them before saving.</p><button id="save">Save invoice</button><div class="msg" id="msg"></div></div></div><script>' + INVOICE_PAGE_JS + '</script></body></html>';
 }
 // ---------------- Truck sign-in stickers (QR code in every truck) ----------------
 // One QR code for every truck, pointing at one sign-in / sign-out page (/r/<token>). A driver picks their name and a
@@ -2360,26 +2400,33 @@ function signPage(at) {
     + '<p style="font-size:12.5px;color:#64748b;margin:14px 0 0">One person per truck: a truck with someone in it is greyed out until they sign out. The office approves each sign in, then you are moved off your old truck. Your phone remembers your name.</p></div></div>'
     + '<script>const D=' + JSON.stringify(D).replace(/</g, '\\u003c') + ';' + SIGN_PAGE_JS + '</script></body></html>';
 }
-// Round 1.5" stickers, 20 per letter sheet (4 x 5), same positions as the "Matt Stickers" label sheet:
-// circles start 0.5" from the left and 0.75" from the top, 2" apart. Every sticker is the same QR code.
-const STICKERS_JS = `const n=document.getElementById('n'),pages=document.getElementById('pages');
-function draw(){const c=Math.max(1,Math.min(200,+n.value||20));pages.innerHTML='';
-  for(let p=0;p<Math.ceil(c/20);p++){const pg=document.createElement('div');pg.className='pg';
-    for(let k=0;k<Math.min(20,c-p*20);k++){const e=document.createElement('div');e.className='rc';e.style.left=(0.5+2*(k%4))+'in';e.style.top=(0.751+2*Math.floor(k/4))+'in';
-      new QRCode(e,{text:U,width:300,height:300,correctLevel:QRCode.CorrectLevel.M});pg.appendChild(e)}
+// Two label sheets. Every sticker is the same QR code.
+// round: 1.5" circles, 20 per letter sheet (4 x 5), same positions as the "Matt Stickers" label sheet.
+// uline3: Uline S-21909 weather-resistant 3 x 3" vinyl, 6 per sheet (2 x 3); centres measured from Uline's PDF template.
+const STICKERS_JS = `const n=document.getElementById('n'),sh=document.getElementById('sh'),pages=document.getElementById('pages');
+const SHEETS={round:{per:20,pos:k=>[0.5+2*(k%4),0.751+2*Math.floor(k/4)],cls:'rc'},
+ uline3:{per:6,pos:k=>[[2.694,5.847][k%2]-1.5,[2.368,5.507,8.66][Math.floor(k/2)]-1.5],cls:'sq'}};
+function draw(){const S=SHEETS[sh.value]||SHEETS.round,c=Math.max(1,Math.min(200,+n.value||S.per));pages.innerHTML='';
+  for(let p=0;p<Math.ceil(c/S.per);p++){const pg=document.createElement('div');pg.className='pg';
+    for(let k=0;k<Math.min(S.per,c-p*S.per);k++){const e=document.createElement('div'),q=document.createElement('div'),xy=S.pos(k);e.className=S.cls;e.style.left=xy[0]+'in';e.style.top=xy[1]+'in';
+      if(S.cls==='sq'){e.innerHTML='<b>Millennial Pools</b>';e.appendChild(q);e.insertAdjacentHTML('beforeend','<span>Scan to sign in / out of this truck</span>')}else e.appendChild(q);
+      new QRCode(q,{text:U,width:400,height:400,correctLevel:QRCode.CorrectLevel.Q});pg.appendChild(e)}
     pages.appendChild(pg)}}
-n.oninput=draw;draw();`;
+sh.onchange=()=>{n.value=(SHEETS[sh.value]||SHEETS.round).per;draw()};n.oninput=draw;draw();`;
 function stickersPage(at, base) {
   const u = base + '/r/' + signShare({ k: 's' }, STICKER_DAYS);
   return '<!doctype html><html><head><meta charset="utf-8"><title>Truck QR stickers</title><style>'
     + 'body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#e2e8f0;color:#0f172a}.bar{position:sticky;top:0;background:#0b4a63;color:#fff;padding:12px 18px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;z-index:2}'
-    + '.bar button{font:inherit;font-weight:800;background:#22d3ee;color:#083344;border:0;border-radius:10px;padding:9px 16px;cursor:pointer}.bar span{font-size:13px;color:#cffafe}.bar input{width:60px;font:inherit;padding:6px;border-radius:8px;border:0}.bar a{color:#a5f3fc}'
+    + '.bar button{font:inherit;font-weight:800;background:#22d3ee;color:#083344;border:0;border-radius:10px;padding:9px 16px;cursor:pointer}.bar span{font-size:13px;color:#cffafe}.bar input,.bar select{font:inherit;padding:6px;border-radius:8px;border:0}.bar input{width:60px}.bar a{color:#a5f3fc}'
     + '.pg{width:8.5in;height:11in;background:#fff;position:relative;margin:.3in auto;box-shadow:0 6px 20px rgba(0,0,0,.15);overflow:hidden}'
     + '.rc{position:absolute;width:1.5in;height:1.5in;border-radius:50%;outline:1px dashed #94a3b8;display:flex;align-items:center;justify-content:center}.rc img,.rc canvas{width:1in!important;height:1in!important;display:block}'
-    + '@media print{body{background:#fff}.bar{display:none}.pg{margin:0;box-shadow:none;break-after:page}.rc{outline:0}@page{size:letter;margin:0}}</style>'
+    + '.sq{position:absolute;width:3in;height:3in;border-radius:.125in;outline:1px dashed #94a3b8;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.06in;text-align:center}'
+    + '.sq b{font-size:11pt;letter-spacing:.02em;color:#0b4a63}.sq span{font-size:8.5pt;font-weight:700;color:#0f172a}.sq img,.sq canvas{width:2.05in!important;height:2.05in!important;display:block}'
+    + '@media print{body{background:#fff}.bar{display:none}.pg{margin:0;box-shadow:none;break-after:page}.rc,.sq{outline:0}@page{size:letter;margin:0}}</style>'
     + '<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script></head><body>'
-    + '<div class="bar"><b>Truck QR stickers</b><label>Stickers <input id="n" type="number" min="1" max="200" value="20"></label><button onclick="print()">Print</button>'
-    + '<span>Every sticker is the same code, so any sticker goes in any truck. It opens <a href="' + H(u) + '" target="_blank">the sign in / out page</a>. Print at Scale 100% with Margins: None on round 1.5" labels (20 per sheet).</span></div>'
+    + '<div class="bar"><b>Truck QR stickers</b><label>Sheet <select id="sh"><option value="round">Round 1.5" labels (20 per sheet)</option><option value="uline3">Uline S-21909 weather-resistant 3 x 3" (6 per sheet)</option></select></label>'
+    + '<label>Stickers <input id="n" type="number" min="1" max="200" value="20"></label><button onclick="print()">Print</button>'
+    + '<span>Every sticker is the same code, so any sticker goes in any truck. It opens <a href="' + H(u) + '" target="_blank">the sign in / out page</a>. Print at Scale 100% (Actual size) with Margins: None. Uline vinyl labels: laser printer only.</span></div>'
     + '<div id="pages"></div><script>const U=' + JSON.stringify(u) + ';' + STICKERS_JS + '</script></body></html>';
 }
 // ---------------- Upkeep tab: cost per truck, gas vs GPS, oil due, renewals, weekly safety email ----------------
@@ -2883,9 +2930,14 @@ http.createServer(async (req, res) => {
     if (!o) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('This report link is invalid or has expired. Ask for a new one.'); }
     if (o.k === 'i') {   // invoice upload link: can add invoices, can't see anything else
       try {
+        if (sub === 'read') {
+          if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
+          const out = await readInvoice(await readJson(req, 30e6));
+          res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(out));
+        }
         if (sub === 'add') {
           if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
-          const out = await addRepair(await readJson(req, 8e6));
+          const out = await addRepair(await readJson(req, 30e6));
           console.log(new Date().toISOString(), 'Invoice added through the shared upload link');
           res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: true, oil: !!out.oil }));
         }
@@ -2916,7 +2968,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/svc/test': () => svcTest(), '/api/eod/test': () => eodTest(), '/api/eod/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.eod = { ...(st.eod || {}), on: b.on === true }; saveMail(st); return { on: st.eod.on }; }, '/api/svc/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.svc = { ...(st.svc || { day: '', sent: {} }), on: b.on === true }; saveMail(st); return { on: st.svc.on }; }, '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/repair/read': readInvoice, '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/svc/test': () => svcTest(), '/api/eod/test': () => eodTest(), '/api/eod/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.eod = { ...(st.eod || {}), on: b.on === true }; saveMail(st); return { on: st.eod.on }; }, '/api/svc/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.svc = { ...(st.svc || { day: '', sent: {} }), on: b.on === true }; saveMail(st); return { on: st.svc.on }; }, '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   Object.assign(POSTS, UPKEEP_POSTS);
@@ -2924,7 +2976,7 @@ http.createServer(async (req, res) => {
     // JSON-only + POST-only, so another website can't trigger a change with a plain form
     if (req.method !== 'POST' || !/application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(405); return res.end(); }
     try {
-      const b = await readJson(req, /^\/api\/(driver\/(create|update)|repair\/add)$/.test(url.pathname) ? 8e6 : 10000);  // room for a license photo
+      const b = await readJson(req, /^\/api\/repair\/(add|read)$/.test(url.pathname) ? 30e6 : /^\/api\/driver\/(create|update)$/.test(url.pathname) ? 8e6 : 10000);  // room for a license photo
       const out = await POSTS[url.pathname](b);
       res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(out));
     } catch (e) {
@@ -3822,6 +3874,12 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .themebtn{margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:10px;border:0;background:rgba(255,255,255,.1);color:#e6f6fb;cursor:pointer}
 .themebtn:hover{background:rgba(255,255,255,.18)}.themebtn .i-sun,html[data-theme=dark] .themebtn .i-moon{display:none}html[data-theme=dark] .themebtn .i-sun{display:block}
 header .live{margin-left:8px!important}
+.rp-cam small{font-weight:500;font-size:12px;opacity:.85}
+#repThumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px;margin:10px 0 0}#repThumbs:empty{display:none}#repThumbs figure{margin:0;position:relative}
+#repThumbs img{width:100%;height:110px;object-fit:cover;border-radius:10px;display:block;border:1px solid var(--line)}#repThumbs figcaption{font-size:11.5px;color:var(--muted);text-align:center;margin-top:2px}
+#repThumbs button{position:absolute;top:4px;right:4px;width:24px;height:24px;border-radius:50%;border:0;background:rgba(15,23,42,.75);color:#fff;font-size:15px;line-height:1;cursor:pointer;padding:0}
+.rpai{margin-top:10px;padding:9px 12px;border-radius:10px;font-size:13px;background:var(--idleBg);color:var(--ink2)}.rpai.busy{background:var(--shallow);color:var(--poolInk)}.rpai.ok{background:var(--goBg);color:var(--go);font-weight:600}
+.rpfill{border-color:#4ade80!important;box-shadow:0 0 0 3px rgba(74,222,128,.18)}
 /* ===== v30: calm look. Same pool colours, no moving decorations, quieter cards, more room ===== */
 :root{--deck:#f3f6f8;--deck2:#e9eef1;--line:#e2e8ec;--line2:#d3dce2;--card:#fff;--r:14px;
  --sh:0 1px 2px rgba(15,35,50,.05),0 2px 8px -4px rgba(15,35,50,.08)}
@@ -5083,27 +5141,39 @@ let repPhoto=null;
 function repForm(){const tr=(REP&&REP.trucks||[]).slice().sort((a,b)=>(parseInt(a.truckNo)||999)-(parseInt(b.truckNo)||999)||repName(a).localeCompare(repName(b)));
   const shops=[...new Set(repParse(REP&&REP.trucks||[]).map(r=>r.shop))].sort();
   return '<div class="panel rp-add"><div class="rp-addh"><b>Add an invoice</b><button class="btn2" id="repX" aria-label="Close">Close</button></div>'
-   +'<label class="rp-cam" id="repCamL"><input type="file" accept="image/*" capture="environment" id="repCam"><img id="repPrev" alt="" hidden><span id="repCamT">📷 Take a photo of the invoice</span></label>'
+   +'<label class="rp-cam" id="repCamL"><input type="file" accept="image/*" multiple id="repCam"><span id="repCamT">📷 Add photos of the invoice</span><small id="repCamH">All pages at once: front, back, extra sheets</small></label><div id="repThumbs"></div><div class="rpai" id="repAi" hidden></div>'
    +'<div class="rp-f"><label>Truck<select id="repTruck"><option value="">Pick the truck...</option>'+tr.map(t=>'<option value="'+esc(t.id)+'">'+esc(repName(t))+(t.driver?' · '+esc(t.driver):'')+'</option>').join('')+'</select></label>'
    +'<label>Date<input type="date" id="repDate" value="'+new Date().toLocaleDateString('en-CA')+'"></label>'
    +'<label>Shop<input id="repShop" list="repShops" placeholder="e.g. Steve’s Auto Body" maxlength="60"><datalist id="repShops">'+shops.map(s=>'<option value="'+esc(s)+'">').join('')+'</datalist></label>'
    +'<label>Total<input id="repTot" inputmode="decimal" placeholder="$0.00"></label>'
    +'<label class="rp-wide">Work done<input id="repWork" maxlength="300" placeholder="e.g. Oil change, front brake pads"></label>'
    +'<label class="rp-chk"><input type="checkbox" id="repEst"> This is an estimate, not a final invoice</label></div>'
-   +'<p class="muted" style="font-size:12px;margin:8px 0">Only the photo and truck are needed. Leave the rest blank and Claude can read the photo later.</p>'
+   +'<p class="muted" style="font-size:12px;margin:8px 0">Add the photos and Claude fills in the shop, date, total and work done. Check them before saving.</p>'
    +'<button class="btn2 pri" id="repSave" style="width:100%">Save invoice</button><div class="note" id="repMsg"></div></div>'}
 document.addEventListener('click',async e=>{
-  if(e.target.closest('#repAdd')){repPhoto=null;$('repNew').innerHTML=repForm();$('repNew').scrollIntoView({behavior:'smooth',block:'start'});return}
+  if(e.target.closest('#repAdd')){repPhoto=null;repPhotos=[];repTouched.clear();$('repNew').innerHTML=repForm();$('repNew').scrollIntoView({behavior:'smooth',block:'start'});return}
   if(e.target.closest('#repX')){$('repNew').innerHTML='';return}
   if(!e.target.closest('#repSave'))return;const b=$('repSave'),m=$('repMsg');
-  if(!$('repTruck').value){m.textContent='Pick the truck first.';return}if(!repPhoto&&!$('repWork').value.trim()){m.textContent='Take a photo or write what was done.';return}
+  if(!$('repTruck').value){m.textContent='Pick the truck first.';return}if(!repPhotos.length&&!$('repWork').value.trim()){m.textContent='Take a photo or write what was done.';return}
   m.textContent='';b.disabled=true;b.textContent='Saving...';
-  try{const r=await post('/api/repair/add',{truckId:$('repTruck').value,date:$('repDate').value,shop:$('repShop').value,total:$('repTot').value,work:$('repWork').value,estimate:$('repEst').checked,photo:repPhoto});
+  try{const r=await post('/api/repair/add',{truckId:$('repTruck').value,date:$('repDate').value,shop:$('repShop').value,total:$('repTot').value,work:$('repWork').value,estimate:$('repEst').checked,photos:repPhotos});
     toast(r.oil?'Invoice saved · oil change logged':'Invoice saved to the truck');$('repNew').innerHTML='';REP=null;await loadRep()}
   catch(err){m.textContent=err.message;b.disabled=false;b.textContent='Save invoice'}});
-document.addEventListener('change',async e=>{if(e.target.id!=='repCam')return;const f=e.target.files[0];if(!f)return;
-  try{const c=await shrink(f,2000),url=c.toDataURL('image/jpeg',.82);repPhoto={type:'image/jpeg',data:url.split(',')[1]};$('repPrev').src=url;$('repPrev').hidden=false;$('repCamT').textContent='Retake photo'}
-  catch(err){$('repMsg').textContent='Could not read that photo. Try again.'}});
+let repPhotos=[],repReadN=0;const repTouched=new Set();
+document.addEventListener('input',e=>{const id=e.target.id;if(['repTruck','repDate','repShop','repTot','repWork','repEst'].includes(id)){repTouched.add(id);e.target.classList.remove('rpfill')}});
+function repThumbs(){$('repThumbs').innerHTML=repPhotos.map((p,i)=>'<figure><img src="data:image/jpeg;base64,'+p.data+'" alt="Page '+(i+1)+'"><button type="button" data-rprm="'+i+'" aria-label="Remove page '+(i+1)+'">×</button><figcaption>Page '+(i+1)+'</figcaption></figure>').join('');
+  $('repCamT').textContent=repPhotos.length?'➕ Add another page':'📷 Add photos of the invoice';$('repCamH').textContent=repPhotos.length?repPhotos.length+' photo'+(repPhotos.length>1?'s':'')+' · add every page':'All pages at once: front, back, extra sheets'}
+async function repRead(){const n=++repReadN,ai=$('repAi');ai.hidden=false;ai.className='rpai busy';ai.textContent='✨ Claude is reading the invoice...';
+  try{const j=await post('/api/repair/read',{photos:repPhotos});if(n!==repReadN||!$('repAi'))return;
+    if(!j.ai){ai.className='rpai';ai.textContent='Automatic reading needs ANTHROPIC_API_KEY in Render. Fill in the details below.';return}
+    const set=(id,v)=>{if(v!==''&&v!=null&&!repTouched.has(id)){$(id).value=v;$(id).classList.add('rpfill')}};
+    set('repShop',j.shop);set('repDate',j.date);set('repTot',j.total);set('repWork',j.work);if(j.truckId)set('repTruck',j.truckId);if(!repTouched.has('repEst'))$('repEst').checked=!!j.estimate;
+    ai.className='rpai ok';ai.textContent='✨ Filled in from '+(j.pages>1?'all '+j.pages+' photos':'the photo')+'. Green fields came from the invoice; check them, then save.'+(j.truckId?' Truck matched from the VIN / plate.':'')}
+  catch(err){if(n===repReadN&&$('repAi')){ai.className='rpai';ai.textContent='Could not read it automatically: '+err.message}}}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-rprm]');if(!b)return;e.preventDefault();repPhotos.splice(+b.dataset.rprm,1);repThumbs();if(repPhotos.length)repRead();else{repReadN++;$('repAi').hidden=true}});
+document.addEventListener('change',async e=>{if(e.target.id!=='repCam')return;const fs=[...e.target.files].slice(0,10-repPhotos.length);e.target.value='';if(!fs.length)return;
+  for(const f of fs){try{const c=await shrink(f,1600);repPhotos.push({type:'image/jpeg',data:c.toDataURL('image/jpeg',.8).split(',')[1]})}catch(err){$('repMsg').textContent='Could not read one of those photos.'}}
+  repThumbs();repRead()});
 
 $('repMiss').onclick=e=>{const b=e.currentTarget;b.setAttribute('aria-pressed',b.getAttribute('aria-pressed')==='true'?'false':'true');renderRep()};
 // ===== Repairs tab: every shop invoice saved as a vehicle note, with totals =====
