@@ -4056,7 +4056,7 @@ header .live{margin-left:8px!important}
 .last3{margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--card)}.last3 b{font-size:13px}
 .last3 ol{margin:6px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:3px}.last3 li span{font-weight:600}.last3 li small{color:var(--muted);margin-left:8px}
 .gc.per{border-left-color:#3b82f6}.gc.per .gc-ic{background:#3b82f6}.gc-per{color:var(--ink2)!important}
-.btn2.sm.takeout{margin-left:8px;padding:4px 10px;font-size:12px;min-height:0}
+.btn2.sm.takeout{margin-left:8px;padding:4px 10px;font-size:12px;min-height:0}.rtk{display:inline-flex;align-items:center;gap:2px;margin:2px 8px 2px 0}.rtk .takeout{margin-left:4px;padding:2px 8px;font-size:11.5px}
 /* ===== v30: calm look. Same pool colours, no moving decorations, quieter cards, more room ===== */
 :root{--deck:#f3f6f8;--deck2:#e9eef1;--line:#e2e8ec;--line2:#d3dce2;--card:#fff;--r:14px;
  --sh:0 1px 2px rgba(15,35,50,.05),0 2px 8px -4px rgba(15,35,50,.08)}
@@ -4464,11 +4464,11 @@ const retried=new Set();function retry(id){if(retried.has(id))return;retried.add
 // ---- Airtable (source of truth) ----
 let AT=null;
 // Past drivers (last 12 months): Azuga driving + sticker sign-ins. Filled in after the card draws.
-document.addEventListener('click',async e=>{const b=e.target.closest('[data-takeout]');if(!b)return;e.preventDefault();
-  if(!b.dataset.sure){b.dataset.sure=1;b.classList.add('danger');b.textContent='Tap again to take '+b.dataset.n.split(' ')[0]+' out';setTimeout(()=>{if(b.isConnected&&b.dataset.sure){delete b.dataset.sure;b.classList.remove('danger');b.textContent='Take out of truck'}},5000);return}
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-takeout]');if(!b)return;e.preventDefault();e.stopPropagation();
+  if(!b.dataset.sure){b.dataset.lbl=b.dataset.lbl||b.textContent;b.dataset.sure=1;b.classList.add('danger');b.textContent='Tap again to take '+b.dataset.n.split(' ')[0]+' out';setTimeout(()=>{if(b.isConnected&&b.dataset.sure){delete b.dataset.sure;b.classList.remove('danger');b.textContent=b.dataset.lbl}},5000);return}
   b.disabled=true;b.textContent='Taking out...';
-  try{const r=await post('/api/truck/take-out',{truckId:b.dataset.takeout});toast(r.who+' taken out of '+r.truck+(r.azuga?' · '+r.azuga:''));PEOPLE=null;await loadAT()}
-  catch(err){toast(err.message);b.disabled=false;delete b.dataset.sure;b.classList.remove('danger');b.textContent='Take out of truck'}});
+  try{const r=await post('/api/truck/take-out',{truckId:b.dataset.takeout});toast(r.who+' taken out of '+r.truck+(r.azuga?' · '+r.azuga:''));PEOPLE=null;await loadAT();if(!$('vDrv').hidden&&typeof loadPeople==='function')loadPeople()}
+  catch(err){toast(err.message);b.disabled=false;delete b.dataset.sure;b.classList.remove('danger');b.textContent=b.dataset.lbl||'Take out of truck'}},true);
 function lastBox(p){const L=String(p||'').split(String.fromCharCode(10)).map(x=>x.trim()).filter(Boolean);return L.length?'<div class="last3"><b>Last 3 drivers</b><ol>'+L.map(x=>{const i=x.indexOf(' (');return '<li><span>'+esc(i>0?x.slice(0,i):x)+'</span>'+(i>0?'<small>'+esc(x.slice(i+2,-1))+'</small>':'')+'</li>'}).join('')+'</ol></div>':''}
 function histBox(v,t){return '<details class="hist" data-v="'+esc(v)+'" data-t="'+esc(t)+'"><summary>Past drivers · last 12 months</summary><div class="hl muted">Loading...</div></details>'}
 document.addEventListener('toggle',async e=>{const d=e.target;if(!d.classList||!d.classList.contains('hist')||!d.open||d.dataset.done)return;d.dataset.done=1;const box=d.querySelector('.hl');
@@ -4555,7 +4555,7 @@ function renderEdit(){
   // Trucks that are in Airtable but have no Azuga tracker, so they still show up here
   const q=$('q').value.toLowerCase(),na=(AT&&AT.notInAzuga||[]).filter(t=>!q||[t.truckNo,t.desc,t.driverName,t.plate].join(' ').toLowerCase().includes(q)).sort((a,b)=>(parseInt(a.truckNo)||999)-(parseInt(b.truckNo)||999)||a.desc.localeCompare(b.desc));
   if(na.length)$('edList').insertAdjacentHTML('beforeend','<div class="nah">In Airtable, no Azuga tracker <span>'+na.length+'</span></div>'+na.map(t=>'<details class="eli nai"><summary><div><b>'+(t.truckNo?'<span class="tno">#'+esc(t.truckNo.split(/[ ~(]/)[0])+'</span>':'')+esc(t.desc||'Truck')+'</b><small>'+esc(t.driverName||'No driver')+(t.plate?' · '+esc(t.plate.trim()):'')+'</small></div><span class="pill nat">No tracker</span></summary>'
-    +'<div class="naw">'+(!t.vinOk?'<div class="note">The VIN in Airtable doesn’t look right ('+esc(t.vin||'empty')+'). Fix it there so a tracker can link.</div>':t.dupVin?'<div class="note">Another Airtable truck has the same VIN ('+esc(t.vin)+'). One of them is wrong.</div>':'<div class="muted" style="font-size:12.5px">VIN '+esc(t.vin)+'. If one of the unnamed trackers above is in this truck, open that tracker and link it to #'+esc(t.truckNo||'this truck')+'.</div>')+notesBox(t)+histBox('',t.id)+'</div></details>').join(''));
+    +'<div class="naw">'+(!t.vinOk?'<div class="note">The VIN in Airtable doesn’t look right ('+esc(t.vin||'empty')+'). Fix it there so a tracker can link.</div>':t.dupVin?'<div class="note">Another Airtable truck has the same VIN ('+esc(t.vin)+'). One of them is wrong.</div>':'<div class="muted" style="font-size:12.5px">VIN '+esc(t.vin)+'. If one of the unnamed trackers above is in this truck, open that tracker and link it to #'+esc(t.truckNo||'this truck')+'.</div>')+(t.driverName?'<div style="margin:8px 0"><b>Driver:</b> '+esc(t.driverName)+' <button class="btn2 sm takeout" data-takeout="'+esc(t.id)+'" data-n="'+esc(t.driverName)+'">Take out of truck</button></div>':'')+notesBox(t)+histBox('',t.id)+'</div></details>').join(''));
   document.querySelectorAll('.eli[data-id]').forEach(e=>e.onclick=()=>openEd(e.dataset.id));
   const n=vehicles.filter(outOfSync).length;
   if(!syncing)$('syncBar').innerHTML=!AT?'':!AT.connected?'<span class="muted">Airtable not connected</span>':AT.error?'<span class="muted">Airtable unavailable</span>':n?'<button class="btn2 pri" id="syncAll" style="width:100%">Sync '+n+' truck'+(n>1?'s':'')+' from Airtable → Azuga</button>':'<span style="color:var(--go);display:inline-flex;gap:6px;align-items:center">'+ICON.check+'Azuga matches Airtable</span>';
@@ -4936,7 +4936,7 @@ function renderDrivers(){
   [...picked].forEach(id=>{if(!all.some(d=>d.id===id))picked.delete(id)});
   $('drvRows').innerHTML=(ds.length?ds.map(d=>'<div class="rrow'+(inactive(d)?' off':'')+(picked.has(d.id)?' picked':'')+'" data-id="'+esc(d.id)+'"><input type="checkbox" class="pick" aria-label="Select '+esc(d.name)+'"'+(picked.has(d.id)?' checked':'')+'><div class="mav" style="'+pcol(d.name)+'">'+esc(initials(d.name))+'</div>'
     +'<div class="rn"><b class="nm">'+esc(d.name)+scoreChip(d.name)+(d.role?'<span class="role r'+ROLE_K(d.role)+'">'+esc(d.role)+'</span>':'')+(inactive(d)?'<span class="tag">Inactive</span>':'')+'</b><span>'+(!d.license&&!inactive(d)?'<em class="nolic">No license #</em>'+(d.policy?' · ':''):'')+esc([d.license&&((d.state?d.state+' ':'')+d.license),!inactive(d)&&d.policy].filter(Boolean).join(' · '))+(d.notes?' · '+esc(d.notes):'')+'</span></div>'
-    +'<div class="rt'+(d.trucks.length?'':' none')+'">'+(d.trucks.length?d.trucks.map(esc).join(', '):'No truck')+'</div>'
+    +'<div class="rt'+(d.trucks.length?'':' none')+'">'+(d.trucks.length?d.trucks.map((t,i)=>'<span class="rtk">'+esc(t)+((d.truckIds||[])[i]?' <button class="btn2 sm takeout" data-takeout="'+esc(d.truckIds[i])+'" data-n="'+esc(d.name)+'" title="Take '+esc(d.name)+' out of this truck">Take out</button>':'')+'</span>').join(''):'No truck')+'</div>'
     +'<div class="rs"><button class="link edbtn">Edit</button>'+(!PEOPLE.azugaOk||inactive(d)?'':d.inAzuga?'<span class="inaz">In Azuga</span>':'<button class="link azbtn">Add to Azuga</button>')+'</div>'
     +'</div>').join('')
     :'<div class="empty" style="padding:36px"><b>'+(dfilt==='noaz'&&!q?'Everyone is in Azuga':'No drivers match')+'</b>'+(dfilt==='noaz'&&!q?'The whole crew can be assigned to trucks.':'Try a different search or filter.')+'</div>')
