@@ -2835,19 +2835,28 @@ async function retireInactive(dry) {
   const at = await atData(), hits = at.trucks.filter(t => t.driver && matchPerson(gone, t.driver.name) && !matchPerson(active, t.driver.name)).slice(0, dry ? 50 : retireRuns++ ? 8 : 1);   // the first run after a restart changes one truck only
   if (dry) return hits.map(t => ({ truck: truckLabelOf(t), who: t.driver.name }));
   const out = [];
-  for (const t of hits) {
-    const who = t.driver.name;
-    await airtable(AT_TRUCKS + '/' + t.id, { method: 'PATCH', body: JSON.stringify({ fields: { [F.driver]: [] } }) });
-    cache.delete('airtable'); cache.delete('truckDrivers');
-    let az = '';
-    try { const vs = await freshVehicles(), m = matchAll(vs, (await atData()).trucks), id = Object.keys(m).find(k => m[k].truck && m[k].truck.id === t.id); if (id) { const r = await syncOne(id); az = r.skipped ? '' : ' and Azuga'; } }
-    catch (e) { console.error('Inactive driver, Azuga:', e.message); }
-    const log = [{ at: Date.now(), who, tid: t.id, truck: truckLabelOf(t), out: true, was: '', left: [], ok: 'Inactive in POM' }, ...swapLog()].slice(0, 200);
-    cache.set('swaps', { data: log, t: Date.now() }); saveSnap('swaps', log);
-    console.log(new Date().toISOString(), 'Inactive in POM:', who, 'taken off', truckLabelOf(t), '(Airtable' + az + ')');
-    out.push({ truck: truckLabelOf(t), who }); await sleep(500);
-  }
+  for (const t of hits) { out.push(await takeOffTruck(t, 'Inactive in POM')); await sleep(500); }
   return out;
+}
+// Takes the driver off a truck: Airtable's Driver field, then Azuga's driver if the truck has a tracker. Logged with the sign-ins.
+async function takeOffTruck(t, why) {
+  const who = t.driver.name;
+  await airtable(AT_TRUCKS + '/' + t.id, { method: 'PATCH', body: JSON.stringify({ fields: { [F.driver]: [] } }) });
+  cache.delete('airtable'); cache.delete('truckDrivers');
+  let az = '';
+  try { const vs = await freshVehicles(), m = matchAll(vs, (await atData()).trucks), id = Object.keys(m).find(k => m[k].truck && m[k].truck.id === t.id); if (id) { const r = await syncOne(id); az = r.skipped ? '' : 'Azuga updated too.'; } }
+  catch (e) { az = 'Azuga was not updated (' + e.message + ').'; console.error('Take off truck, Azuga:', e.message); }
+  const log = [{ at: Date.now(), who, tid: t.id, truck: truckLabelOf(t), out: true, was: '', left: [], ok: why }, ...swapLog()].slice(0, 200);
+  cache.set('swaps', { data: log, t: Date.now() }); saveSnap('swaps', log);
+  console.log(new Date().toISOString(), why + ':', who, 'taken off', truckLabelOf(t), az);
+  trackDrivers().catch(() => {});   // adds them to the truck's "Last 3 drivers" right away
+  return { truck: truckLabelOf(t), who, azuga: az };
+}
+async function takeOutDriver(b) {
+  const t = (await atData()).trucks.find(x => x.id === String(b.truckId || ''));
+  if (!t) throw new Error('That truck is not in Airtable. Refresh and try again.');
+  if (!t.driver) throw new Error('Nobody is on this truck.');
+  return takeOffTruck(t, 'Taken out on the dashboard');
 }
 // Watches each truck's Airtable driver. When it changes, the person leaving goes to the top of "Last 3 drivers".
 // Trucks with an empty list start from Azuga's last-12-months history.
@@ -3127,7 +3136,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/text/sample': textSample, '/api/repair/read': readInvoice, '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/svc/test': () => svcTest(), '/api/eod/test': () => eodTest(), '/api/eod/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.eod = { ...(st.eod || {}), on: b.on === true }; saveMail(st); return { on: st.eod.on }; }, '/api/svc/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.svc = { ...(st.svc || { day: '', sent: {} }), on: b.on === true }; saveMail(st); return { on: st.svc.on }; }, '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/truck/take-out': takeOutDriver, '/api/text/sample': textSample, '/api/repair/read': readInvoice, '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/svc/test': () => svcTest(), '/api/eod/test': () => eodTest(), '/api/eod/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.eod = { ...(st.eod || {}), on: b.on === true }; saveMail(st); return { on: st.eod.on }; }, '/api/svc/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.svc = { ...(st.svc || { day: '', sent: {} }), on: b.on === true }; saveMail(st); return { on: st.svc.on }; }, '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   Object.assign(POSTS, UPKEEP_POSTS);
@@ -4047,6 +4056,7 @@ header .live{margin-left:8px!important}
 .last3{margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--card)}.last3 b{font-size:13px}
 .last3 ol{margin:6px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:3px}.last3 li span{font-weight:600}.last3 li small{color:var(--muted);margin-left:8px}
 .gc.per{border-left-color:#3b82f6}.gc.per .gc-ic{background:#3b82f6}.gc-per{color:var(--ink2)!important}
+.btn2.sm.takeout{margin-left:8px;padding:4px 10px;font-size:12px;min-height:0}
 /* ===== v30: calm look. Same pool colours, no moving decorations, quieter cards, more room ===== */
 :root{--deck:#f3f6f8;--deck2:#e9eef1;--line:#e2e8ec;--line2:#d3dce2;--card:#fff;--r:14px;
  --sh:0 1px 2px rgba(15,35,50,.05),0 2px 8px -4px rgba(15,35,50,.08)}
@@ -4454,6 +4464,11 @@ const retried=new Set();function retry(id){if(retried.has(id))return;retried.add
 // ---- Airtable (source of truth) ----
 let AT=null;
 // Past drivers (last 12 months): Azuga driving + sticker sign-ins. Filled in after the card draws.
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-takeout]');if(!b)return;e.preventDefault();
+  if(!b.dataset.sure){b.dataset.sure=1;b.classList.add('danger');b.textContent='Tap again to take '+b.dataset.n.split(' ')[0]+' out';setTimeout(()=>{if(b.isConnected&&b.dataset.sure){delete b.dataset.sure;b.classList.remove('danger');b.textContent='Take out of truck'}},5000);return}
+  b.disabled=true;b.textContent='Taking out...';
+  try{const r=await post('/api/truck/take-out',{truckId:b.dataset.takeout});toast(r.who+' taken out of '+r.truck+(r.azuga?' · '+r.azuga:''));PEOPLE=null;await loadAT()}
+  catch(err){toast(err.message);b.disabled=false;delete b.dataset.sure;b.classList.remove('danger');b.textContent='Take out of truck'}});
 function lastBox(p){const L=String(p||'').split(String.fromCharCode(10)).map(x=>x.trim()).filter(Boolean);return L.length?'<div class="last3"><b>Last 3 drivers</b><ol>'+L.map(x=>{const i=x.indexOf(' (');return '<li><span>'+esc(i>0?x.slice(0,i):x)+'</span>'+(i>0?'<small>'+esc(x.slice(i+2,-1))+'</small>':'')+'</li>'}).join('')+'</ol></div>':''}
 function histBox(v,t){return '<details class="hist" data-v="'+esc(v)+'" data-t="'+esc(t)+'"><summary>Past drivers · last 12 months</summary><div class="hl muted">Loading...</div></details>'}
 document.addEventListener('toggle',async e=>{const d=e.target;if(!d.classList||!d.classList.contains('hist')||!d.open||d.dataset.done)return;d.dataset.done=1;const box=d.querySelector('.hl');
@@ -4585,7 +4600,7 @@ async function openEd(id){
 
    +(lk?'<div class="at"><h4>Linked to Airtable'+(L.truck.truckNo?' truck #'+esc(L.truck.truckNo):'')+' · matched by '+esc(L.how)+'</h4>'
       +(Object.keys(L.changes).length?'Fields marked <span class="fromAt">FROM AIRTABLE</span> have newer info in Airtable. Click Save to update Azuga.':'Azuga matches Airtable.')
-      +(L.notes||[]).map(n=>'<div class="note">'+esc(n)+'</div>').join('')+'<div style="margin-top:6px"><b>Driver in Airtable:</b> '+drvLine(L.truck.driver)+'</div>'+docBtns(L.truck)+notesBox(L.truck)+lastBox(L.truck.past)+histBox(vid(v),L.truck.id)+'</div>'
+      +(L.notes||[]).map(n=>'<div class="note">'+esc(n)+'</div>').join('')+'<div style="margin-top:6px"><b>Driver in Airtable:</b> '+drvLine(L.truck.driver)+(L.truck.driver?' <button class="btn2 sm takeout" data-takeout="'+esc(L.truck.id)+'" data-n="'+esc(L.truck.driver.name)+'">Take out of truck</button>':'')+'</div>'+docBtns(L.truck)+notesBox(L.truck)+lastBox(L.truck.past)+histBox(vid(v),L.truck.id)+'</div>'
      :linkBox(v))
    +[...FIELDS,...(lk?[AT_FIELDS]:[])].map(([g,fs])=>'<fieldset><legend>'+g+'</legend><div class="fg">'+fs.map(input).join('')+'</div></fieldset>').join('')
    +'<div class="edb"><button class="btn2" id="edPrev"'+(i>0?'':' disabled')+'>← Previous</button><button class="btn2" id="edNext"'+(i<rs.length-1?'':' disabled')+'>Next →</button><span style="flex:1"></span><span id="edMsg"></span><button class="btn2" id="edSave">Save</button><button class="btn2 pri" id="edSaveNext">Save &amp; next →</button></div>';
