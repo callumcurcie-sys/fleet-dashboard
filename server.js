@@ -58,7 +58,7 @@ const daysAgo = n => new Date(Date.now() - n * 864e5);
 const cache = new Map();
 // Slow Azuga/Ramp roll-ups: kept in Airtable ("Dashboard cache") so a restart still has the last good copy,
 // and served straight away when old while a fresh copy is fetched behind the scenes.
-const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist2', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv', 'upkeep', 'gasChk2', 'geo', 'camSync', 'visDays2']);
+const KEEP = new Set(['scores', 'ramp', 'trips', 'chkAuto', 'mail', 'swaps', 'drvHist2', 'swapReq', 'rampRepairs', 'rampItems', 'gasRx', 'rampOv', 'upkeep', 'gasChk2', 'geo', 'camSync', 'visDays2', 'drvSeen']);
 function cached(key, ttlSec, fn) {
   const c = cache.get(key) || {};
   if (c.data !== undefined && Date.now() - c.t < ttlSec * 1000) return Promise.resolve(c.data);
@@ -322,7 +322,7 @@ async function sendUpdate({ id, cur, body, changed }) {
 // ---------------- Airtable (the source of truth) ----------------
 const { AIRTABLE_TOKEN } = process.env;
 const AT_BASE = 'appxOcqhRSdoWgHE3', AT_TRUCKS = 'tbl3aU0dRPvn79Ba1', AT_DRIVERS = 'tbl9oEuseNwk23jdg';
-const F = { vin: 'fldT4fSSnXnZuj2Jr', year: 'fldqjqyAK1ZJfn0oT', make: 'fldOhan3is4yEhucl', model: 'fldM01jCShSILujYB',
+const F = { past: 'fld8hlRTQnf9laM3w', vin: 'fldT4fSSnXnZuj2Jr', year: 'fldqjqyAK1ZJfn0oT', make: 'fldOhan3is4yEhucl', model: 'fldM01jCShSILujYB',
   truckNo: 'fldYmYqWTfoYoRvjB', policy: 'fldWlS28YbpsipR7r', driver: 'fldEO66ezgMWnguAu', plate: 'fldLGLwnLOAfpw88W',
   insCard: 'fldH0Pe6EKyQEBmMR', files: 'fldS5YJgDrLDbxSiK', regRenew: 'fldjFFBZ0UoO4SUXV', ezpass: 'fld1utE81nDdDiqgi', active: 'fldBpQ0MA5cD9YJ06', snap: 'fldOaFfl7ZzS72xLK', notes: 'fldkWorOJHdYaLCy5', oilDate: 'fldGdTd6Vk2w7lyrn', oilMiles: 'fldKXcXo3MPHkkfC4', insExp: 'fldITfdiPBIa3oMd8', regExp: 'fldjZ4AIbigbm6PPX', hasTracker: 'fld9r34OVpY2kPEom' };
 // Drivers. Date of birth is only ever written (new driver form), never read or shown.
@@ -372,7 +372,7 @@ const atData = () => cached('airtable', 60, async () => {
       truckNo: clean(f[F.truckNo]), policy: clean(f[F.policy]?.name ?? f[F.policy]), plate: clean(f[F.plate]),
       regRenew: clean(f[F.regRenew]), ezpass: clean(f[F.ezpass]), active: !!f[F.active],
       driver: (f[F.driver] || []).map(id => byId[id]).filter(Boolean)[0] || null, snap: parseSnap(f[F.snap]),
-      insCard: att(f[F.insCard]), files: att(f[F.files]), notes: String(f[F.notes] || ''), oilDate: f[F.oilDate] || '', oilMiles: f[F.oilMiles] || null, insExp: f[F.insExp] || '', regExp: f[F.regExp] || '', hasTracker: !!f[F.hasTracker],
+      insCard: att(f[F.insCard]), files: att(f[F.files]), notes: String(f[F.notes] || ''), oilDate: f[F.oilDate] || '', oilMiles: f[F.oilMiles] || null, insExp: f[F.insExp] || '', regExp: f[F.regExp] || '', hasTracker: !!f[F.hasTracker], past: String(f[F.past] || ''),
     }; }),
   };
 });
@@ -1224,12 +1224,13 @@ const chkRrule = t => { const ymd = etDay(t).ymd.replace(/-/g, ''); return 'DTST
 const ruleHour = r => { const m = /BYHOUR=(\d+)/.exec(r || ''); return m ? +m[1] : null; };
 // POM user ids (a new appointment's workers are users; the ids on existing appointments belong to the appointment's worker links)
 let pomUserEmail = true;
-const pomUsers = () => cached('pomusers', 3600, async () => { const out = []; let after = null;
+const pomUsersAll = () => cached('pomusersAll', 3600, async () => { const out = []; let after = null;
   for (let i = 0; i < 20; i++) { let d;
     try { d = await pom('query($a: String) { infiniteUsers(first: 50, after: $a) { edges { node { id firstName lastName isActive' + (pomUserEmail ? ' email' : '') + ' } } pageInfo { endCursor hasNextPage } } }', { a: after }); }
     catch (e) { if (!pomUserEmail) throw e; pomUserEmail = false; console.log('POM users: email not readable with this API key, using Airtable emails'); out.length = 0; after = null; i = -1; continue; }
     const c = d.infiniteUsers || {}; (c.edges || []).forEach(e => e && e.node && out.push(e.node)); if (!c.pageInfo || !c.pageInfo.hasNextPage) break; after = c.pageInfo.endCursor; }
-  return out.filter(u => u.isActive !== false).map(u => ({ id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' '), email: clean(u.email || '') })); });
+  return out.map(u => ({ id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(' '), email: clean(u.email || ''), active: u.isActive !== false })); });
+const pomUsers = async () => (await pomUsersAll()).filter(u => u.active).map(({ active, ...u }) => u);
 async function checkupPlan() {
   if (!clean(process.env.POM_API_KEY)) return { connected: false };
   const now = new Date(), anchor = etDay().end, appts = [];
@@ -2489,12 +2490,13 @@ const truckCost = () => cached('truckCost2', 3600, async () => {
   const droveBy = who => drove[who] = drove[who] || pairs.flatMap(p => Object.values(hist[p.v.trackeeId] || {}).filter(h => same(h.name, who)).map(h => ({ id: p.t.id, h })));
   for (const p of pairs) { const named = Object.values(hist[p.v.trackeeId] || {}).reduce((a, h) => a + h.miles, 0);
     rows[p.t.id].milesNamed = named; rows[p.t.id].miles = Math.max(named, (hist._tot || {})[p.v.trackeeId] || 0); }
-  const cur = who => at.trucks.find(t => t.driver && same(t.driver.name, who));
-  let unassigned = 0;
+  const cur = who => at.trucks.find(t => t.driver && same(t.driver.name, who)), pp = personalPeople(at);
+  let unassigned = 0, personal = 0;
   const give = (id, g, amt, how) => { const r = rows[id]; r.gas += amt; const b = r.gasBy[g.who || 'Unknown'] = r.gasBy[g.who || 'Unknown'] || { amt: 0, n: 0 }; b.amt += amt; b.n += amt / g.amount; r.how[how] = (r.how[how] || 0) + amt; };
   for (const g of y.card.concat(y.reimb).filter(x => x.gas && x.amount > 0)) {
     const c = gchk[g.id], m = Math.min(11, Math.floor((Date.now() - Date.parse(g.at)) / mo)), d = droveBy(g.who);
     if (c && c.truckId && rows[c.truckId] && (c.verdict === 'ok' || c.verdict === 'moving')) { give(c.truckId, g, g.amount, 'gps'); continue; }   // GPS put the truck at the pump
+    if (matchPerson(pp, g.who)) { personal += g.amount; continue; }   // district manager, no truck at the pump: their own car
     let parts = d.filter(x => x.h.mo && x.h.mo[m] > 0).map(x => [x.id, x.h.mo[m]]), how = 'month';
     if (!parts.length) { parts = d.map(x => [x.id, x.h.miles]); how = 'year'; }
     const tot = parts.reduce((a, x) => a + x[1], 0);
@@ -2513,7 +2515,7 @@ const truckCost = () => cached('truckCost2', 3600, async () => {
       rep: r.rep.sort((a, b) => b.amt - a.amt).slice(0, 12), gasBy: Object.entries(r.gasBy).map(([who, b]) => ({ who, amt: Math.round(b.amt), n: Math.round(b.n * 10) / 10 })).sort((a, b) => b.amt - a.amt).slice(0, 8),
       how: Object.fromEntries(Object.entries(r.how).map(([k, v]) => [k, Math.round(v)])), warn: r.warn };
   }).filter(r => r.total || r.miles || r.gas).sort((a, b) => (b.cpm ?? -1) - (a.cpm ?? -1) || b.total - a.total);
-  return { rows: out, unassignedGas: Math.round(unassigned), gasPerMile: GAS_PER_MILE };
+  return { rows: out, unassignedGas: Math.round(unassigned), personalGas: Math.round(personal), gasPerMile: GAS_PER_MILE };
 });
 const d0s = n => '$' + Math.round(n || 0).toLocaleString();
 
@@ -2780,6 +2782,62 @@ async function oilMail() {
   saveUp(st); return { sent };
 }
 // Hourly: renewals (daily, 8 AM+), and on Mondays from 8 AM the safety + oil emails (each once a week)
+// ---- Drivers: anyone marked inactive in POM comes off every truck; each truck keeps its last 3 drivers ----
+const fmtDay = ms => new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+const pastLines = t => String(t.past || '').split('\n').map(l => l.trim()).filter(Boolean);
+let retireRuns = 0;
+async function retireInactive(dry) {
+  if (!clean(process.env.POM_API_KEY) || !AIRTABLE_TOKEN) return [];
+  const all = await pomUsersAll(), active = all.filter(u => u.active), gone = all.filter(u => !u.active);
+  if (!active.length || !gone.length) return [];   // a failed or empty POM answer never clears anyone
+  const at = await atData(), hits = at.trucks.filter(t => t.driver && matchPerson(gone, t.driver.name) && !matchPerson(active, t.driver.name)).slice(0, dry ? 50 : retireRuns++ ? 8 : 1);   // the first run after a restart changes one truck only
+  if (dry) return hits.map(t => ({ truck: truckLabelOf(t), who: t.driver.name }));
+  const out = [];
+  for (const t of hits) {
+    const who = t.driver.name;
+    await airtable(AT_TRUCKS + '/' + t.id, { method: 'PATCH', body: JSON.stringify({ fields: { [F.driver]: [] } }) });
+    cache.delete('airtable'); cache.delete('truckDrivers');
+    let az = '';
+    try { const vs = await freshVehicles(), m = matchAll(vs, (await atData()).trucks), id = Object.keys(m).find(k => m[k].truck && m[k].truck.id === t.id); if (id) { const r = await syncOne(id); az = r.skipped ? '' : ' and Azuga'; } }
+    catch (e) { console.error('Inactive driver, Azuga:', e.message); }
+    const log = [{ at: Date.now(), who, tid: t.id, truck: truckLabelOf(t), out: true, was: '', left: [], ok: 'Inactive in POM' }, ...swapLog()].slice(0, 200);
+    cache.set('swaps', { data: log, t: Date.now() }); saveSnap('swaps', log);
+    console.log(new Date().toISOString(), 'Inactive in POM:', who, 'taken off', truckLabelOf(t), '(Airtable' + az + ')');
+    out.push({ truck: truckLabelOf(t), who }); await sleep(500);
+  }
+  return out;
+}
+// Watches each truck's Airtable driver. When it changes, the person leaving goes to the top of "Last 3 drivers".
+// Trucks with an empty list start from Azuga's last-12-months history.
+async function trackDrivers() {
+  if (!AIRTABLE_TOKEN) return;
+  const at = await atData(), seen = { ...((cache.get('drvSeen') || {}).data || {}) }, ups = [], now = Date.now();
+  let hist = null, pairs = null;
+  for (const t of at.trucks) {
+    const cur = t.driver ? t.driver.name : '', was = seen[t.id];
+    let lines = pastLines(t), changed = false;
+    if (!was || !was.seeded) {
+      if (!lines.length) try {
+        hist = hist || await drvHistory(); pairs = pairs || await fleetPairs();
+        const p = pairs.find(x => x.t.id === t.id), h = p ? Object.values(hist[p.v.trackeeId] || {}) : [];
+        lines = h.filter(x => dupeName(x.name) !== dupeName(cur)).sort((a, b) => b.to - a.to).slice(0, 3)
+          .map(x => x.name + ' (' + new Date(x.from).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) + ' – ' + new Date(x.to).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) + ', from Azuga)');
+        changed = lines.length > 0;
+      } catch (e) { console.error('Last 3 drivers, Azuga history:', e.message); }
+      seen[t.id] = { name: cur, since: was ? was.since : null, seeded: true };
+    } else if (dupeName(was.name) !== dupeName(cur)) {
+      if (was.name) { lines = [was.name + ' (' + (was.since ? fmtDay(was.since) + ' – ' : 'until ') + fmtDay(now) + ')', ...lines.filter(l => !l.startsWith(was.name + ' ('))].slice(0, 3); changed = true; }
+      seen[t.id] = { name: cur, since: now, seeded: true };
+    }
+    if (changed) ups.push({ id: t.id, fields: { [F.past]: lines.join('\n') } });
+  }
+  for (let i = 0; i < ups.length; i += 10) { await airtable(AT_TRUCKS, { method: 'PATCH', body: JSON.stringify({ records: ups.slice(i, i + 10) }) }); await sleep(250); }
+  if (ups.length) { cache.delete('airtable'); console.log(new Date().toISOString(), 'Last 3 drivers updated on', ups.length, 'truck(s)'); }
+  cache.set('drvSeen', { data: seen, t: now }); saveSnap('drvSeen', seen);
+}
+if (process.argv[2] !== 'test') { const drvTick = () => retireInactive().catch(e => console.error('Inactive drivers:', e.message)).then(() => trackDrivers()).catch(e => console.error('Last 3 drivers:', e.message));
+  setTimeout(drvTick, 4 * 60e3); setInterval(drvTick, 15 * 60e3); }
+routes['/api/drivers/inactive-check'] = () => retireInactive(true).then(list => ({ wouldRemove: list }));
 async function upkeepTick() {
   const st = upState(), et = etNow(); if (et.getHours() < 8 || !mailReady()) return;
   const day = et.toLocaleDateString('en-CA');
@@ -2798,12 +2856,16 @@ routes['/api/upkeep'] = async () => {
   const st = upState(), at = await atData(), done = gasChk();
   const [cost, oil] = await Promise.all([truckCost().catch(e => ({ error: e.message })), oilList().catch(e => ({ error: e.message }))]);
   const tk = Object.fromEntries(at.trucks.map(t => [t.id, t]));
-  const gas = Object.entries(done).map(([id, x]) => ({ id, ...x, truck: tk[x.truckId] ? tname(tk[x.truckId]) : '', tank: tankOf(tk[x.truckId]), link: 'https://app.ramp.com/business-overview/transactions/' + id })).sort((a, b) => b.flags.length - a.flags.length || Date.parse(b.at) - Date.parse(a.at));
+  const pp = personalPeople(at), locs = Object.fromEntries(((await rampYear().catch(() => ({ card: [] }))).card || []).filter(t => t.loc).map(t => [t.id, t.loc]));
+  const gas = Object.entries(done).map(([id, x]) => ({ id, ...x, personal: !!matchPerson(pp, x.who), sta: x.sta || (locs[id] ? [locs[id].city, locs[id].state].filter(Boolean).join(', ') + (locs[id].zip ? ' ' + locs[id].zip : '') : ''), truck: tk[x.truckId] ? tname(tk[x.truckId]) : '', tank: tankOf(tk[x.truckId]), link: 'https://app.ramp.com/business-overview/transactions/' + id })).sort((a, b) => b.flags.length - a.flags.length || Date.parse(b.at) - Date.parse(a.at));
   const renew = (await renewRows()).map(({ t, ...x }) => x);
-  return { cost, oil, oilMiles: OIL_MI, gas, gasOk: GAS_OK, gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew }, mail: mailReady(), ai: !!AI_KEY() };
+  return { cost, oil, oilMiles: OIL_MI, gas, gasOk: GAS_OK, personalRoles: PERSONAL_ROLES, personalNames: pp.map(d => d.name), gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew }, mail: mailReady(), ai: !!AI_KEY() };
 };
-routes['/api/upkeep/flags'] = () => ({ gas: Object.values(gasChk()).filter(x => x.verdict === 'far' && !x.ok && !(x.flags || []).some(f => /^Truck was parked/.test(f))).length });
+routes['/api/upkeep/flags'] = async () => { const pp = personalPeople(await atData()); return { gas: Object.values(gasChk()).filter(x => !matchPerson(pp, x.who) && x.verdict === 'far' && !x.ok && !(x.flags || []).some(f => /^Truck was parked/.test(f))).length }; };
 routes['/api/upkeep/safety-preview'] = async q => (await safetyText(q.get('name') || 'Callum Curcie')) || { error: 'No score for that name yet.' };
+// District managers fill up both their personal car and their work truck on the card (GAS_PERSONAL_ROLES in Render to change)
+const PERSONAL_ROLES = (process.env.GAS_PERSONAL_ROLES || 'District').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+const personalPeople = at => at.drivers.filter(d => d.name && PERSONAL_ROLES.includes(String(d.role || '').toLowerCase()));
 const GAS_OK = ['Gas cans / equipment', 'Different vehicle', 'Rental or personal car for work', 'Checked, it is fine'];
 const UPKEEP_POSTS = {
   '/api/upkeep/gas-ok': b => { const done = gasChk(), r = done[String(b.id || '')]; if (!r) throw new Error('That fill-up is no longer in the list. Refresh.');
@@ -3940,6 +4002,9 @@ header .live{margin-left:8px!important}
 .gc-fl{color:var(--go)!important;font-weight:600}.gc-okd{color:var(--go)!important;font-weight:600}
 .gc-act{display:flex;flex-direction:column;gap:6px;align-items:stretch}.gc-oks{font:inherit;font-size:12.5px;padding:6px 8px;border-radius:9px;border:1px solid var(--line2);background:var(--card);color:var(--ink)}
 .gc-why{font-size:12.5px;color:var(--ink2)!important;margin:4px 0 0!important}
+.last3{margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--card)}.last3 b{font-size:13px}
+.last3 ol{margin:6px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:3px}.last3 li span{font-weight:600}.last3 li small{color:var(--muted);margin-left:8px}
+.gc.per{border-left-color:#3b82f6}.gc.per .gc-ic{background:#3b82f6}.gc-per{color:var(--ink2)!important}
 /* ===== v30: calm look. Same pool colours, no moving decorations, quieter cards, more room ===== */
 :root{--deck:#f3f6f8;--deck2:#e9eef1;--line:#e2e8ec;--line2:#d3dce2;--card:#fff;--r:14px;
  --sh:0 1px 2px rgba(15,35,50,.05),0 2px 8px -4px rgba(15,35,50,.08)}
@@ -4347,6 +4412,7 @@ const retried=new Set();function retry(id){if(retried.has(id))return;retried.add
 // ---- Airtable (source of truth) ----
 let AT=null;
 // Past drivers (last 12 months): Azuga driving + sticker sign-ins. Filled in after the card draws.
+function lastBox(p){const L=String(p||'').split(String.fromCharCode(10)).map(x=>x.trim()).filter(Boolean);return L.length?'<div class="last3"><b>Last 3 drivers</b><ol>'+L.map(x=>{const i=x.indexOf(' (');return '<li><span>'+esc(i>0?x.slice(0,i):x)+'</span>'+(i>0?'<small>'+esc(x.slice(i+2,-1))+'</small>':'')+'</li>'}).join('')+'</ol></div>':''}
 function histBox(v,t){return '<details class="hist" data-v="'+esc(v)+'" data-t="'+esc(t)+'"><summary>Past drivers · last 12 months</summary><div class="hl muted">Loading...</div></details>'}
 document.addEventListener('toggle',async e=>{const d=e.target;if(!d.classList||!d.classList.contains('hist')||!d.open||d.dataset.done)return;d.dataset.done=1;const box=d.querySelector('.hl');
   try{const l=await get('/api/truck/history?v='+encodeURIComponent(d.dataset.v)+'&t='+encodeURIComponent(d.dataset.t));const f=x=>new Date(x).toLocaleDateString('en-US',{month:'short',year:'numeric'});
@@ -4477,7 +4543,7 @@ async function openEd(id){
 
    +(lk?'<div class="at"><h4>Linked to Airtable'+(L.truck.truckNo?' truck #'+esc(L.truck.truckNo):'')+' · matched by '+esc(L.how)+'</h4>'
       +(Object.keys(L.changes).length?'Fields marked <span class="fromAt">FROM AIRTABLE</span> have newer info in Airtable. Click Save to update Azuga.':'Azuga matches Airtable.')
-      +(L.notes||[]).map(n=>'<div class="note">'+esc(n)+'</div>').join('')+'<div style="margin-top:6px"><b>Driver in Airtable:</b> '+drvLine(L.truck.driver)+'</div>'+docBtns(L.truck)+notesBox(L.truck)+histBox(vid(v),L.truck.id)+'</div>'
+      +(L.notes||[]).map(n=>'<div class="note">'+esc(n)+'</div>').join('')+'<div style="margin-top:6px"><b>Driver in Airtable:</b> '+drvLine(L.truck.driver)+'</div>'+docBtns(L.truck)+notesBox(L.truck)+lastBox(L.truck.past)+histBox(vid(v),L.truck.id)+'</div>'
      :linkBox(v))
    +[...FIELDS,...(lk?[AT_FIELDS]:[])].map(([g,fs])=>'<fieldset><legend>'+g+'</legend><div class="fg">'+fs.map(input).join('')+'</div></fieldset>').join('')
    +'<div class="edb"><button class="btn2" id="edPrev"'+(i>0?'':' disabled')+'>← Previous</button><button class="btn2" id="edNext"'+(i<rs.length-1?'':' disabled')+'>Next →</button><span style="flex:1"></span><span id="edMsg"></span><button class="btn2" id="edSave">Save</button><button class="btn2 pri" id="edSaveNext">Save &amp; next →</button></div>';
@@ -5329,25 +5395,27 @@ function renderRampUp(){if(!UP)return;
           +'<div class="ukc-f"><span><i class="dot rep"></i>'+d0(r.repairs)+(r.nRep?' · '+r.nRep+' repair'+(r.nRep>1?'s':''):'')+'</span><span><i class="dot gas"></i>'+d0(gc)+(r.gasExtra?' <s title="Gas the miles don’t explain">+'+d0(r.gasExtra)+'</s>':'')+'</span><span>'+r.miles.toLocaleString()+' mi</span></div>'
           +(r.warn&&r.warn.length?'<div class="ukwarn">⚠ '+esc(r.warn[0])+'</div>':'')
           +'<details class="ukd"><summary>Why does it cost this much?</summary>'+costWhy(r,c.gasPerMile||0.22)+'</details></div>'}).join('')+'</div>'
+      +(c.personalGas?'<p class="muted rgnote">'+d0(c.personalGas)+' of district managers’ gas went into their personal cars (no company truck at the pump), so it is not counted against any truck.</p>':'')
       +(c.unassignedGas?'<p class="muted rgnote">'+d0(c.unassignedGas)+' of gas could not be matched to a truck (card holders with no truck).</p>':'')}
   // Gas vs GPS
-  const g=UP.gas.filter(upf),cnt=k=>g.filter(k).length,isFar=x=>!x.ok&&x.flags.length>0,isUnv=x=>!x.ok&&!x.flags.length&&x.unverified,isOk=x=>x.ok||!x.flags.length&&!x.unverified,parkedFar=x=>x.verdict==='far'&&x.flags.some(f=>/^Truck was parked/.test(f)),isBad=x=>!x.ok&&(x.verdict==='far'&&!parkedFar(x)||x.verdict==='moving');
-  const pick={far:isFar,unv:isUnv,ok:isOk,all:()=>true}[GF],list=g.filter(pick);
-  const by={};g.filter(x=>x.verdict==='far'&&!x.ok).forEach(x=>{const b=by[x.who]=by[x.who]||{n:0,amt:0};b.n++;b.amt+=x.amount});const top=Object.entries(by).sort((a,b)=>b[1].n-a[1].n).slice(0,10),tmx=top.length?top[0][1].n:1;
+  const g=UP.gas.filter(upf),cnt=k=>g.filter(k).length,isPer=x=>x.personal&&!x.ok&&x.verdict!=='ok',isFar=x=>!x.ok&&!isPer(x)&&x.flags.length>0,isUnv=x=>!x.ok&&!isPer(x)&&!x.flags.length&&x.unverified,isOk=x=>x.ok||!isPer(x)&&!x.flags.length&&!x.unverified,parkedFar=x=>x.verdict==='far'&&x.flags.some(f=>/^Truck was parked/.test(f)),isBad=x=>!x.ok&&!isPer(x)&&(x.verdict==='far'&&!parkedFar(x)||x.verdict==='moving');
+  const pick={far:isFar,unv:isUnv,ok:isOk,per:isPer,all:()=>true}[GF]||isFar,list=g.filter(pick);
+  const by={};g.filter(x=>x.verdict==='far'&&!x.ok&&!x.personal).forEach(x=>{const b=by[x.who]=by[x.who]||{n:0,amt:0};b.n++;b.amt+=x.amount});const top=Object.entries(by).sort((a,b)=>b[1].n-a[1].n).slice(0,10),tmx=top.length?top[0][1].n:1;
   const when=t=>new Date(t).toLocaleString('en-US',{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
   $('rsGps').innerHTML=kpis([[g.length,'fill-ups checked (60 days)'],[cnt(isBad),'truck was driving somewhere else','bad'],[cnt(isFar),'to look at','warn'],[cnt(isOk),'truck was at the station','good']])
-    +'<div class="ukbar">'+chips('gf',GF,[['far','To look at',cnt(isFar)],['unv','Could not check',cnt(isUnv)],['ok','All good',cnt(isOk)],['all','Everything',g.length]])+'<span style="flex:1"></span><button class="btn2" id="upGasRun">'+(UP.gasBusy?'Checking...':'Check new fill-ups now')+'</button></div>'
-    +'<div class="rp-grid"><div>'+(list.length?list.slice(0,150).map(x=>{const k=isBad(x)?'far':isFar(x)?'minor':isUnv(x)?'unv':'ok';
-      return '<div class="gc '+k+'"><div class="gc-ic">'+(k==='far'?'!':k==='minor'?'i':k==='unv'?'?':'✓')+'</div><div class="gc-m"><div class="gc-t"><b>'+esc(x.who)+'</b><span>'+money(x.amount)+(x.gal?' · '+x.gal.toFixed(1)+' gal':'')+' at '+esc(x.merchant)+'</span></div>'
+    +'<div class="ukbar">'+chips('gf',GF,[['far','To look at',cnt(isFar)],['unv','Could not check',cnt(isUnv)],['ok','All good',cnt(isOk)],['per','Personal + work vehicle',cnt(isPer)],['all','Everything',g.length]])+'<span style="flex:1"></span><button class="btn2" id="upGasRun">'+(UP.gasBusy?'Checking...':'Check new fill-ups now')+'</button></div>'
+    +'<div class="rp-grid"><div>'+(list.length?list.slice(0,150).map(x=>{const k=isPer(x)?'per':isBad(x)?'far':isFar(x)?'minor':isUnv(x)?'unv':'ok';
+      return '<div class="gc '+k+'"><div class="gc-ic">'+(k==='far'?'!':k==='minor'?'i':k==='unv'?'?':k==='per'?'P':'✓')+'</div><div class="gc-m"><div class="gc-t"><b>'+esc(x.who)+'</b><span>'+money(x.amount)+(x.gal?' · '+x.gal.toFixed(1)+' gal':'')+' at '+esc(x.merchant)+'</span></div>'
         +'<small>'+when(x.at)+(x.truck?' · '+esc(x.truck):'')+(x.tank?' ('+x.tank+' gal tank)':'')+'</small>'
         +(x.verdict==='far'&&!x.ok&&(x.sta||x.tat)?'<p class="gc-why">'+(x.sta?'Ramp puts the station in <b>'+esc(x.sta)+'</b>':'')+(x.tat?(x.sta?'; ':'')+'the truck was at <b>'+esc(x.tat)+'</b>':'')+(x.fl==='-'?'. No other company truck was there either.':'.')+(parkedFar(x)?' Their truck sat parked the whole time, so they were most likely in another vehicle, possibly one without a tracker.':'')+'</p>':'')
+        +(isPer(x)?'<p class="gc-per">District manager: fills up a personal car and a work truck on this card, so this one is not checked against a truck.'+(x.sta?' Station: '+esc(x.sta)+'.':'')+'</p>':'')
         +(x.fl&&x.fl!=='-'?'<p class="gc-fl">🚚 '+esc(x.fl)+' was at the station. They used a different company truck than the one on file.</p>':'')
         +(x.ok?'<p class="gc-okd">✓ Marked OK: '+esc(x.ok)+' <button class="link" data-gok="'+esc(x.id)+'" data-why="">Undo</button></p>':'')
-        +(x.flags.length&&!x.ok?'<ul>'+x.flags.map(f=>'<li>'+esc(f)+'</li>').join('')+'</ul>':x.ok?'':x.unverified?'<p>'+esc(x.unverified)+'</p>':'<p>Truck was at the station'+(x.verdict==='moving'?' (driving past)':'')+'</p>')+'</div>'
-        +'<div class="gc-act"><a class="btn2" href="'+esc(x.link)+'" target="_blank" rel="noopener">Ramp ↗</a>'+(!x.ok&&(x.flags.length||x.unverified)?'<select class="gc-oks" data-gsel="'+esc(x.id)+'" aria-label="Mark this fill-up OK"><option value="">Mark OK…</option>'+(UP.gasOk||[]).map(w=>'<option>'+esc(w)+'</option>').join('')+'</select>':'')+'</div></div>'}).join('')
+        +(isPer(x)?'':x.flags.length&&!x.ok?'<ul>'+x.flags.map(f=>'<li>'+esc(f)+'</li>').join('')+'</ul>':x.ok?'':x.unverified?'<p>'+esc(x.unverified)+'</p>':'<p>Truck was at the station'+(x.verdict==='moving'?' (driving past)':'')+'</p>')+'</div>'
+        +'<div class="gc-act"><a class="btn2" href="'+esc(x.link)+'" target="_blank" rel="noopener">Ramp ↗</a>'+(!x.ok&&!isPer(x)&&(x.flags.length||x.unverified)?'<select class="gc-oks" data-gsel="'+esc(x.id)+'" aria-label="Mark this fill-up OK"><option value="">Mark OK…</option>'+(UP.gasOk||[]).map(w=>'<option>'+esc(w)+'</option>').join('')+'</select>':'')+'</div></div>'}).join('')
       :'<div class="empty">'+(g.length?'Nothing here.':'No fill-ups checked yet. The first check runs a few minutes after the server starts.')+'</div>')+'</div>'
     +'<aside><div class="panel rp-pan"><h3>Most “not near” fill-ups</h3>'+(top.length?top.map(([n,b])=>'<div class="ukrank"><div><b>'+esc(n)+'</b><small>'+b.n+' fill-up'+(b.n>1?'s':'')+' · '+money(b.amt)+'</small></div><i><b style="width:'+(b.n/tmx*100)+'%"></b></i></div>').join(''):'<div class="muted">Nobody yet.</div>')+'</div>'
-    +'<div class="panel rp-pan"><h3>How it works</h3><p class="muted" style="margin:0;font-size:13px">For every gas charge on a Ramp card, the dashboard looks at where the card holder’s trucks were (Azuga) within 30 minutes. If none of theirs was there, it checks every company truck, since crews swap trucks. It is marked red only when their own truck was out driving somewhere else and no company truck was at the station. If their truck just sat parked, it is grey: they were most likely in another vehicle (some trucks have no tracker). Gallons over the tank size and a 2nd fill-up with little driving are shown in grey as things to glance at (often gas cans or equipment). Use “Mark OK” to clear anything you know is fine.</p></div></aside></div>'}
+    +'<div class="panel rp-pan"><h3>How it works</h3><p class="muted" style="margin:0;font-size:13px">For every gas charge on a Ramp card, the dashboard looks at where the card holder’s trucks were (Azuga) within 30 minutes. If none of theirs was there, it checks every company truck, since crews swap trucks. It is marked red only when their own truck was out driving somewhere else and no company truck was at the station. If their truck just sat parked, it is grey: they were most likely in another vehicle (some trucks have no tracker). Gallons over the tank size and a 2nd fill-up with little driving are shown in grey as things to glance at (often gas cans or equipment). Use “Mark OK” to clear anything you know is fine. '+(UP.personalNames&&UP.personalNames.length?'District managers ('+UP.personalNames.map(esc).join(', ')+') use a personal car and a work truck, so their fill-ups only count for a truck when GPS puts it at the pump; the rest are listed under “Personal + work vehicle”.':'')+'</p></div></aside></div>'}
 const upRem=(icon,title,on,how,who,when,actions)=>'<div class="rmc wide'+(on?' live':'')+'"><div class="rmh"><span class="rmi">'+icon+'</span><div><b>'+title+'</b><small>'+how+'</small></div>'+(on?'<span class="rmpill on">● On</span>':'<span class="rmpill off">Off</span>')+'</div><dl class="rmd"><dt>About</dt><dd>'+who+'</dd><dt>When</dt><dd>'+when+'</dd></dl><div class="rma">'+actions+'</div></div>';
 function renderUp(){const u=UP;if(!u)return;let h='';
   if(USEC==='oil'){const o=Array.isArray(u.oil)?u.oil.filter(upf):[],lab={due:'Due now',soon:'Due soon',ok:'OK',unknown:'No record'};
