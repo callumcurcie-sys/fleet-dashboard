@@ -1442,7 +1442,7 @@ async function textSample(b) {
   const first = d.name.split(' ')[0], k = clean(b.kind) || 'svc';
   const msg = k === 'eod' ? 'Millennial Pools: Hi ' + first + ", 2 POM services from today aren't submitted: Sunset Village, Oak Ridge HOA. Please complete them in POM tonight. If you didn't get to a pool, let your regional know."
     : k === 'checkup' ? 'Millennial Pools: Hi ' + first + ", reminder: your weekly truck check-up hasn't been submitted in POM yet. Please fill it out today. Thanks!"
-    : k === 'safety' ? ((await safetyText(d.name).catch(() => null)) || {}).sms || 'Millennial Pools: Hi ' + first + ', your driver score this week is 96/100. No camera events this week, nice work!'
+    : k === 'safety' ? (globalThis.safetySms ? ((await globalThis.safetySms(d.name).catch(() => null)) || {}).sms : '') || 'Millennial Pools: Hi ' + first + ', your driver score this week is 96/100. No camera events this week, nice work!'
     : svcText(d.name, { customer: 'Sunset Village Pool', visit: { leave: Date.now() - 25 * 6e4 } }).sms;
   await sendText(ph, '(SAMPLE, no action needed) ' + msg);
   console.log(new Date().toISOString(), 'Sample', k, 'text sent to', d.name);
@@ -2806,6 +2806,7 @@ async function safetyText(name, fleet) {
     '\n\nWatch the clip and see your full report (private to you, link works for 2 weeks):\n' + link + '\n\nThanks,\nMillennial Pools', events: ev.length,
     sms: 'Millennial Pools: Hi ' + first + ', your driver score this week is ' + me.r.score + '/100 (#' + me.r.rank + ' of ' + fleet.length + '). ' + (ev.length ? 'Worst camera event: ' + ev[0].k.label + ', ' + when(ev[0].t) + '.' : 'No camera events this week, nice work!') + ' Your report: ' + link };
 }
+globalThis.safetySms = name => safetyText(name);   // lets the sample texts (outside this block) build a real safety text
 async function safetyMail() {
   const st = upState(), fleet = await fleetReport(), sent = [], skipped = [];
   for (const row of fleet) { const key = 'safety:' + weekKey() + ':' + dupeName(row.name); if (st.sent[key]) continue;
