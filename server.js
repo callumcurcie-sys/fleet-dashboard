@@ -1632,18 +1632,33 @@ const AI_KEY = () => clean(process.env.ANTHROPIC_API_KEY || ''), AI_MODEL = proc
 // ("2PC PLI MIL") find junk. So: good barcode/item # -> search by it; else the item name; abbreviations -> Google.
 const gtinOk = c => { if (!/^(\d{8}|\d{12,14})$/.test(c)) return false;   // barcode check digit
   const d = c.split('').reverse().map(Number), sum = d.slice(1).reduce((t, x, i) => t + x * (i % 2 ? 1 : 3), 0); return (10 - sum % 10) % 10 === d[0]; };
+// Tested Oct 2026: a valid barcode or the store's own item # opens the exact product (Home Depot 9-digit internet #,
+// Lowe's item #, Harbor Freight item #, Tractor Supply SKU). Misread barcodes and Home Depot's 10-digit numbers
+// return 0 results, so anything else goes to Google limited to that store's site, which copes with typos and receipt shorthand.
+const STORE_SITE = [[/home ?depot/i, 'homedepot.com'], [/lowe/i, 'lowes.com'], [/harbor/i, 'harborfreight.com'], [/walmart/i, 'walmart.com'], [/tractor/i, 'tractorsupply.com'],
+  [/amazon|amzn/i, 'amazon.com'], [/staples/i, 'staples.com'], [/autozone/i, 'autozone.com'], [/advance auto/i, 'advanceautoparts.com'], [/napa/i, 'napaonline.com'], [/leslie/i, 'lesliespool.com'], [/\bace\b/i, 'acehardware.com']];
+const itemGoogle = (store, sku, name) => { const n = clean(name).replace(/\(.*?\)/g, '').replace(/^(Home Depot )?item \d+$/i, '').replace(/(^|\s)-+(?=\S)/g, ' ').replace(/\s+/g, ' ').trim(), site = (STORE_SITE.find(([re]) => re.test(store || '')) || [])[1];
+  return 'https://www.google.com/search?q=' + encodeURIComponent((site ? 'site:' + site + ' ' : clean(store) + ' ') + (n || clean(sku))); };
 const itemLink = (store, sku, name) => {
-  const st = String(store || ''), c = String(sku || '').replace(/[\s-]/g, ''), n = clean(name).replace(/\(.*?\)/g, '').replace(/^Home Depot item \d+$/, '').trim();
-  const code = gtinOk(c) ? c : '', cryptic = !n || !/\s/.test(n) || n === n.toUpperCase() && n.replace(/[^A-Z]/g, '').length < n.length * 0.6 || /^[A-Z0-9 /#"'.\-]+$/.test(n) && n.split(/\s+/).every(w => w.length <= 5);
-  const q = encodeURIComponent(n), g = 'https://www.google.com/search?q=' + encodeURIComponent(st + ' ' + (n || '') + (c ? ' ' + c : ''));
-  if (/amazon|amzn/i.test(st)) return /^B0[A-Z0-9]{8}$/.test(sku || '') ? 'https://www.amazon.com/dp/' + sku : 'https://www.amazon.com/s?k=' + q;
-  if (/home ?depot/i.test(st)) return code || /^(\d{6}|[1-3]\d{8,9})$/.test(c) ? 'https://www.homedepot.com/s/' + (code || c) : cryptic ? g : 'https://www.homedepot.com/s/' + q;
-  if (/lowe/i.test(st)) return /^\d{4,7}$/.test(c) || code ? 'https://www.lowes.com/search?searchTerm=' + (code || c) : cryptic ? g : 'https://www.lowes.com/search?searchTerm=' + q;
-  if (/harbor/i.test(st)) return /^\d{5}$/.test(c) ? 'https://www.harborfreight.com/search?q=' + c : 'https://www.harborfreight.com/search?q=' + q;
-  if (/walmart/i.test(st)) return code ? 'https://www.walmart.com/search?q=' + code : cryptic ? g : 'https://www.walmart.com/search?q=' + q;
-  if (/tractor/i.test(st)) return cryptic ? g : 'https://www.tractorsupply.com/tsc/search/' + q;
-  return cryptic || !n ? g : 'https://www.google.com/search?q=' + encodeURIComponent(st + ' ' + n);
+  const st = String(store || ''), c = String(sku || '').replace(/[\s-]/g, ''), code = gtinOk(c) ? c : '';
+  if (/amazon|amzn/i.test(st)) return /^B0[A-Z0-9]{8}$/.test(sku || '') ? 'https://www.amazon.com/dp/' + sku : 'https://www.amazon.com/s?k=' + encodeURIComponent(clean(name));
+  if (/home ?depot/i.test(st) && (code || /^[1-3]\d{8}$/.test(c))) return 'https://www.homedepot.com/s/' + (code || c);
+  if (/lowe/i.test(st) && (code || /^\d{4,7}$/.test(c))) return 'https://www.lowes.com/search?searchTerm=' + (code || c);
+  if (/harbor/i.test(st) && /^\d{4,5}$/.test(c)) return 'https://www.harborfreight.com/search?q=' + c;
+  if (/tractor/i.test(st) && /^\d{6,7}$/.test(c)) return 'https://www.tractorsupply.com/tsc/search/' + c;
+  if (/walmart/i.test(st) && code) return 'https://www.walmart.com/search?q=' + code;
+  return itemGoogle(store, code || c, name);
 };
+// Links saved in Airtable before these rules: rewrite any that differ, a batch at a time
+async function fixItemLinks(max = 300) {
+  if (!AIRTABLE_TOKEN) return 0;
+  const recs = await atAll(AT_ITEMS, [IT.item, IT.store, IT.sku, IT.link]), fix = [];
+  for (const r of recs) { const f = r.fields, l = itemLink(f[IT.store], clean(f[IT.sku]), clean(f[IT.item])); if (l !== f[IT.link]) fix.push({ id: r.id, fields: { [IT.link]: l } }); if (fix.length >= max) break; }
+  for (let i = 0; i < fix.length; i += 10) { await airtable(AT_ITEMS, { method: 'PATCH', body: JSON.stringify({ records: fix.slice(i, i + 10) }) }); await sleep(250); }
+  if (fix.length) { cache.delete('itemsAT'); console.log(new Date().toISOString(), 'Item links updated:', fix.length); }
+  return fix.length;
+}
+if (process.argv[2] !== 'test') { const run = () => fixItemLinks().then(n => { if (n >= 300) setTimeout(run, 60e3); }).catch(e => console.error('Item links:', e.message)); setTimeout(run, 3 * 60e3); }
 const itemsState = () => (cache.get('rampItems') || {}).data || { done: {} };
 const saveItemsState = d => { cache.set('rampItems', { data: d, t: Date.now() }); saveSnap('rampItems', d); };
 const hwPurchases = () => cached('hwTx', 1800, async () => {
@@ -1748,7 +1763,7 @@ async function purchases() {
   if (!RAMP_CLIENT_ID || !RAMP_CLIENT_SECRET) return { connected: false };
   const st = itemsState(), [tx, recs] = await Promise.all([hwPurchases(), cached('itemsAT', 60, () => atAll(AT_ITEMS, Object.values(IT)))]);
   const items = recs.map(r => { const f = r.fields; return { id: r.id, name: clean(f[IT.item]), txn: clean(f[IT.txn]), date: clean(f[IT.date]), store: clean(f[IT.store]), who: clean(f[IT.person]), memo: clean(f[IT.memo]),
-    sku: clean(f[IT.sku]), qty: f[IT.qty] || 1, price: f[IT.price] || 0, link: itemLink(f[IT.store], clean(f[IT.sku]), clean(f[IT.item])), ramp: clean(f[IT.ramp]), status: clean(f[IT.status]?.name ?? f[IT.status]) || 'Out', notes: clean(f[IT.notes]) }; });
+    sku: clean(f[IT.sku]), qty: f[IT.qty] || 1, price: f[IT.price] || 0, link: itemLink(f[IT.store], clean(f[IT.sku]), clean(f[IT.item])), alt: itemGoogle(f[IT.store], clean(f[IT.sku]), clean(f[IT.item])), ramp: clean(f[IT.ramp]), status: clean(f[IT.status]?.name ?? f[IT.status]) || 'Out', notes: clean(f[IT.notes]) }; });
   const txns = tx.map(t => ({ ...t, state: st.done[t.id] ? (String(st.done[t.id]).startsWith('err') ? 'error' : 'read') : t.receipts.length ? 'waiting' : 'noReceipt', err: String(st.done[t.id] || '').startsWith('err') ? String(st.done[t.id]).slice(5) : '' }));
   return { connected: true, ai: !!AI_KEY(), err: st.err || '', last: st.last || 0, busy: itemsBusy, since: ITEMS_SINCE, items, txns };
 }
@@ -1799,7 +1814,7 @@ const rampOverview = () => cached('rampOv', 3600, async () => {
     if (rx) { read++; if (rx[0] > 0) { gal += rx[0]; g.gal += rx[0]; if (m) m.gal += rx[0]; } if (rx[1] > 2 && rx[1] < 9) { ppgS += rx[1]; ppgN++; if (m) { m.ppgSum += rx[1]; m.ppgN++; } } if (rx[2] === 'p') prem++; }
     // worth a look: weekends, before 5 AM / after 9 PM, over $120 at once, a 2nd fill-up the same day, premium fuel
     const why = [], dow = d.getDay(), hr = d.getHours(), day = who + '|' + d.toDateString();
-    if (dow === 0 || dow === 6) { why.push('weekend'); g.wk++; }
+    if (dow === 0) { why.push('Sunday'); g.wk++; }   // Saturday is a normal work day for the crews
     if (/T\d/.test(t.at) && (hr < 5 || hr >= 21)) { why.push(d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })); g.late++; }
     if (t.amount > 120) { why.push('over $120'); g.big++; }
     if (sameDay[day]) why.push('2nd fill-up that day'); sameDay[day] = 1;
@@ -2508,7 +2523,7 @@ const d0s = n => '$' + Math.round(n || 0).toLocaleString();
 const TANKS = [[/ranger/i, 21], [/maverick/i, 13.8], [/colorado|canyon/i, 21], [/tacoma/i, 21], [/frontier/i, 21], [/f-?150/i, 36], [/silverado|sierra/i, 28], [/\bram\b|1500/i, 33], [/transit/i, 31], [/ridgeline/i, 19.5], [/gladiator/i, 22]];
 const tankOf = t => { const h = t && TANKS.find(([re]) => re.test(t.make + ' ' + t.model)); return h ? h[1] : 0; };
 // Results are kept packed (one short array per fill-up) so 60 days fit in one "Dashboard cache" row
-const GPACK = ['verdict', 'at', 'who', 'merchant', 'amount', 'gal', 'truckId', 'flags', 'unverified', 'mi'];
+const GPACK = ['verdict', 'at', 'who', 'merchant', 'amount', 'gal', 'truckId', 'flags', 'unverified', 'mi', 'fl', 'ok'];   // fl: whole-fleet check done ('-' or the truck found), ok: marked OK by hand
 const gasChk = () => Object.fromEntries(Object.entries((cache.get('gasChk2') || {}).data || {}).map(([id, a]) => [id, Object.fromEntries(GPACK.map((k, i) => [k, k === 'at' ? new Date(a[i] * 1000).toISOString() : a[i]]))]));
 const saveGasChk = done => { const d = Object.fromEntries(Object.entries(done).map(([id, x]) => [id, GPACK.map(k => k === 'at' ? Math.round(Date.parse(x.at) / 1000) : k === 'merchant' ? String(x.merchant).slice(0, 28) : x[k] ?? (k === 'flags' ? [] : ''))]));
   cache.set('gasChk2', { data: d, t: Date.now() }); saveSnap('gasChk2', d); };
@@ -2524,6 +2539,22 @@ async function geocode(loc) {
 }
 const trailMiles = pts => pts.reduce((s, p, i) => i ? s + miles(pts[i - 1], p) : 0, 0);
 const NEAR_ZIP_MI = 6, NEAR_CITY_MI = 10;   // the station is placed at its ZIP / town centre, so allow that much slack
+// Techs often grab whichever truck is free, so before calling a fill-up "not near", look at EVERY company truck:
+// one Azuga request for the whole fleet, 30 minutes either side of the charge. Any truck stopped near the station clears it.
+async function fleetAt(pairs, ts, here, loc) {
+  const ids = pairs.map(p => p.v.trackeeId).filter(Boolean), byId = Object.fromEntries(pairs.map(p => [String(p.v.trackeeId), p]));
+  if (!ids.length) return null; let rows = [];
+  for (let page = 0; page < 5; page++) {
+    const r = list(await azuga('https://services.azuga.com/reports/v3/reports/breadcrumb?appId=FLEET', { startDate: azIso(new Date(ts - 30 * 6e4)), endDate: azIso(new Date(ts + 30 * 6e4)), browserTimezone: 'US/Eastern',
+      index: page, size: 1000, desc: false, sortField: 'locationTimeInDTZ', filter: { orFilter: { vehicleId: ids } } }));
+    rows = rows.concat(r); if (r.length < 1000) break; await sleep(1500);
+  }
+  const ring = loc.zip ? NEAR_ZIP_MI : NEAR_CITY_MI, up = (loc.city || '').toUpperCase();
+  const hit = rows.map(x => ({ id: String(x.vehicleId ?? x.trackeeId ?? x.vehicle_id ?? ''), name: clean(x.vehicleName || x.vehicle_name || ''), lat: +x.latitude, lng: +x.longitude, mph: Math.round((+x.obdSpeed || +x.speed || 0) * 0.621371), addr: clean(x.address).toUpperCase() }))
+    .filter(p => p.lat && p.lng && p.mph < 3 && ((here && miles(p, here) <= ring) || (loc.zip && p.addr.includes(loc.zip)) || (up && p.addr.includes(up))))[0];
+  if (!hit) return null;
+  const p = byId[hit.id]; return { truckId: p ? p.t.id : '', name: p ? tname(p.t) : hit.name || 'a company truck' };
+}
 let gasBusy = false;
 async function checkGas(max = 40) {
   if (gasBusy || !RAMP_CLIENT_ID) return; gasBusy = true;
@@ -2540,10 +2571,10 @@ async function checkGas(max = 40) {
     const gas = y.card.filter(t => t.gas && t.amount >= 10 && Date.parse(t.at) > since).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     let n = 0;
     for (const t of gas) {
-      if ((done[t.id] && done[t.id].verdict !== 'notruck') || n >= max) continue;   // no-truck ones are retried (cheap) in case Airtable gets updated
+      if ((done[t.id] && (done[t.id].verdict !== 'notruck' || done[t.id].fl)) || n >= max) continue;   // no-truck ones are retried (cheap) in case Airtable gets updated
       const ts = Date.parse(t.at), rx = gx[t.id.slice(0, 10)], r = { at: t.at, who: t.who, merchant: t.merchant, amount: t.amount, gal: rx && rx[0] || 0, flags: [] };
       const cands = trucksOf(t.who, ts);
-      if (!cands.length) { r.verdict = 'notruck'; r.unverified = 'No truck found for ' + (t.who || 'this card'); done[t.id] = r; continue; }
+      if (!cands.length) { r.verdict = 'notruck'; r.unverified = 'No truck on file for ' + (t.who || 'this card'); done[t.id] = r; continue; }   // the fleet pass below looks at every truck
       n++;
       let here = null, best = null;
       try {   // an Azuga or map lookup that fails is retried next run, never counted as "not near"
@@ -2573,14 +2604,31 @@ async function checkGas(max = 40) {
         r.flags.push((best.parked ? 'Truck was parked ' : 'Truck was ') + r.mi + ' miles from the station' + (cands.length > 1 ? ' (checked ' + cands.length + ' trucks they drive)' : '')); }
       if (r.verdict === 'moving') r.flags.push('Truck was driving, never stopped near the station');
       const tank = tankOf(best.p.t);
-      if (r.gal && tank && r.gal > tank * 1.05) r.flags.push(r.gal.toFixed(1) + ' gal into a ' + tank + ' gal tank');
+      if (r.gal && tank && r.gal > tank * 1.05) r.flags.push(r.gal.toFixed(1) + ' gal, more than the ' + tank + ' gal tank holds (gas cans or another vehicle?)');
       const prev = Object.values(done).filter(x => x.who === t.who && x.truckId === r.truckId && ts - Date.parse(x.at) > 0 && ts - Date.parse(x.at) < 24 * 36e5).pop();
       if (prev && !best.nogps) {
         const d = trailMiles(await trailRange(best.p.v.trackeeId, new Date(Date.parse(prev.at)), new Date(ts), true).catch(() => null) || [1e9]);
-        if (d < 60) r.flags.push('2nd fill-up in ' + Math.round((ts - Date.parse(prev.at)) / 36e5) + ' h with only ' + Math.round(d) + ' miles driven');
+        if (d > 0 && d < 60) r.flags.push('2nd fill-up in ' + Math.round((ts - Date.parse(prev.at)) / 36e5) + ' h with only ' + Math.round(d) + ' miles driven');
       }
       done[t.id] = r;
       await sleep(1500);
+    }
+    Object.values(done).forEach(r => { r.flags = (r.flags || []).filter(x => !/with only 0 miles driven/.test(x)).map(x => x.replace(/^([\d.]+) gal into a ([\d.]+) gal tank$/, '$1 gal, more than the $2 gal tank holds (gas cans or another vehicle?)')); });   // older wording
+    // Fleet pass: anything still "not near", "no GPS" or "no truck" gets one look at every company truck
+    const y2 = Object.fromEntries(gas.map(t => [t.id, t]));
+    let f = 0;
+    for (const [id, r] of Object.entries(done)) {
+      if (f >= max || r.fl || !['far', 'nogps', 'notruck'].includes(r.verdict) || !y2[id] || !y2[id].loc) continue;
+      f++;
+      let hit;
+      try { hit = await fleetAt(pairs, Date.parse(r.at), await geocode(y2[id].loc).catch(() => null), y2[id].loc); }
+      catch (e) { console.error('Gas fleet check paused (will retry):', e.message); break; }
+      if (hit) {
+        const tk = at.trucks.find(x => x.id === hit.truckId), tank = tankOf(tk);
+        Object.assign(r, { verdict: 'ok', unverified: '', mi: '', truckId: hit.truckId || r.truckId, fl: hit.name,
+          flags: r.gal && tank && r.gal > tank * 1.05 ? [r.gal.toFixed(1) + ' gal, more than the ' + tank + ' gal tank holds (gas cans or another vehicle?)'] : [] });
+      } else { r.fl = '-'; if (r.verdict !== 'far') r.unverified += '. No company truck was stopped near the station then'; }
+      await sleep(1200);
     }
     Object.keys(done).forEach(id => { if (Date.parse(done[id].at) < since) delete done[id]; });
     saveGasChk(done);
@@ -2748,11 +2796,14 @@ routes['/api/upkeep'] = async () => {
   const tk = Object.fromEntries(at.trucks.map(t => [t.id, t]));
   const gas = Object.entries(done).map(([id, x]) => ({ id, ...x, truck: tk[x.truckId] ? tname(tk[x.truckId]) : '', tank: tankOf(tk[x.truckId]), link: 'https://app.ramp.com/business-overview/transactions/' + id })).sort((a, b) => b.flags.length - a.flags.length || Date.parse(b.at) - Date.parse(a.at));
   const renew = (await renewRows()).map(({ t, ...x }) => x);
-  return { cost, oil, oilMiles: OIL_MI, gas, gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew }, mail: mailReady(), ai: !!AI_KEY() };
+  return { cost, oil, oilMiles: OIL_MI, gas, gasOk: GAS_OK, gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew }, mail: mailReady(), ai: !!AI_KEY() };
 };
-routes['/api/upkeep/flags'] = () => ({ gas: Object.values(gasChk()).filter(x => x.verdict === 'far').length });
+routes['/api/upkeep/flags'] = () => ({ gas: Object.values(gasChk()).filter(x => x.verdict === 'far' && !x.ok).length });
 routes['/api/upkeep/safety-preview'] = async q => (await safetyText(q.get('name') || 'Callum Curcie')) || { error: 'No score for that name yet.' };
+const GAS_OK = ['Gas cans / equipment', 'Different vehicle', 'Rental or personal car for work', 'Checked, it is fine'];
 const UPKEEP_POSTS = {
+  '/api/upkeep/gas-ok': b => { const done = gasChk(), r = done[String(b.id || '')]; if (!r) throw new Error('That fill-up is no longer in the list. Refresh.');
+    r.ok = b.why === '' ? '' : GAS_OK.includes(b.why) ? b.why : GAS_OK[3]; saveGasChk(done); return { ok: true, why: r.ok }; },
   '/api/upkeep/settings': b => { const st = upState(); ['safety', 'oil', 'renew'].forEach(k => { if (k in b) st[k] = b[k] === true; }); saveUp(st); return { safety: st.safety, oil: st.oil, renew: st.renew }; },
   '/api/upkeep/renewal': setRenewal,
   '/api/upkeep/read-cards': () => { readRenewals(40).catch(e => console.error('Renewals:', e.message)); return { started: true }; },
@@ -3880,6 +3931,10 @@ header .live{margin-left:8px!important}
 #repThumbs button{position:absolute;top:4px;right:4px;width:24px;height:24px;border-radius:50%;border:0;background:rgba(15,23,42,.75);color:#fff;font-size:15px;line-height:1;cursor:pointer;padding:0}
 .rpai{margin-top:10px;padding:9px 12px;border-radius:10px;font-size:13px;background:var(--idleBg);color:var(--ink2)}.rpai.busy{background:var(--shallow);color:var(--poolInk)}.rpai.ok{background:var(--goBg);color:var(--go);font-weight:600}
 .rpfill{border-color:#4ade80!important;box-shadow:0 0 0 3px rgba(74,222,128,.18)}
+.balt{font-weight:600;color:var(--poolInk)}
+.gc.minor{border-left-color:#94a3b8}.gc.minor .gc-ic{background:#94a3b8}.gc.minor li{color:var(--ink2)!important}
+.gc-fl{color:var(--go)!important;font-weight:600}.gc-okd{color:var(--go)!important;font-weight:600}
+.gc-act{display:flex;flex-direction:column;gap:6px;align-items:stretch}.gc-oks{font:inherit;font-size:12.5px;padding:6px 8px;border-radius:9px;border:1px solid var(--line2);background:var(--card);color:var(--ink)}
 /* ===== v30: calm look. Same pool colours, no moving decorations, quieter cards, more room ===== */
 :root{--deck:#f3f6f8;--deck2:#e9eef1;--line:#e2e8ec;--line2:#d3dce2;--card:#fff;--r:14px;
  --sh:0 1px 2px rgba(15,35,50,.05),0 2px 8px -4px rgba(15,35,50,.08)}
@@ -5225,8 +5280,8 @@ function renderRampOv(){const r=ROV;if(!r)return;if(r.connected===false){$('rsOv
     +(g.gal?'<div><b>'+g.gal.toLocaleString()+'</b><span>gallons · '+(g.ppg?'$'+g.ppg.toFixed(2)+'/gal avg':'')+'</span></div>':'')+'</div>'
     +'<p class="muted rgnote">Gallons, price per gallon and fuel grade come from the receipts read so far ('+g.read+' of '+g.withRc+' gas receipts; '+(g.card-g.withRc)+' card fill-ups have no receipt). '+(g.reimb?k0(g.reimb)+' of the total is out-of-pocket gas paid back as reimbursements.':'')+'</p>'
     +'<div class="rp-grid"><div><div class="panel rp-pan"><h3>Gas by month</h3>'+bars(ms,'gas',k0)+(ms.some(m=>m.ppg)?'<h3 style="margin-top:14px">Price per gallon</h3>'+bars(ms.map(m=>({k:m.k,p:m.ppg})),'p',v=>'$'+v.toFixed(2),1):'')+'</div>'
-    +'<div class="panel rp-pan"><h3>Worth a look <small class="muted">weekends, very early or late, over $120, a 2nd fill-up the same day, premium fuel</small></h3>'+(g.flags.filter(x=>!q||x.who.toLowerCase().includes(q)).slice(0,40).map(x=>'<div class="rfl"><div><b>'+esc(x.who)+'</b> · '+money(x.amount)+' at '+esc(x.merchant)+'<small>'+esc(x.date)+' · '+esc(x.why)+'</small></div>'+(x.link?'<a class="btn2" href="'+esc(x.link)+'" target="_blank" rel="noopener">Ramp ↗</a>':'')+'</div>').join('')||'<div class="muted">Nothing unusual.</div>')+'</div></div>'
-    +'<aside><div class="panel rp-pan"><h3>Gas by person</h3>'+plist(g.people.filter(f).slice(0,30),x=>x.total,x=>plural(x.n,'fill-up')+(x.gal?' · '+Math.round(x.gal)+' gal':'')+(x.wk?' · '+x.wk+' weekend':'')+(x.big?' · '+x.big+' over $120':''))+'</div>'
+    +'<div class="panel rp-pan"><h3>Worth a look <small class="muted">Sundays, before 5 AM or after 9 PM, over $120, a 2nd fill-up the same day, premium fuel</small></h3>'+(g.flags.filter(x=>!q||x.who.toLowerCase().includes(q)).slice(0,40).map(x=>'<div class="rfl"><div><b>'+esc(x.who)+'</b> · '+money(x.amount)+' at '+esc(x.merchant)+'<small>'+esc(x.date)+' · '+esc(x.why)+'</small></div>'+(x.link?'<a class="btn2" href="'+esc(x.link)+'" target="_blank" rel="noopener">Ramp ↗</a>':'')+'</div>').join('')||'<div class="muted">Nothing unusual.</div>')+'</div></div>'
+    +'<aside><div class="panel rp-pan"><h3>Gas by person</h3>'+plist(g.people.filter(f).slice(0,30),x=>x.total,x=>plural(x.n,'fill-up')+(x.gal?' · '+Math.round(x.gal)+' gal':'')+(x.wk?' · '+x.wk+' on Sunday':'')+(x.big?' · '+x.big+' over $120':''))+'</div>'
     +'<div class="panel rp-pan"><h3>Stations</h3>'+plist(g.stations,x=>x.total,x=>plural(x.n,'fill-up'))+'</div></aside></div>';
 }
 document.addEventListener('click',e=>{const b=e.target.closest('#rampNav [data-rs]');if(!b)return;RSEC=b.dataset.rs;document.querySelectorAll('#rampNav button').forEach(x=>x.classList.toggle('on',x===b));
@@ -5235,6 +5290,8 @@ document.addEventListener('click',e=>{const b=e.target.closest('#rampNav [data-r
 // ---- Upkeep tab (oil, renewals, safety) + Ramp's "Cost per truck" and "Gas vs GPS" (all from /api/upkeep) ----
 let UP=null,USEC='oil',GF='far',CSORT='cpm',UPL=false;
 const UPV=()=>['usBody','rsGps','rsCost'];
+async function gasOk(id,why){try{await post('/api/upkeep/gas-ok',{id,why});const x=UP.gas.find(r=>r.id===id);if(x)x.ok=why;renderRampUp();toast(why?'Marked OK':'Back on the list')}catch(err){toast(err.message)}}
+document.addEventListener('change',e=>{const s=e.target.closest('[data-gsel]');if(s&&s.value)gasOk(s.dataset.gsel,s.value)});
 async function loadUp(){if(UPL)return;UPL=true;if(!UP)UPV().forEach(i=>$(i).innerHTML='<div class="empty">Loading... (the first load can take a minute)</div>');
   try{UP=await get('/api/upkeep')}catch(e){UPV().forEach(i=>$(i).innerHTML='<div class="empty">Could not load: '+esc(e.message)+'</div>');UPL=false;return}UPL=false;renderUp();renderRampUp()}
 const d0=n=>'$'+Math.round(n||0).toLocaleString(),fdate=d=>d?new Date(d+'T12:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):'–';
@@ -5269,19 +5326,22 @@ function renderRampUp(){if(!UP)return;
           +'<details class="ukd"><summary>Why does it cost this much?</summary>'+costWhy(r,c.gasPerMile||0.22)+'</details></div>'}).join('')+'</div>'
       +(c.unassignedGas?'<p class="muted rgnote">'+d0(c.unassignedGas)+' of gas could not be matched to a truck (card holders with no truck).</p>':'')}
   // Gas vs GPS
-  const g=UP.gas.filter(upf),cnt=k=>g.filter(k).length,isFar=x=>x.flags.length>0,isUnv=x=>!x.flags.length&&x.unverified,isOk=x=>!x.flags.length&&!x.unverified;
+  const g=UP.gas.filter(upf),cnt=k=>g.filter(k).length,isFar=x=>!x.ok&&x.flags.length>0,isUnv=x=>!x.ok&&!x.flags.length&&x.unverified,isOk=x=>x.ok||!x.flags.length&&!x.unverified,isBad=x=>!x.ok&&(x.verdict==='far'||x.verdict==='moving');
   const pick={far:isFar,unv:isUnv,ok:isOk,all:()=>true}[GF],list=g.filter(pick);
-  const by={};g.filter(x=>x.verdict==='far').forEach(x=>{const b=by[x.who]=by[x.who]||{n:0,amt:0};b.n++;b.amt+=x.amount});const top=Object.entries(by).sort((a,b)=>b[1].n-a[1].n).slice(0,10),tmx=top.length?top[0][1].n:1;
+  const by={};g.filter(x=>x.verdict==='far'&&!x.ok).forEach(x=>{const b=by[x.who]=by[x.who]||{n:0,amt:0};b.n++;b.amt+=x.amount});const top=Object.entries(by).sort((a,b)=>b[1].n-a[1].n).slice(0,10),tmx=top.length?top[0][1].n:1;
   const when=t=>new Date(t).toLocaleString('en-US',{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
-  $('rsGps').innerHTML=kpis([[g.length,'fill-ups checked (60 days)'],[cnt(x=>x.verdict==='far'),'truck not near the card','bad'],[cnt(isFar),'flagged in all','warn'],[cnt(isOk),'truck was at the station','good']])
-    +'<div class="ukbar">'+chips('gf',GF,[['far','Flagged',cnt(isFar)],['unv','Could not check',cnt(isUnv)],['ok','All good',cnt(isOk)],['all','Everything',g.length]])+'<span style="flex:1"></span><button class="btn2" id="upGasRun">'+(UP.gasBusy?'Checking...':'Check new fill-ups now')+'</button></div>'
-    +'<div class="rp-grid"><div>'+(list.length?list.slice(0,150).map(x=>{const k=isFar(x)?'far':isUnv(x)?'unv':'ok';
-      return '<div class="gc '+k+'"><div class="gc-ic">'+(k==='far'?'!':k==='unv'?'?':'✓')+'</div><div class="gc-m"><div class="gc-t"><b>'+esc(x.who)+'</b><span>'+money(x.amount)+(x.gal?' · '+x.gal.toFixed(1)+' gal':'')+' at '+esc(x.merchant)+'</span></div>'
+  $('rsGps').innerHTML=kpis([[g.length,'fill-ups checked (60 days)'],[cnt(x=>x.verdict==='far'&&!x.ok),'no company truck near the card','bad'],[cnt(isFar),'to look at','warn'],[cnt(isOk),'truck was at the station','good']])
+    +'<div class="ukbar">'+chips('gf',GF,[['far','To look at',cnt(isFar)],['unv','Could not check',cnt(isUnv)],['ok','All good',cnt(isOk)],['all','Everything',g.length]])+'<span style="flex:1"></span><button class="btn2" id="upGasRun">'+(UP.gasBusy?'Checking...':'Check new fill-ups now')+'</button></div>'
+    +'<div class="rp-grid"><div>'+(list.length?list.slice(0,150).map(x=>{const k=isBad(x)?'far':isFar(x)?'minor':isUnv(x)?'unv':'ok';
+      return '<div class="gc '+k+'"><div class="gc-ic">'+(k==='far'?'!':k==='minor'?'i':k==='unv'?'?':'✓')+'</div><div class="gc-m"><div class="gc-t"><b>'+esc(x.who)+'</b><span>'+money(x.amount)+(x.gal?' · '+x.gal.toFixed(1)+' gal':'')+' at '+esc(x.merchant)+'</span></div>'
         +'<small>'+when(x.at)+(x.truck?' · '+esc(x.truck):'')+(x.tank?' ('+x.tank+' gal tank)':'')+'</small>'
-        +(x.flags.length?'<ul>'+x.flags.map(f=>'<li>'+esc(f)+'</li>').join('')+'</ul>':x.unverified?'<p>'+esc(x.unverified)+'</p>':'<p>Truck was at the station'+(x.verdict==='moving'?' (driving past)':'')+'</p>')+'</div><a class="btn2" href="'+esc(x.link)+'" target="_blank" rel="noopener">Ramp ↗</a></div>'}).join('')
+        +(x.fl&&x.fl!=='-'?'<p class="gc-fl">🚚 '+esc(x.fl)+' was at the station. They used a different company truck than the one on file.</p>':'')
+        +(x.ok?'<p class="gc-okd">✓ Marked OK: '+esc(x.ok)+' <button class="link" data-gok="'+esc(x.id)+'" data-why="">Undo</button></p>':'')
+        +(x.flags.length&&!x.ok?'<ul>'+x.flags.map(f=>'<li>'+esc(f)+'</li>').join('')+'</ul>':x.ok?'':x.unverified?'<p>'+esc(x.unverified)+'</p>':'<p>Truck was at the station'+(x.verdict==='moving'?' (driving past)':'')+'</p>')+'</div>'
+        +'<div class="gc-act"><a class="btn2" href="'+esc(x.link)+'" target="_blank" rel="noopener">Ramp ↗</a>'+(!x.ok&&(x.flags.length||x.unverified)?'<select class="gc-oks" data-gsel="'+esc(x.id)+'" aria-label="Mark this fill-up OK"><option value="">Mark OK…</option>'+(UP.gasOk||[]).map(w=>'<option>'+esc(w)+'</option>').join('')+'</select>':'')+'</div></div>'}).join('')
       :'<div class="empty">'+(g.length?'Nothing here.':'No fill-ups checked yet. The first check runs a few minutes after the server starts.')+'</div>')+'</div>'
     +'<aside><div class="panel rp-pan"><h3>Most “not near” fill-ups</h3>'+(top.length?top.map(([n,b])=>'<div class="ukrank"><div><b>'+esc(n)+'</b><small>'+b.n+' fill-up'+(b.n>1?'s':'')+' · '+money(b.amt)+'</small></div><i><b style="width:'+(b.n/tmx*100)+'%"></b></i></div>').join(''):'<div class="muted">Nobody yet.</div>')+'</div>'
-    +'<div class="panel rp-pan"><h3>How it works</h3><p class="muted" style="margin:0;font-size:13px">For every gas charge on a Ramp card, the dashboard looks at where the card holder’s trucks were (Azuga) within 30 minutes. If the engine was off, it uses where the truck was parked. More than about 6–10 miles from the station is flagged. It also flags more gallons than the tank holds, and a second fill-up within a day with little driving.</p></div></aside></div>'}
+    +'<div class="panel rp-pan"><h3>How it works</h3><p class="muted" style="margin:0;font-size:13px">For every gas charge on a Ramp card, the dashboard looks at where the card holder’s trucks were (Azuga) within 30 minutes. If none of theirs was there, it checks every company truck, since crews swap trucks. Only when no company truck was stopped within about 6–10 miles is it marked red. Gallons over the tank size and a 2nd fill-up with little driving are shown in grey as things to glance at (often gas cans or equipment). Use “Mark OK” to clear anything you know is fine.</p></div></aside></div>'}
 const upRem=(icon,title,on,how,who,when,actions)=>'<div class="rmc wide'+(on?' live':'')+'"><div class="rmh"><span class="rmi">'+icon+'</span><div><b>'+title+'</b><small>'+how+'</small></div>'+(on?'<span class="rmpill on">● On</span>':'<span class="rmpill off">Off</span>')+'</div><dl class="rmd"><dt>About</dt><dd>'+who+'</dd><dt>When</dt><dd>'+when+'</dd></dl><div class="rma">'+actions+'</div></div>';
 function renderUp(){const u=UP;if(!u)return;let h='';
   if(USEC==='oil'){const o=Array.isArray(u.oil)?u.oil.filter(upf):[],lab={due:'Due now',soon:'Due soon',ok:'OK',unknown:'No record'};
@@ -5317,6 +5377,7 @@ function renderUp(){const u=UP;if(!u)return;let h='';
   $('usBody').innerHTML=h}
 document.addEventListener('click',async e=>{const n=e.target.closest('#upNav [data-us]');if(n){USEC=n.dataset.us;document.querySelectorAll('#upNav button').forEach(x=>x.classList.toggle('on',x===n));renderUp();return}
   const gf=e.target.closest('[data-gf]');if(gf){GF=gf.dataset.gf;renderRampUp();return}
+  const gk=e.target.closest('[data-gok]');if(gk){gasOk(gk.dataset.gok,gk.dataset.why||'');return}
   const cs=e.target.closest('[data-cs]');if(cs){CSORT=cs.dataset.cs;renderRampUp();return}
   const id=e.target.id,go=async(u,b,ok)=>{e.target.disabled=true;try{const r=await post(u,b||{});if(ok)ok(r)}catch(err){alert(err.message)}e.target.disabled=false};
   if(id==='upGasRun')go('/api/upkeep/gas-check',{},()=>{e.target.textContent='Checking... refresh in a few minutes';setTimeout(()=>{UP=null;loadUp()},90e3)});
@@ -5351,7 +5412,7 @@ function renderBuy(){const r=BUY;if(!r)return;
   $('buyList').innerHTML=ids.length?ids.slice(0,150).map((id,i)=>{const L=by[id],f=L[0],t=tx[id]||{};
     return '<div class="bcard" style="--i:'+Math.min(i,12)+'"><div class="bhead"><div><b>'+esc(f.store)+'</b> · '+esc(f.who)+'<small>'+esc(f.date)+(t.amount?' · '+money(t.amount):'')+(f.memo?' · '+esc(f.memo):'')+'</small></div><span style="flex:1"></span>'
       +(f.ramp?'<a class="btn2" href="'+esc(f.ramp)+'" target="_blank" rel="noopener">Ramp ↗</a>':'')+'<button class="btn2" data-ball="'+esc(L.map(x=>x.id).join(','))+'" data-bs="Returned">All returned</button></div>'
-      +L.map(x=>'<div class="bit"><div><a href="'+esc(x.link)+'" target="_blank" rel="noopener">'+esc(x.name)+' ↗</a><small>'+(x.sku?'SKU '+esc(x.sku)+' · ':'')+'Qty '+x.qty+' · '+money(x.price)+'</small></div>'+seg(x)+'</div>').join('')+'</div>'}).join('')
+      +L.map(x=>'<div class="bit"><div><a href="'+esc(x.link)+'" target="_blank" rel="noopener">'+esc(x.name)+' ↗</a><small>'+(x.sku?'SKU '+esc(x.sku)+' · ':'')+'Qty '+x.qty+' · '+money(x.price)+(x.alt&&x.alt!==x.link?' · <a class="balt" href="'+esc(x.alt)+'" target="_blank" rel="noopener" title="Search Google if the store page does not show it">Not it? Search Google</a>':'')+'</small></div>'+seg(x)+'</div>').join('')+'</div>'}).join('')
     :'<div class="empty">'+(r.items.length?'No items match.':'No receipts read yet.'+(wait?' '+wait+' are waiting.':''))+'</div>';
   const out={};it.filter(x=>x.status==='Out').forEach(x=>{const p=out[x.who]=out[x.who]||[0,0];p[0]+=x.qty;p[1]+=x.price});
   const nr=r.txns.filter(t=>t.state==='noReceipt'&&(!who||t.who===who)).slice(0,15);
