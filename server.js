@@ -179,7 +179,7 @@ const routes = {
   '/api/ramp/overview': () => RAMP_CLIENT_ID && RAMP_CLIENT_SECRET ? rampOverview() : { connected: false },
   '/api/truck/requests': () => swapReqs(),
   '/api/truck/history': q => truckHistory(q),
-  '/api/mail/status': () => { const st = mailState(); return { ready: mailReady(), from: mailFrom(), auto: !!st.auto, week: st.week, sent: st.sent || [], bounced: st.bounced || [], bounceErr: st.bounceErr || '', sms: !!st.sms, smsReady: !!TXT_KEY(), svc: !!(st.svc && st.svc.on), svcToday: st.svc && st.svc.day === etDay().ymd ? Object.keys(st.svc.sent || {}).length : 0, eod: !!(st.eod && st.eod.on), eodToday: st.eod && st.eod.day === etDay().ymd ? (st.eod.sent || []) : null, texted: st.texted && st.texted.day === new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) ? st.texted.names : [] }; },
+  '/api/mail/status': () => { const st = mailState(); return { ready: mailReady(), from: mailFrom(), auto: !!st.auto, week: st.week, sent: st.sent || [], bounced: st.bounced || [], bounceErr: st.bounceErr || '', sms: !!st.sms, smsReady: !!TXT_KEY(), smsVia: TXT_VIA(), svc: !!(st.svc && st.svc.on), svcToday: st.svc && st.svc.day === etDay().ymd ? Object.keys(st.svc.sent || {}).length : 0, eod: !!(st.eod && st.eod.on), eodToday: st.eod && st.eod.day === etDay().ymd ? (st.eod.sent || []) : null, texted: st.texted && st.texted.day === new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) ? st.texted.names : [] }; },
   '/api/repairs': async () => { if (!AIRTABLE_TOKEN) return { connected: false };
     const at = await atData(), ramp = RAMP_CLIENT_ID && RAMP_CLIENT_SECRET ? await rampRepairs().catch(e => ({ error: e.message })) : null;
     return { connected: true, ramp, trucks: at.trucks.map(t => ({ id: t.id, truckNo: t.truckNo, desc: [t.year, t.make, t.model].filter(Boolean).join(' '),
@@ -1389,11 +1389,25 @@ async function checkBounces(st) {
   return st.bounced;
 }
 // ---- Texts (Textedly). Key in Render as TEXTEDLY_API_KEY. Check-up reminder texts go once a day per person (the Bronze plan has 1,000 texts a month).
-const TXT_KEY = () => clean(process.env.TEXTEDLY_API_KEY), TXT_BASE = clean(process.env.TEXTEDLY_BASE) || 'https://application.textedly.com/api-v2/v1';
+// Twilio is used when TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN + TWILIO_FROM (or TWILIO_MESSAGING_SERVICE_SID) are set in Render; otherwise Textedly.
+const TW = () => ({ sid: clean(process.env.TWILIO_ACCOUNT_SID), user: clean(process.env.TWILIO_API_KEY) || clean(process.env.TWILIO_ACCOUNT_SID), pass: clean(process.env.TWILIO_API_SECRET) || clean(process.env.TWILIO_AUTH_TOKEN),
+  from: clean(process.env.TWILIO_FROM), svc: clean(process.env.TWILIO_MESSAGING_SERVICE_SID) });
+const twilioOn = () => { const t = TW(); return !!(t.sid && t.pass && (t.from || t.svc)); };
+const TXT_VIA = () => twilioOn() ? 'Twilio' : 'Textedly';
+const TXT_KEY = () => twilioOn() || clean(process.env.TEXTEDLY_API_KEY), TXT_BASE = clean(process.env.TEXTEDLY_BASE) || 'https://application.textedly.com/api-v2/v1';
 const TXT_FROM = () => '+1' + (clean(process.env.TEXTEDLY_FROM) || '8777939510').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');   // the account's main number in Textedly
 async function sendText(to, message) {
-  if (!TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.');
+  if (!TXT_KEY()) throw new Error('Add the Twilio settings (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM) in Render first.');
   if (!/^\+1\d{10}$/.test(to)) throw new Error('Not a US mobile number: ' + to);
+  if (twilioOn()) {
+    const t = TW(), body = new URLSearchParams({ To: to, Body: message.slice(0, 600) });
+    if (t.svc) body.set('MessagingServiceSid', t.svc); else body.set('From', '+1' + t.from.replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''));
+    const r = await fetch('https://api.twilio.com/2010-04-01/Accounts/' + encodeURIComponent(t.sid) + '/Messages.json', { method: 'POST', body,
+      headers: { Authorization: 'Basic ' + Buffer.from(t.user + ':' + t.pass).toString('base64'), 'Content-Type': 'application/x-www-form-urlencoded' } });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error('Twilio ' + r.status + (j.code ? ' (error ' + j.code + ')' : '') + ': ' + String(j.message || JSON.stringify(j)).slice(0, 200));
+    return j;
+  }
   const r = await fetch(TXT_BASE + '/messages', { method: 'POST', headers: { Authorization: 'Bearer ' + TXT_KEY(), 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ to, from: TXT_FROM(), message: message.slice(0, 600) }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error('Textedly ' + r.status + ': ' + String(j.message || j.error || j.detail || JSON.stringify(j)).slice(0, 200));
@@ -3031,10 +3045,10 @@ http.createServer(async (req, res) => {
     const privacy = '<p>This policy covers the text messages (SMS) Millennial Pools sends to its own employees about their work vehicles.</p>'
       + '<h2>What we collect</h2><p>Your name and mobile phone number, which you give us as an employee, and the record of the texts we send you and any replies.</p>'
       + '<h2>How we use it</h2><p>Only to send work texts such as weekly truck check-up reminders, vehicle maintenance reminders and truck assignment confirmations.</p>'
-      + '<h2>Sharing</h2><p>We do not sell, rent or share your phone number or opt-in consent with any third party or affiliate for marketing. Your number is shared only with our texting provider (Textedly) so it can deliver our messages.</p>'
+      + '<h2>Sharing</h2><p>We do not sell, rent or share your phone number or opt-in consent with any third party or affiliate for marketing. Your number is shared only with our texting provider (' + TXT_VIA() + ') so it can deliver our messages.</p>'
       + '<h2>Opting out</h2><p>Reply STOP to any message to stop receiving texts. Reply HELP for help, or email contact@millennialpools.com.</p>';
     const terms = '<h2>Program</h2><p>Millennial Pools Work Alerts: text messages to Millennial Pools employees about their work vehicles, such as weekly truck check-up reminders, maintenance reminders and truck assignment confirmations.</p>'
-      + '<h2>Signing up</h2><p>Employees opt in by texting the keyword TRUCK to (609) 640-3140. You will get a confirmation text.</p>'
+      + '<h2>Signing up</h2><p>' + (twilioOn() && TW().from ? 'Employees opt in when they give us their mobile number for work texts. Texts come from ' + TW().from.replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '').replace(/^(\d{3})(\d{3})(\d{4})$/, '($1) $2-$3') + '.' : 'Employees opt in by texting the keyword TRUCK to (609) 640-3140. You will get a confirmation text.') + '</p>'
       + '<h2>Message frequency</h2><p>Message frequency varies, usually 1 to 2 messages per week.</p>'
       + '<h2>Costs</h2><p>Message and data rates may apply. Carriers are not liable for delayed or undelivered messages.</p>'
       + '<h2>Help and stopping</h2><p>Reply HELP for help or contact contact@millennialpools.com. Reply STOP at any time to cancel; you will get one final message confirming you are unsubscribed.</p>'
@@ -5226,9 +5240,9 @@ async function mailPanel(){const el=$('chkMailAuto');if(!el)return;let st;try{st
    +card({cls:'em',icon:'✉️',title:'Check-up reminder',how:'Email',ready:st.ready,on:st.auto,tog:'mailAuto',togLabel:'Send automatically',msg:'mailMsg',
      who:'Techs, tech assistants and auditors who haven’t submitted this week’s truck check-up',when:'Mon–Wed at 12 PM · Thu–Sun at 9 AM and 3 PM, until they submit',
      note:st.sent&&st.sent.length?'Emailed this week: '+st.sent.map(esc).join(', '):'Nobody emailed yet this week',warn:bounced,btns:[['mailTest','Send me a sample'],['mailNow','Send to everyone now',1]]})
-   +card({cls:'tx',icon:'📱',title:'Check-up reminder',how:'Text message (Textedly)',ready:st.smsReady,on:st.sms,tog:'smsAuto',togLabel:'Text automatically',msg:'smsMsg',
+   +card({cls:'tx',icon:'📱',title:'Check-up reminder',how:'Text message ('+esc(st.smsVia||'Twilio')+')',ready:st.smsReady,on:st.sms,tog:'smsAuto',togLabel:'Text automatically',msg:'smsMsg',
      who:'Same people, to the phone number in Airtable',when:'Once a day while their check-up is missing',
-     note:st.texted&&st.texted.length?'Texted today: '+st.texted.map(esc).join(', '):'Nobody texted today',warn:st.smsReady?'':'Add TEXTEDLY_API_KEY in Render. Texts only deliver once the number is approved.',btns:[['smsTest','Send me a sample'],['smsNow','Text everyone now',1]]})
+     note:st.texted&&st.texted.length?'Texted today: '+st.texted.map(esc).join(', '):'Nobody texted today',warn:st.smsReady?'':'Add TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_FROM in Render.',btns:[['smsTest','Send me a sample'],['smsNow','Text everyone now',1]]})
    +card({cls:'sv',icon:'🏊',title:'Service report reminder',how:'Email',ready:st.ready,on:st.svc,tog:'svcAuto',togLabel:'Remind automatically',msg:'svcMsg',
      who:'A tech whose truck left a pool without submitting that service in POM',when:'20 minutes after they drive away · checked every 15 min, 7 AM–9 PM · one email per pool',
      note:st.svcToday?'Sent today: '+st.svcToday:'None sent today',btns:[['svcTest','Send me a sample']]})
