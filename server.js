@@ -1413,6 +1413,16 @@ async function sendText(to, message) {
   if (!r.ok) throw new Error('Textedly ' + r.status + ': ' + String(j.message || j.error || j.detail || JSON.stringify(j)).slice(0, 200));
   return j;
 }
+// Reminders go by text when the person has a mobile number in Airtable (and texting is set up), otherwise by email
+const phoneOf = d => { const ph = String((d && d.phone) || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return ph.length === 10 ? '+1' + ph : ''; };
+const canNotify = () => mailReady() || !!TXT_KEY();
+async function notify(d, email, m) {   // m: { subject, body, sms }
+  const ph = TXT_KEY() ? phoneOf(d) : '';
+  if (ph) try { await sendText(ph, m.sms); return 'text'; } catch (e) { console.error('Text to', d && d.name, 'failed, trying email:', e.message); }
+  const bad = mailState().bounced || [];
+  if (email && mailReady() && !bad.includes(email.toLowerCase())) { await sendMail(email, m.subject, m.body); return 'email'; }
+  return '';
+}
 async function textMissed(force) {   // one text per person per day, the first reminder slot of the day
   const st = mailState(), day = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }), sent = [], failed = [];
   st.texted = st.texted && st.texted.day === day ? st.texted : { day, names: [] };
@@ -1424,6 +1434,20 @@ async function textMissed(force) {   // one text per person per day, the first r
   }
   saveMail(st); return { sent, failed };
 }
+// A sample of any reminder, texted to one named person (Airtable Drivers), clearly marked as a sample
+async function textSample(b) {
+  const at = await atData(), d = matchPerson(at.drivers, clean(b.name)), ph = phoneOf(d);
+  if (!d) throw new Error('No one called ' + clean(b.name) + ' in the Drivers table.');
+  if (!ph) throw new Error('No mobile number for ' + d.name + ' in Airtable.');
+  const first = d.name.split(' ')[0], k = clean(b.kind) || 'svc';
+  const msg = k === 'eod' ? 'Millennial Pools: Hi ' + first + ", 2 POM services from today aren't submitted: Sunset Village, Oak Ridge HOA. Please complete them in POM tonight. If you didn't get to a pool, let your regional know."
+    : k === 'checkup' ? 'Millennial Pools: Hi ' + first + ", reminder: your weekly truck check-up hasn't been submitted in POM yet. Please fill it out today. Thanks!"
+    : k === 'safety' ? ((await safetyText(d.name).catch(() => null)) || {}).sms || 'Millennial Pools: Hi ' + first + ', your driver score this week is 96/100. No camera events this week, nice work!'
+    : svcText(d.name, { customer: 'Sunset Village Pool', visit: { leave: Date.now() - 25 * 6e4 } }).sms;
+  await sendText(ph, '(SAMPLE, no action needed) ' + msg);
+  console.log(new Date().toISOString(), 'Sample', k, 'text sent to', d.name);
+  return { to: d.name, phone: '(***) ***-' + ph.slice(-4), kind: k };
+}
 async function textTest() {
   const at = await atData(), d = at.drivers.find(x => dupeName(x.name) === dupeName('Callum Curcie')), ph = String((d && d.phone) || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
   if (ph.length !== 10) throw new Error('No phone number for Callum Curcie in the Drivers table in Airtable.');
@@ -1434,10 +1458,11 @@ async function textTest() {
 const SVC_WAIT_MIN = +process.env.SVC_REMINDER_MIN || 20;   // minutes after leaving before the reminder goes out
 const svcText = (tech, s) => { const first = tech.split(' ')[0], t = new Date(s.visit.leave).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
   return { subject: 'Submit your POM report: ' + (s.customer || 'pool') + ' (left ' + t + ')',
-    body: 'Hi ' + first + ',\n\nYou left ' + (s.customer || 'a pool') + (s.address ? ' (' + s.address + ')' : '') + ' at ' + t + ", but the service hasn't been submitted in Pool Office Manager yet.\n\nPlease open the POM app and complete it now while it's fresh.\n\nThanks,\nMillennial Pools" }; };
+    body: 'Hi ' + first + ',\n\nYou left ' + (s.customer || 'a pool') + (s.address ? ' (' + s.address + ')' : '') + ' at ' + t + ", but the service hasn't been submitted in Pool Office Manager yet.\n\nPlease open the POM app and complete it now while it's fresh.\n\nThanks,\nMillennial Pools",
+    sms: 'Millennial Pools: Hi ' + first + ', you left ' + (s.customer || 'a pool') + ' at ' + t + " but the service isn't submitted in POM yet. Please complete it in the POM app now. Thanks!" }; };
 async function svcCheck(dry) {
   const st = mailState(), day = etDay().ymd, sv = st.svc = st.svc && st.svc.day === day ? { ...st.svc } : { on: !!(st.svc && st.svc.on), day, sent: {} }, out = [];
-  if (!dry && (!sv.on || !mailReady())) return out;
+  if (!dry && (!sv.on || !canNotify())) return out;
   const stops = (await pomToday()).map(pomStop).filter(x => !pomCheckup(x) && x.tech), techs = [...new Set(stops.filter(x => !x.done).map(x => x.tech))];
   const at = await atData().catch(() => ({ drivers: [] })), users = await pomUsers().catch(() => []), bad = (st.bounced || []);
   for (const tech of techs) {
@@ -1445,10 +1470,10 @@ async function svcCheck(dry) {
     const d = matchPerson(at.drivers.filter(x => x.status !== 'Inactive'), tech), u = matchPerson(users, tech), email = (d && d.email) || (u && u.email) || '';
     for (const s of v.stops) {
       if (s.done || !s.visit || !s.visit.away || sv.sent[s.id] || Date.now() - s.visit.leave < SVC_WAIT_MIN * 6e4 || Date.now() - s.visit.leave > 4 * 3600e3) continue;
-      out.push({ tech, email, customer: s.customer, left: s.visit.leave, id: s.id });
-      if (dry || !email || bad.includes(email.toLowerCase())) continue;
+      out.push({ tech, email, phone: !!phoneOf(d), customer: s.customer, left: s.visit.leave, id: s.id });
+      if (dry) continue;
       const m = svcText(tech, s);
-      try { await sendMail(email, m.subject, m.body); sv.sent[s.id] = Date.now(); console.log(new Date().toISOString(), 'Service report reminder sent to', tech, 'for', s.customer); }
+      try { const how = await notify(d, email, m); if (how) { sv.sent[s.id] = Date.now(); console.log(new Date().toISOString(), 'Service report reminder', how, 'to', tech, 'for', s.customer); } }
       catch (e) { console.error('Service reminder to', tech, 'failed:', e.message); }
     }
     await sleep(500);
@@ -1468,7 +1493,7 @@ const EOD_HOUR = +process.env.EOD_REMINDER_HOUR || 18;   // 6 PM New Jersey time
 async function eodCheck(dry) {
   const st = mailState(), day = etDay().ymd, out = [];
   st.eod = st.eod && typeof st.eod === 'object' ? st.eod : { on: false };
-  if (!dry && (!st.eod.on || !mailReady() || st.eod.day === day)) return out;
+  if (!dry && (!st.eod.on || !canNotify() || st.eod.day === day)) return out;
   const stops = (await pomToday()).map(pomStop).filter(x => !pomCheckup(x) && x.tech && !x.done && Date.parse(x.time) < Date.now());
   const at = await atData().catch(() => ({ drivers: [] })), users = await pomUsers().catch(() => []), bad = st.bounced || [];
   const tm = t => new Date(t).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
@@ -1477,13 +1502,15 @@ async function eodCheck(dry) {
     const d = matchPerson(at.drivers.filter(x => x.status !== 'Inactive'), tech), u = matchPerson(users, tech), email = (d && d.email) || (u && u.email) || '';
     const lines = mine.map(x => { const w = vis[x.id]; return '• ' + (x.customer || 'Pool') + (x.address ? ', ' + x.address : '') + (w ? '  (you were there ' + tm(w.arrive) + '–' + tm(w.leave) + ')' : ''); });
     const first = tech.split(' ')[0], n = mine.length;
-    out.push({ tech, email, n, subject: n + ' POM service' + (n > 1 ? 's' : '') + ' not submitted today', body: 'Hi ' + first + ',\n\nThese services from today still haven\'t been submitted in Pool Office Manager:\n\n' + lines.join('\n') + '\n\nPlease open the POM app and complete ' + (n > 1 ? 'them' : 'it') + ' tonight. If you didn\'t get to a pool, let your regional know.\n\nThanks,\nMillennial Pools' });
+    out.push({ tech, email, d, phone: !!phoneOf(d), n, sms: 'Millennial Pools: Hi ' + first + ', ' + n + ' POM service' + (n > 1 ? 's' : '') + " from today " + (n > 1 ? "aren't" : "isn't") + ' submitted: ' + mine.map(x => x.customer || 'Pool').slice(0, 6).join(', ') + (n > 6 ? ' and ' + (n - 6) + ' more' : '') + ". Please complete " + (n > 1 ? 'them' : 'it') + " in POM tonight. If you didn't get to a pool, let your regional know.", subject: n + ' POM service' + (n > 1 ? 's' : '') + ' not submitted today', body: 'Hi ' + first + ',\n\nThese services from today still haven\'t been submitted in Pool Office Manager:\n\n' + lines.join('\n') + '\n\nPlease open the POM app and complete ' + (n > 1 ? 'them' : 'it') + ' tonight. If you didn\'t get to a pool, let your regional know.\n\nThanks,\nMillennial Pools' });
     await sleep(300);
   }
   if (dry) return out;
-  for (const m of out) { if (!m.email || bad.includes(m.email.toLowerCase())) continue;
-    try { await sendMail(m.email, m.subject, m.body); console.log(new Date().toISOString(), 'End-of-day POM email sent to', m.tech, '(' + m.n + ')'); } catch (e) { console.error('End-of-day email to', m.tech, 'failed:', e.message); } }
-  st.eod.day = day; st.eod.sent = out.filter(m => m.email).map(m => m.tech); saveMail(st);
+  const got = [];
+  for (const m of out) {
+    try { const how = await notify(m.d, m.email, m); if (how) { got.push(m.tech); console.log(new Date().toISOString(), 'End-of-day POM reminder', how, 'to', m.tech, '(' + m.n + ')'); } } catch (e) { console.error('End-of-day reminder to', m.tech, 'failed:', e.message); }
+    await sleep(200); }
+  st.eod.day = day; st.eod.sent = got; saveMail(st);
   return out;
 }
 if (process.argv[2] !== 'test') setInterval(() => { const h = +new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }); if (h >= EOD_HOUR && h < 23) eodCheck().catch(e => console.error('End-of-day POM emails:', e.message)); }, 10 * 60e3);
@@ -1503,7 +1530,7 @@ async function autoMail() {
   if (st.week !== week) { st.week = week; st.sent = []; st.slots = {}; }
   st.slots = st.slots || {}; if (st.slots[slot]) return;
   if (st.auto && mailReady()) try { const r = await routes['/api/texts/missed-checkups'](), done = [], bad = await checkBounces(st);
-    for (const t of r.texts || []) { if (!t.email || bad.includes(t.email.toLowerCase())) continue;
+    for (const t of r.texts || []) { if (!t.email || bad.includes(t.email.toLowerCase()) || (st.sms && TXT_KEY() && t.phone)) continue;   // they get the text instead
       try { await sendMail(t.email, t.subject, t.body); done.push(t.name); if (!st.sent.includes(t.name)) st.sent.push(t.name); console.log(new Date().toISOString(), 'Check-up email sent to', t.name); }
       catch (e) { console.error('Check-up email to', t.name, 'failed:', e.message); } }
     st.slots[slot] = done; saveMail(st);
@@ -2776,15 +2803,15 @@ async function safetyText(name, fleet) {
   const when = t => new Date(t).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   return { name: me.name, subject: 'Your driving this week: ' + me.r.score + '/100', body: 'Hi ' + first + ',\n\nYour driver score: ' + me.r.score + ' out of 100, #' + me.r.rank + ' of ' + fleet.length + ' drivers.\n\n' +
     (ev.length ? 'Your worst camera event this week: ' + ev[0].k.label + ' on ' + when(ev[0].t) + (ev.length > 1 ? ' (' + ev.length + ' events in all)' : '') + '.' : 'No camera events this week. Nice work.') +
-    '\n\nWatch the clip and see your full report (private to you, link works for 2 weeks):\n' + link + '\n\nThanks,\nMillennial Pools', events: ev.length };
+    '\n\nWatch the clip and see your full report (private to you, link works for 2 weeks):\n' + link + '\n\nThanks,\nMillennial Pools', events: ev.length,
+    sms: 'Millennial Pools: Hi ' + first + ', your driver score this week is ' + me.r.score + '/100 (#' + me.r.rank + ' of ' + fleet.length + '). ' + (ev.length ? 'Worst camera event: ' + ev[0].k.label + ', ' + when(ev[0].t) + '.' : 'No camera events this week, nice work!') + ' Your report: ' + link };
 }
 async function safetyMail() {
   const st = upState(), fleet = await fleetReport(), sent = [], skipped = [];
   for (const row of fleet) { const key = 'safety:' + weekKey() + ':' + dupeName(row.name); if (st.sent[key]) continue;
-    const to = await emailOf(row.name), bad = ((mailState().bounced) || []);   // safety emails go to the driver themselves
-    if (!to || bad.includes(to.toLowerCase())) { skipped.push(row.name); continue; }
-    const m = await safetyText(row.name, fleet);
-    try { await sendMail(to, m.subject, m.body); st.sent[key] = Date.now(); sent.push(row.name); } catch (e) { console.error('Safety email', row.name, e.message); }
+    const to = await emailOf(row.name), d = matchPerson((await atData()).drivers, row.name);   // safety reports go to the driver themselves
+    const m = await safetyText(row.name, fleet); if (!m) continue;
+    try { const how = await notify(d, to, m); if (how) { st.sent[key] = Date.now(); sent.push(row.name); } else skipped.push(row.name); } catch (e) { console.error('Safety report', row.name, e.message); }
   }
   saveUp(st); return { sent, skipped };
 }
@@ -3099,7 +3126,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/repair/read': readInvoice, '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/svc/test': () => svcTest(), '/api/eod/test': () => eodTest(), '/api/eod/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.eod = { ...(st.eod || {}), on: b.on === true }; saveMail(st); return { on: st.eod.on }; }, '/api/svc/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.svc = { ...(st.svc || { day: '', sent: {} }), on: b.on === true }; saveMail(st); return { on: st.svc.on }; }, '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/text/sample': textSample, '/api/repair/read': readInvoice, '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/svc/test': () => svcTest(), '/api/eod/test': () => eodTest(), '/api/eod/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.eod = { ...(st.eod || {}), on: b.on === true }; saveMail(st); return { on: st.eod.on }; }, '/api/svc/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.svc = { ...(st.svc || { day: '', sent: {} }), on: b.on === true }; saveMail(st); return { on: st.svc.on }; }, '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   Object.assign(POSTS, UPKEEP_POSTS);
@@ -5237,17 +5264,17 @@ async function mailPanel(){const el=$('chkMailAuto');if(!el)return;let st;try{st
     +'<span class="rmm muted" id="'+o.msg+'"></span></div>';
   const bounced=(st.bounced&&st.bounced.length?'Bounced, never emailed again: '+st.bounced.map(esc).join(', ')+'. Fix the address in Airtable.':'')+(st.bounceErr?(st.bounced&&st.bounced.length?'<br>':'')+esc(st.bounceErr):'');
   el.innerHTML='<div class="rmhead"><h3>Automatic reminders</h3><span class="muted">'+(st.ready?'Emails come from '+esc(st.from)+'.':'Email isn’t set up yet: add the Outlook settings in Render (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, MAIL_FROM).')+' Switch each one on when you’re ready; “Send me a sample” never goes to the techs.</span></div><div class="rmgrid">'
-   +card({cls:'em',icon:'✉️',title:'Check-up reminder',how:'Email',ready:st.ready,on:st.auto,tog:'mailAuto',togLabel:'Send automatically',msg:'mailMsg',
+   +card({cls:'em',icon:'✉️',title:'Check-up reminder',how:st.sms&&st.smsReady?'Email, only for people with no phone':'Email',ready:st.ready,on:st.auto,tog:'mailAuto',togLabel:'Send automatically',msg:'mailMsg',
      who:'Techs, tech assistants and auditors who haven’t submitted this week’s truck check-up',when:'Mon–Wed at 12 PM · Thu–Sun at 9 AM and 3 PM, until they submit',
      note:st.sent&&st.sent.length?'Emailed this week: '+st.sent.map(esc).join(', '):'Nobody emailed yet this week',warn:bounced,btns:[['mailTest','Send me a sample'],['mailNow','Send to everyone now',1]]})
    +card({cls:'tx',icon:'📱',title:'Check-up reminder',how:'Text message ('+esc(st.smsVia||'Twilio')+')',ready:st.smsReady,on:st.sms,tog:'smsAuto',togLabel:'Text automatically',msg:'smsMsg',
      who:'Same people, to the phone number in Airtable',when:'Once a day while their check-up is missing',
      note:st.texted&&st.texted.length?'Texted today: '+st.texted.map(esc).join(', '):'Nobody texted today',warn:st.smsReady?'':'Add TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_FROM in Render.',btns:[['smsTest','Send me a sample'],['smsNow','Text everyone now',1]]})
-   +card({cls:'sv',icon:'🏊',title:'Service report reminder',how:'Email',ready:st.ready,on:st.svc,tog:'svcAuto',togLabel:'Remind automatically',msg:'svcMsg',
-     who:'A tech whose truck left a pool without submitting that service in POM',when:'20 minutes after they drive away · checked every 15 min, 7 AM–9 PM · one email per pool',
+   +card({cls:'sv',icon:'🏊',title:'Service report reminder',how:st.smsReady?'Text (email if no phone)':'Email',ready:st.ready||st.smsReady,on:st.svc,tog:'svcAuto',togLabel:'Remind automatically',msg:'svcMsg',
+     who:'A tech whose truck left a pool without submitting that service in POM',when:'20 minutes after they drive away · checked every 15 min, 7 AM–9 PM · one per pool',
      note:st.svcToday?'Sent today: '+st.svcToday:'None sent today',btns:[['svcTest','Send me a sample']]})
-   +card({cls:'eo',icon:'🌙',title:'End-of-day summary',how:'Email',ready:st.ready,on:st.eod,tog:'eodAuto',togLabel:'Send at end of day',msg:'eodMsg',
-     who:'Each tech with services from today still not submitted in POM',when:'Every day at 6 PM · one email listing all of them',
+   +card({cls:'eo',icon:'🌙',title:'End-of-day summary',how:st.smsReady?'Text (email if no phone)':'Email',ready:st.ready||st.smsReady,on:st.eod,tog:'eodAuto',togLabel:'Send at end of day',msg:'eodMsg',
+     who:'Each tech with services from today still not submitted in POM',when:'Every day at 6 PM · one message listing all of them',
      note:st.eodToday?'Sent today: '+(st.eodToday.length?st.eodToday.map(esc).join(', '):'nobody needed one'):'Not sent yet today',btns:[['eodTest','Send me a sample']]})
    +'</div>';
   const run=async(e,msg,fn)=>{const b=e.currentTarget;b.disabled=true;$(msg).textContent='Sending...';try{$(msg).textContent=await fn()}catch(err){$(msg).textContent=err.message}b.disabled=false};
