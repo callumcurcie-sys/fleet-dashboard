@@ -2813,6 +2813,15 @@ async function renewalMail(force) {
 }
 
 // Weekly safety email: score, rank, worst camera event this week, and the private report link with the clips
+// This week (Monday to now) for one person: tech visits from GPS, Ramp card spending
+async function weekStats(name) {
+  const mon = new Date(etNow()); mon.setDate(mon.getDate() - ((mon.getDay() + 6) % 7)); const since = mon.toLocaleDateString('en-CA'), t0 = Date.parse(since + 'T04:00:00Z');
+  const same = (a, b) => !!matchPerson([{ name: a }], b);
+  const vis = (await allVisits().catch(() => [])).filter(x => x.tech && same(x.tech, name) && x.m >= VIS_MIN && x.m <= VIS_MAX && isTechVisit(x)), wk = vis.filter(x => x.d >= since);
+  const y = await rampYear().catch(() => ({ card: [], reimb: [] })), mine = y.card.concat(y.reimb).filter(t => t.amount > 0 && t.who && same(t.who, name) && Date.parse(t.at) >= t0);
+  return { visits: wk.length, avg: wk.length ? Math.round(wk.reduce((a, x) => a + x.m, 0) / wk.length) : 0, usual: vis.length ? Math.round(vis.reduce((a, x) => a + x.m, 0) / vis.length) : 0,
+    spend: mine.reduce((a, t) => a + t.amount, 0), gas: mine.filter(t => t.gas).reduce((a, t) => a + t.amount, 0), n: mine.length };
+}
 async function safetyText(name, fleet) {
   fleet = fleet || await fleetReport(); const me = fleet.find(x => dupeName(x.name) === dupeName(name));
   if (!me) return null;
@@ -2821,10 +2830,14 @@ async function safetyText(name, fleet) {
     .sort((a, b) => b.k.pts - a.k.pts || b.t - a.t);
   const link = (lastBase || 'https://fleet-dashboard-oxei.onrender.com') + '/r/' + signShare({ k: 'd', n: me.name }, 14), first = me.name.split(' ')[0];
   const when = t => new Date(t).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-  return { name: me.name, subject: 'Your driving this week: ' + me.r.score + '/100', body: 'Hi ' + first + ',\n\nYour driver score: ' + me.r.score + ' out of 100, #' + me.r.rank + ' of ' + fleet.length + ' drivers.\n\n' +
+  const wk2 = await weekStats(me.name).catch(() => null);
+  const poolLine = wk2 && wk2.visits ? wk2.visits + ' pool visit' + (wk2.visits > 1 ? 's' : '') + ', ' + wk2.avg + ' min a pool on average' + (wk2.usual && Math.abs(wk2.avg - wk2.usual) >= 2 ? ' (your usual is ' + wk2.usual + ')' : '') : '';
+  const rampLine = wk2 && wk2.spend ? '$' + Math.round(wk2.spend).toLocaleString() + (wk2.gas ? ' ($' + Math.round(wk2.gas).toLocaleString() + ' gas)' : '') : wk2 ? '$0' : '';
+  return { name: me.name, week: wk2, subject: 'Your week: driver score ' + me.r.score + '/100',
+    sms: 'Millennial Pools weekly: Hi ' + first + '. Driver score ' + me.r.score + '/100 (#' + me.r.rank + ' of ' + fleet.length + '). Camera events: ' + (ev.length ? ev.length + ' (worst: ' + ev[0].k.label + ', ' + when(ev[0].t) + ')' : 'none, nice work') + '.' + (poolLine ? ' Pools: ' + poolLine + '.' : '') + (rampLine ? ' Ramp card: ' + rampLine + '.' : '') + ' Report: ' + link,
+    body: 'Hi ' + first + ',\n\n' + (poolLine ? 'Pools this week: ' + poolLine + '.\n' : '') + (rampLine ? 'Ramp card this week: ' + rampLine + '.\n\n' : '\n') + 'Your driver score: ' + me.r.score + ' out of 100, #' + me.r.rank + ' of ' + fleet.length + ' drivers.\n\n' +
     (ev.length ? 'Your worst camera event this week: ' + ev[0].k.label + ' on ' + when(ev[0].t) + (ev.length > 1 ? ' (' + ev.length + ' events in all)' : '') + '.' : 'No camera events this week. Nice work.') +
-    '\n\nWatch the clip and see your full report (private to you, link works for 2 weeks):\n' + link + '\n\nThanks,\nMillennial Pools', events: ev.length,
-    sms: 'Millennial Pools: Hi ' + first + ', your driver score this week is ' + me.r.score + '/100 (#' + me.r.rank + ' of ' + fleet.length + '). ' + (ev.length ? 'Worst camera event: ' + ev[0].k.label + ', ' + when(ev[0].t) + '.' : 'No camera events this week, nice work!') + ' Your report: ' + link };
+    '\n\nWatch the clip and see your full report (private to you, link works for 2 weeks):\n' + link + '\n\nThanks,\nMillennial Pools', events: ev.length };
 }
 globalThis.safetySms = name => safetyText(name);   // lets the sample texts (outside this block) build a real safety text
 async function safetyMail() {
@@ -2838,11 +2851,45 @@ async function safetyMail() {
 }
 async function oilMail() {
   const st = upState(), sent = [];
+  const drv = (await atData()).drivers, inv = (lastBase || 'https://fleet-dashboard-oxei.onrender.com') + '/r/' + signShare({ k: 'i' }, 365);
   for (const o of (await oilList()).filter(x => x.status === 'due' && x.driver)) { const key = 'oil:' + weekKey() + ':' + o.id, to = UPKEEP_TO;
     if (st.sent[key]) continue; const m = oilText(o);
-    try { await sendMail(to, m.subject + ' (' + o.driver + ')', m.body); st.sent[key] = Date.now(); sent.push(o.name); } catch (e) { console.error('Oil email', o.name, e.message); } }
+    try { if (mailReady()) await sendMail(to, m.subject + ' (' + o.driver + ')', m.body); st.sent[key] = Date.now(); sent.push(o.name); } catch (e) { console.error('Oil email', o.name, e.message); }
+    const d = matchPerson(drv, o.driver), ph = TXT_KEY() ? phoneOf(d) : '';   // and a text to whoever drives it
+    if (ph) try { await sendText(ph, 'Millennial Pools: Hi ' + o.driver.split(' ')[0] + ', ' + o.name + ' is due for an oil change (' + (o.since !== null ? o.since.toLocaleString() + ' miles' : o.days + ' days') + ' since the last one). Please get it booked this week and send the invoice when it\'s done: ' + inv); } catch (e) { console.error('Oil text', o.driver, e.message); }
+    await sleep(300); }
   saveUp(st); return { sent };
 }
+// Long idling: Azuga's latest location says how long each truck has idled. A live idle over IDLE_MIN minutes, or a trip
+// that ended with that much idling, gets one text to the driver (at most 2 a day each), 6 AM to 9 PM.
+const IDLE_MIN = +process.env.IDLE_ALERT_MIN || 15;
+async function idleCheck(dry) {
+  const st = upState(), h = etNow().getHours(); if (!dry && (!st.idle || !TXT_KEY() || h < 6 || h >= 21)) return [];
+  const raw = await routes['/api/locations'](), locs = list(raw && raw.data !== undefined ? raw.data : raw), at = await atData();
+  const vs = await freshVehicles(), m = matchAll(vs, at.trucks), day = etNow().toLocaleDateString('en-CA'), now = Date.now(), out = [];
+  st.idleSent = st.idleSent && st.idleSent.day === day ? st.idleSent : { day, keys: {}, per: {} };
+  for (const l of locs) {
+    const sec = +l.idling || 0, ev = String(l.eventName || ''), t = +l.dateAndTime || 0, live = /IDL/i.test(ev) && !(+l.speed > 0);
+    const mins = Math.round(live ? Math.max(sec / 60, (now - t) / 6e4) : sec / 60);
+    if (mins < IDLE_MIN || (!live && (!/TRIP_END/i.test(ev) || now - t > 2 * 3600e3))) continue;   // only fresh trips
+    const x = m[l.trackeeId], tk = x && x.truck, who = (tk && tk.driver && tk.driver.name) || [l.firstName, l.lastName].filter(Boolean).join(' ');
+    const d = matchPerson(at.drivers, who), key = l.trackeeId + ':' + (live ? 'live' : t);
+    if (!d || st.idleSent.keys[key] || (st.idleSent.per[d.name] || 0) >= 2) continue;
+    const truck = tk ? truckLabelOf(tk) : clean(l.trackeeName), first = d.name.split(' ')[0];
+    const msg = live ? 'Millennial Pools: Hi ' + first + ', ' + truck + ' has been idling for ' + mins + ' minutes' + (l.address ? ' at ' + clean(l.address).split(',')[0] : '') + '. Please shut it off when you\'re stopped, idling burns gas. Thanks!'
+      : 'Millennial Pools: Hi ' + first + ', ' + truck + ' idled ' + mins + ' minutes on your last trip. Please shut the engine off when you\'re stopped, idling burns gas. Thanks!';
+    out.push({ who: d.name, truck, mins, live });
+    if (dry) continue;
+    const ph = phoneOf(d); if (!ph) continue;
+    try { await sendText(ph, msg); st.idleSent.keys[key] = now; st.idleSent.per[d.name] = (st.idleSent.per[d.name] || 0) + 1;
+      st.idleLog = [{ at: now, who: d.name, truck, mins }, ...(st.idleLog || [])].slice(0, 50); console.log(new Date().toISOString(), 'Idle text to', d.name, truck, mins + ' min'); }
+    catch (e) { console.error('Idle text', d.name, e.message); }
+  }
+  if (!dry) saveUp(st);
+  return out;
+}
+if (process.argv[2] !== 'test') setInterval(() => idleCheck().catch(e => console.error('Idle check:', e.message)), 5 * 60e3);
+routes['/api/upkeep/idle-now'] = () => idleCheck(true).then(list => ({ wouldText: list, minutes: IDLE_MIN }));
 // Hourly: renewals (daily, 8 AM+), and on Mondays from 8 AM the safety + oil emails (each once a week)
 // ---- Drivers: anyone marked inactive in POM comes off every truck; each truck keeps its last 3 drivers ----
 const fmtDay = ms => new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
@@ -2910,16 +2957,16 @@ if (process.argv[2] !== 'test') { const drvTick = () => retireInactive().catch(e
   setTimeout(drvTick, 4 * 60e3); setInterval(drvTick, 15 * 60e3); }
 routes['/api/drivers/inactive-check'] = () => retireInactive(true).then(list => ({ wouldRemove: list }));
 async function upkeepTick() {
-  const st = upState(), et = etNow(); if (et.getHours() < 8 || !mailReady()) return;
+  const st = upState(), et = etNow(); if (et.getHours() < 8 || !canNotify()) return;
   const day = et.toLocaleDateString('en-CA');
   if (st.renew && st.lastRenew !== day) { st.lastRenew = day; saveUp(st); await renewalMail().catch(e => console.error('Renewal emails:', e.message)); }
+  if (et.getDay() === 5 && et.getHours() >= 17 && st.safety && st.lastSafety !== weekKey()) { st.lastSafety = weekKey(); saveUp(st); await safetyMail().catch(e => console.error('Weekly driver reports:', e.message)); }   // Fridays at 5 PM
   if (et.getDay() === 1) {
-    if (st.safety && st.lastSafety !== weekKey()) { st.lastSafety = weekKey(); saveUp(st); await safetyMail().catch(e => console.error('Safety emails:', e.message)); }
     if (st.oil && st.lastOil !== weekKey()) { st.lastOil = weekKey(); saveUp(st); await oilMail().catch(e => console.error('Oil emails:', e.message)); }
   }
 }
 if (process.argv[2] !== 'test') {
-  setInterval(upkeepTick, 60 * 60e3); setTimeout(upkeepTick, 6 * 60e3);
+  setInterval(upkeepTick, 10 * 60e3); setTimeout(upkeepTick, 6 * 60e3);
   setInterval(() => checkGas(), 30 * 60e3); setTimeout(() => checkGas(), 8 * 60e3);
   setInterval(() => readRenewals().catch(() => {}), 12 * 3600e3); setTimeout(() => readRenewals().catch(() => {}), 10 * 60e3);
 }
@@ -2930,7 +2977,7 @@ routes['/api/upkeep'] = async () => {
   const pp = personalPeople(at), locs = Object.fromEntries(((await rampYear().catch(() => ({ card: [] }))).card || []).filter(t => t.loc).map(t => [t.id, t.loc]));
   const gas = Object.entries(done).map(([id, x]) => ({ id, ...x, personal: !!matchPerson(pp, x.who), sta: x.sta || (locs[id] ? [locs[id].city, locs[id].state].filter(Boolean).join(', ') + (locs[id].zip ? ' ' + locs[id].zip : '') : ''), truck: tk[x.truckId] ? tname(tk[x.truckId]) : '', tank: tankOf(tk[x.truckId]), link: 'https://app.ramp.com/business-overview/transactions/' + id })).sort((a, b) => b.flags.length - a.flags.length || Date.parse(b.at) - Date.parse(a.at));
   const renew = (await renewRows()).map(({ t, ...x }) => x);
-  return { cost, oil, oilMiles: OIL_MI, gas, gasOk: GAS_OK, personalRoles: PERSONAL_ROLES, personalNames: pp.map(d => d.name), gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew }, mail: mailReady(), ai: !!AI_KEY() };
+  return { cost, oil, oilMiles: OIL_MI, gas, gasOk: GAS_OK, personalRoles: PERSONAL_ROLES, personalNames: pp.map(d => d.name), gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew, idle: !!st.idle }, idleMin: IDLE_MIN, idleLog: (st.idleLog || []).slice(0, 15), mail: mailReady(), sms: !!TXT_KEY(), ai: !!AI_KEY() };
 };
 routes['/api/upkeep/flags'] = async () => { const pp = personalPeople(await atData()); return { gas: Object.values(gasChk()).filter(x => !matchPerson(pp, x.who) && x.verdict === 'far' && !x.ok && !(x.flags || []).some(f => /^Truck was parked/.test(f))).length }; };
 routes['/api/upkeep/safety-preview'] = async q => (await safetyText(q.get('name') || 'Callum Curcie')) || { error: 'No score for that name yet.' };
@@ -2941,7 +2988,7 @@ const GAS_OK = ['Gas cans / equipment', 'Different vehicle', 'Rental or personal
 const UPKEEP_POSTS = {
   '/api/upkeep/gas-ok': b => { const done = gasChk(), r = done[String(b.id || '')]; if (!r) throw new Error('That fill-up is no longer in the list. Refresh.');
     r.ok = b.why === '' ? '' : GAS_OK.includes(b.why) ? b.why : GAS_OK[3]; saveGasChk(done); return { ok: true, why: r.ok }; },
-  '/api/upkeep/settings': b => { const st = upState(); ['safety', 'oil', 'renew'].forEach(k => { if (k in b) st[k] = b[k] === true; }); saveUp(st); return { safety: st.safety, oil: st.oil, renew: st.renew }; },
+  '/api/upkeep/settings': b => { const st = upState(); ['safety', 'oil', 'renew', 'idle'].forEach(k => { if (k in b) st[k] = b[k] === true; }); saveUp(st); return { safety: st.safety, oil: st.oil, renew: st.renew, idle: !!st.idle }; },
   '/api/upkeep/renewal': setRenewal,
   '/api/upkeep/read-cards': () => { readRenewals(40).catch(e => console.error('Renewals:', e.message)); return { started: true }; },
   '/api/upkeep/gas-check': () => { checkGas(40); return { started: true }; },
@@ -4229,7 +4276,7 @@ body[data-v=vCam]:not([data-v=vMap]) .bar{max-width:1400px}
  <div id="buySum"></div><div class="bchips" id="buyChips"></div><div class="rp-grid"><div id="buyList"></div><aside id="buySide"></aside></div></div>
 </div>
 <div id="vUp" hidden>
- <div class="crewhead"><div><h2>Upkeep</h2><p id="upCount" class="muted">Oil changes, renewals and safety emails</p></div><span style="flex:1"></span><div class="rnav" id="upNav"><button data-us="oil" class="on">Oil changes</button><button data-us="ren">Renewals</button><button data-us="saf">Safety emails</button></div></div>
+ <div class="crewhead"><div><h2>Upkeep</h2><p id="upCount" class="muted">Oil changes, renewals and driver texts</p></div><span style="flex:1"></span><div class="rnav" id="upNav"><button data-us="oil" class="on">Oil changes</button><button data-us="ren">Renewals</button><button data-us="saf">Driver texts</button></div></div>
  <div id="usBody"><div class="empty">Loading...</div></div>
 </div>
 <div id="vCam" hidden>
@@ -5511,7 +5558,7 @@ function renderUp(){const u=UP;if(!u)return;let h='';
   if(USEC==='oil'){const o=Array.isArray(u.oil)?u.oil.filter(upf):[],lab={due:'Due now',soon:'Due soon',ok:'OK',unknown:'No record'};
     $('upCount').textContent='Due every '+u.oilMiles.toLocaleString()+' miles or 6 months · last change comes from invoices saved in the truck notes';
     h=(u.oil.error?'<div class="empty">'+esc(u.oil.error)+'</div>':'')+kpis([[o.filter(x=>x.status==='due').length,'due now','bad'],[o.filter(x=>x.status==='soon').length,'due soon','warn'],[o.filter(x=>x.status==='ok').length,'up to date','good'],[o.filter(x=>x.status==='unknown').length,'no oil change on record']])
-     +upRem('🛢️','Oil change reminder',u.settings.oil,'Email to callum@millennialpools.com (one per truck)','Every truck that is due (5,000 miles or 6 months)','Mondays at 8 AM','<label class="sw"><input type="checkbox" id="upOilOn"'+(u.settings.oil?' checked':'')+'><i></i>Send automatically</label><button class="btn2" id="upOilTest">Send me a sample</button>')
+     +upRem('🛢️','Oil change reminder',u.settings.oil,'Email to callum@millennialpools.com + a text to the driver','Every truck that is due (5,000 miles or 6 months)','Mondays at 8 AM','<label class="sw"><input type="checkbox" id="upOilOn"'+(u.settings.oil?' checked':'')+'><i></i>Send automatically</label><button class="btn2" id="upOilTest">Send me a sample</button>')
      +'<div class="ukg">'+o.map(x=>{const pct=x.since!==null?x.since/u.oilMiles*100:x.days!==null?x.days/183*100:0;
        return '<div class="ukc oil '+x.status+'"><div class="ukc-h"><div><b>'+esc(x.name)+'</b><small>'+esc(x.driver||'No driver')+'</small></div><span class="upill '+x.status+'">'+lab[x.status]+'</span></div>'
         +'<div class="ukc-big">'+(x.since!==null?'<b>'+x.since.toLocaleString()+'</b><span>miles since last change</span>':x.days!==null?'<b>'+x.days+'</b><span>days since last change'+(x.odoMismatch?' (odometer doesn’t match the invoice)':'')+'</span>':'<b class="muted">–</b><span>no oil change saved yet</span>')+'</div>'
@@ -5531,10 +5578,11 @@ function renderUp(){const u=UP;if(!u)return;let h='';
     h=kpis([[r.filter(x=>soon(x.insLeft)).length,'insurance due in 30 days','bad'],[r.filter(x=>soon(x.regLeft)).length,'registrations due in 30 days','bad'],[r.filter(x=>!x.reg).length,'trucks with no registration date','warn'],[r.filter(x=>x.ins&&x.reg&&!need(x)).length,'all set','good']])
      +upRem('📄','Renewal reminder',u.settings.renew,'Email to callum@millennialpools.com with the card attached','Any truck whose insurance or registration runs out within 30 days','Checked every day from 8 AM · once per renewal','<label class="sw"><input type="checkbox" id="upRenOn"'+(u.settings.renew?' checked':'')+'><i></i>Send automatically</label><button class="btn2" id="upRenRead"'+(u.ai?'':' disabled title="Needs ANTHROPIC_API_KEY"')+'>Read cards now</button><button class="btn2" id="upRenTest">Send due reminders now</button>')
      +grp('Due in 30 days or expired',r.filter(need).sort((a,b)=>lt(a)-lt(b)),'bad')+grp('Missing a date',r.filter(miss),'warn')+grp('All set',r.filter(x=>!need(x)&&!miss(x)).sort((a,b)=>lt(a)-lt(b)),'good')}
-  if(USEC==='saf'){$('upCount').textContent='Every Monday each driver gets their own score, rank and worst camera event of the week';
-    h='<div class="saf"><div class="panel rp-pan"><h3>Weekly safety email</h3><label class="sw"><input type="checkbox" id="upSafOn"'+(u.settings.safety?' checked':'')+'><i></i>Send to every driver, Mondays at 8 AM</label>'
-     +'<ul class="safl"><li><b>Score</b> out of 100 and their rank in the fleet</li><li><b>Worst camera event</b> of the week</li><li><b>Private link</b> to their report with the clips (works 2 weeks)</li></ul>'
-     +'<p class="muted" style="font-size:13px">Goes to the email on their Airtable record. Drivers with no email, or whose email bounced, are skipped.</p>'
+  if(USEC==='saf'){$('upCount').textContent='Idling texts as it happens, and every Friday at 5 PM each driver gets their score, camera events, time at pools and Ramp spending';
+    h=upRem('⏱️','Long idling text',u.settings.idle,'Text to the driver','Any truck idling '+(u.idleMin||15)+'+ minutes, live or on a trip that just ended','Checked every 5 min, 6 AM–9 PM · at most 2 a day per driver','<label class="sw"><input type="checkbox" id="upIdleOn"'+(u.settings.idle?' checked':'')+'><i></i>Text automatically</label><button class="btn2" id="upIdleNow">Who would get one now?</button>')+(u.idleLog&&u.idleLog.length?'<p class="muted" style="font-size:12.5px;margin:6px 0 14px">Recent idle texts: '+u.idleLog.slice(0,8).map(x=>esc(x.who)+' '+x.mins+' min').join(', ')+'</p>':'')+(!u.sms?'<p class="muted">Texting isn’t set up in Render.</p>':'')
+     +'<div class="saf"><div class="panel rp-pan"><h3>Friday driver report</h3><label class="sw"><input type="checkbox" id="upSafOn"'+(u.settings.safety?' checked':'')+'><i></i>Text every driver, Fridays at 5 PM</label>'
+     +'<ul class="safl"><li><b>Driver score</b> out of 100 and their rank</li><li><b>Camera events</b> this week and the worst one</li><li><b>Time at pools</b>: visits and average minutes vs their usual</li><li><b>Ramp spending</b> this week (and how much was gas)</li><li><b>Private link</b> to their report with the clips (works 2 weeks)</li></ul>'
+     +'<p class="muted" style="font-size:13px">Texted to the mobile number on their Airtable record; drivers with no phone get it by email.</p>'
      +'<div class="safq"><input id="upSafName" placeholder="Driver name" value="Callum Curcie"><button class="btn2" id="upSafPrev">Preview</button><button class="btn2" id="upSafTest">Send this to me</button></div><span id="upSafMsg" class="muted"></span></div>'
      +'<div id="upSafOut"><div class="mail"><div class="mail-h"><b>Preview</b><span>Pick a driver and press Preview</span></div></div></div></div>'}
   if(!u.mail)h='<p class="muted">Email isn’t set up in Render yet, so nothing will be sent.</p>'+h;
@@ -5549,10 +5597,11 @@ document.addEventListener('click',async e=>{const n=e.target.closest('#upNav [da
   if(id==='upRenRead')go('/api/upkeep/read-cards',{},()=>{e.target.textContent='Reading... check back in a few minutes';setTimeout(()=>{UP=null;loadUp()},120e3)});
   if(id==='upRenTest')go('/api/upkeep/renewal-test',{},r=>{e.target.textContent=r.sent.length?'Sent: '+r.sent.length:'Nothing due in 30 days'});
   if(id==='upSafPrev'){const v=$('upSafName').value.trim();$('upSafOut').innerHTML='<div class="mail"><div class="mail-h"><b>Loading...</b></div></div>';try{const r=await get('/api/upkeep/safety-preview?name='+encodeURIComponent(v));
-    $('upSafOut').innerHTML=r.error?'<div class="empty">'+esc(r.error)+'</div>':'<div class="mail"><div class="mail-h"><b>'+esc(r.subject)+'</b><span>To: '+esc(r.name)+' · from contact@millennialpools.com</span></div><div class="mail-b">'+esc(r.body).split('\\n').join('<br>')+'</div></div>'}catch(err){$('upSafOut').textContent=err.message}}
+    $('upSafOut').innerHTML=r.error?'<div class="empty">'+esc(r.error)+'</div>':(r.sms?'<div class="mail"><div class="mail-h"><b>Text message</b><span>To: '+esc(r.name)+'</span></div><div class="mail-b">'+esc(r.sms)+'</div></div>':'')+'<div class="mail"><div class="mail-h"><b>'+esc(r.subject)+'</b><span>To: '+esc(r.name)+' · from contact@millennialpools.com</span></div><div class="mail-b">'+esc(r.body).split('\\n').join('<br>')+'</div></div>'}catch(err){$('upSafOut').textContent=err.message}}
+  if(id==='upIdleNow')go('/api/upkeep/idle-now',{},r=>{e.target.textContent=r.wouldText.length?r.wouldText.map(x=>x.who.split(' ')[0]+' ('+x.mins+'m)').join(', '):'Nobody idling '+r.minutes+'+ min right now'});
   if(id==='upSafTest')go('/api/upkeep/safety-sample',{name:$('upSafName').value.trim()},r=>{$('upSafMsg').textContent='Sent '+r.name+'’s email to '+r.to});
 });
-document.addEventListener('change',async e=>{const t=e.target,map={upOilOn:'oil',upRenOn:'renew',upSafOn:'safety'};
+document.addEventListener('change',async e=>{const t=e.target,map={upOilOn:'oil',upRenOn:'renew',upSafOn:'safety',upIdleOn:'idle'};
   if(map[t.id]){try{UP.settings=await post('/api/upkeep/settings',{[map[t.id]]:t.checked});renderUp()}catch(err){alert(err.message);t.checked=!t.checked}return}
   if(t.dataset&&t.dataset.ren){try{await post('/api/upkeep/renewal',{id:t.dataset.id,[t.dataset.ren]:t.value});const x=UP.renew.find(r=>r.id===t.dataset.id);x[t.dataset.ren+'Air']=t.value;if(!x[t.dataset.ren]||x[t.dataset.ren+'Src']!=='checkup'||t.value>x[t.dataset.ren]){x[t.dataset.ren]=t.value;x[t.dataset.ren+'Src']=t.value?'airtable':''}x[t.dataset.ren+'Left']=x[t.dataset.ren]?Math.round((Date.parse(x[t.dataset.ren]+'T12:00')-Date.now())/864e5):null;t.classList.add('saved');setTimeout(renderUp,700)}catch(err){alert(err.message)}}});
 // ---- Purchases tab: hardware-store receipts from Ramp, item by item, with season-end return status ----
