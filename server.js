@@ -741,7 +741,8 @@ async function readInvoice(b) {
     body: JSON.stringify({ model: AI_MODEL, max_tokens: 900, messages: [{ role: 'user', content: [...photos.map(p => ({ type: 'image', source: { type: 'base64', media_type: p.type, data: p.data } })), { type: 'text', text:
       'These photos are all one vehicle repair invoice, receipt or estimate (several pages or angles of the same document). Reply with JSON only, no other text: '
       + '{"shop":"business name","date":"YYYY-MM-DD","total":0.00,"work":"short plain list of the work done, e.g. Oil change, front brake pads and rotors, new serpentine belt","estimate":false,"vin":"","plate":"","mileage":0}. '
-      + 'total is the final amount due or paid, with tax. estimate is true only if it says estimate or quote. mileage is the odometer reading printed on it. Leave out part numbers, prices and labor codes from work. Use "" or 0 for anything not printed.' }] }] }) });
+      + 'date is the day of the service: the invoice date or the repair order opened date, NOT the vehicle delivery, production or warranty date. Dealer invoices often print dates like 12OCT26, which means day 12, October, 2026. '
+      + 'total is the final amount due or paid, with tax. estimate is true only if it says estimate or quote. mileage is the odometer at this service (on dealer invoices "MILEAGE IN/OUT", use the higher number). Leave out part numbers, prices and labor codes from work. Use "" or 0 for anything not printed.' }] }] }) });
   const j = await a.json().catch(() => ({}));
   if (!a.ok) throw new Error('Claude could not read it (' + a.status + '): ' + String((j.error && j.error.message) || '').slice(0, 120));
   const txt = ((j.content || []).find(c => c.type === 'text') || {}).text || '', m = txt.match(/\{[\s\S]*\}/);
@@ -752,7 +753,8 @@ async function readInvoice(b) {
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }), miles = Math.round(+o.mileage || 0);
   let work = clean(o.work || '').replace(/\s+/g, ' ').replace(/\.+$/, '').slice(0, 260);
   if (work && miles > 100 && miles < 2e6) work += ' at ' + miles.toLocaleString('en-US') + ' mi';   // lets the oil-change log pick up the mileage
-  return { ai: true, pages: photos.length, shop: clean(o.shop || '').slice(0, 60), date: /^\d{4}-\d{2}-\d{2}$/.test(o.date || '') && o.date <= today ? o.date : '',
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(o.date || '') && o.date <= today ? o.date : '', age = date ? Math.round((Date.parse(today) - Date.parse(date)) / 864e5) : 0;
+  return { ai: true, pages: photos.length, shop: clean(o.shop || '').slice(0, 60), date, dateWarn: age > 60 ? 'Claude read the date as ' + new Date(date + 'T12:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + ', ' + Math.round(age / 30) + ' months ago. Check it before saving.' : '',
     total: +o.total > 0 ? Math.round(o.total * 100) / 100 : '', work, estimate: o.estimate === true, truckId: t ? t.id : '' };
 }
 async function deleteTruckNote(b) {
@@ -2342,7 +2344,7 @@ async function readAI(){const n=++readN,ai=$('ai');ai.hidden=false;ai.className=
     if(!r.ok)throw new Error(j.error||'Could not read it');if(!j.ai){ai.className='ai';ai.textContent='Fill in the details below (automatic reading is not set up yet).';return}
     const set=(id,v)=>{if(v!==''&&v!=null&&!touched.has(id)){$(id).value=v;$(id).classList.add('filled')}};
     set('shop',j.shop);set('date',j.date);set('tot',j.total);set('work',j.work);if(j.truckId&&!touched.has('truck')){$('truck').value=j.truckId;$('truck').classList.add('filled')}if(!touched.has('est'))$('est').checked=!!j.estimate;
-    ai.className='ai ok';ai.textContent='✨ Filled in from '+(j.pages>1?'the '+j.pages+' photos':'the photo')+'. Check it over, then save.'+(j.truckId?'':' Pick the truck.')}
+    ai.className='ai ok';ai.textContent='✨ Filled in from '+(j.pages>1?'the '+j.pages+' photos':'the photo')+'. Check it over, then save.'+(j.truckId?'':' Pick the truck.')+(j.dateWarn?' ⚠ '+j.dateWarn:'');if(j.dateWarn){ai.className='ai';$('date').classList.remove('filled');$('date').style.borderColor='#f59e0b'}}
   catch(err){if(n===readN){ai.className='ai';ai.textContent='Could not read it automatically ('+err.message+'). Fill in the details below.'}}}
 $('cam').onchange=async e=>{const fs=[...e.target.files].slice(0,10-photos.length);e.target.value='';if(!fs.length)return;
   for(const f of fs){try{const c=await shrink(f,1600);photos.push({type:'image/jpeg',data:c.toDataURL('image/jpeg',.8).split(',')[1]})}catch(err){$('msg').textContent='Could not read one of those photos.'}}
@@ -5431,7 +5433,7 @@ async function repRead(){const n=++repReadN,ai=$('repAi');ai.hidden=false;ai.cla
     if(!j.ai){ai.className='rpai';ai.textContent='Automatic reading needs ANTHROPIC_API_KEY in Render. Fill in the details below.';return}
     const set=(id,v)=>{if(v!==''&&v!=null&&!repTouched.has(id)){$(id).value=v;$(id).classList.add('rpfill')}};
     set('repShop',j.shop);set('repDate',j.date);set('repTot',j.total);set('repWork',j.work);if(j.truckId)set('repTruck',j.truckId);if(!repTouched.has('repEst'))$('repEst').checked=!!j.estimate;
-    ai.className='rpai ok';ai.textContent='✨ Filled in from '+(j.pages>1?'all '+j.pages+' photos':'the photo')+'. Green fields came from the invoice; check them, then save.'+(j.truckId?' Truck matched from the VIN / plate.':'')}
+    ai.className='rpai ok';ai.textContent='✨ Filled in from '+(j.pages>1?'all '+j.pages+' photos':'the photo')+'. Green fields came from the invoice; check them, then save.'+(j.truckId?' Truck matched from the VIN / plate.':'')+(j.dateWarn?' ⚠ '+j.dateWarn:'');if(j.dateWarn){ai.className='rpai';$('repDate').classList.remove('rpfill');$('repDate').style.borderColor='#f59e0b'}}
   catch(err){if(n===repReadN&&$('repAi')){ai.className='rpai';ai.textContent='Could not read it automatically: '+err.message}}}
 document.addEventListener('click',e=>{const b=e.target.closest('[data-rprm]');if(!b)return;e.preventDefault();repPhotos.splice(+b.dataset.rprm,1);repThumbs();if(repPhotos.length)repRead();else{repReadN++;$('repAi').hidden=true}});
 document.addEventListener('change',async e=>{if(e.target.id!=='repCam')return;const fs=[...e.target.files].slice(0,10-repPhotos.length);e.target.value='';if(!fs.length)return;
