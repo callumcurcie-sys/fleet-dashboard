@@ -2842,7 +2842,8 @@ async function safetyText(name, fleet) {
     'Driver score: ' + me.r.score + '/100 (#' + me.r.rank + ' of ' + fleet.length + ')', '',
     'Camera events: ' + (ev.length ? ev.length : 'none, nice work!'),
     ...Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([k, n]) => '• ' + k + (n > 1 ? ' ×' + n : '')),
-    ...(ev.length ? ['Worst: ' + ev[0].k.label + ', ' + when(ev[0].t)] : []), ''];
+    ...(ev.length ? ['Worst: ' + ev[0].k.label + ', ' + when(ev[0].t)] : []), '',
+    ...(speedOn() ? [speedLine(speedWeek().find(r => dupeName(r.name) === dupeName(me.name))), ''] : [])];
   if (wk2) {
     lines.push('Pools: ' + (wk2.visits ? wk2.visits + ' visit' + (wk2.visits > 1 ? 's' : '') + ' · ' + wk2.avg + ' min a pool on average' + (wk2.usual ? ' (your usual: ' + wk2.usual + ' min)' : '') : 'no tech visits logged'));
     lines.push('Ramp card: $' + Math.round(wk2.spend).toLocaleString() + (wk2.n ? ' · ' + wk2.n + ' purchase' + (wk2.n > 1 ? 's' : '') : '') + (wk2.gas ? ' · $' + Math.round(wk2.gas).toLocaleString() + ' gas' : ''), '');
@@ -2858,6 +2859,8 @@ async function safetyMail() {
     const m = await safetyText(row.name, fleet); if (!m) continue;
     try { const how = await notify(d, to, m); if (how) { st.sent[key] = Date.now(); sent.push(row.name); } else skipped.push(row.name); } catch (e) { console.error('Safety report', row.name, e.message); }
   }
+  if (speedOn() && !st.sent['speedrank:' + weekKey()]) { const rows = speedWeek(), me = matchPerson((await atData()).drivers, 'Callum Curcie'), ph = phoneOf(me);
+    if (ph) try { await sendText(ph, 'Fleet dashboard · speeding this week (' + SPEED_OVER + '+ mph)' + String.fromCharCode(10) + (rows.some(r => r.over) ? rows.filter(r => r.over).slice(0, 10).map((r, i) => (i + 1) + '. ' + r.name + ': ' + r.over + '× · top ' + r.top + ' mph' + '').join(String.fromCharCode(10)) : 'Nobody hit ' + SPEED_OVER + ' mph this week.')); st.sent['speedrank:' + weekKey()] = Date.now(); } catch (e) { console.error('Speed ranking text:', e.message); } }
   saveUp(st); return { sent, skipped };
 }
 async function oilMail() {
@@ -2902,6 +2905,130 @@ async function idleCheck(dry) {
 if (process.argv[2] !== 'test') setInterval(() => idleCheck().catch(e => console.error('Idle check:', e.message)), 5 * 60e3);
 routes['/api/cam-issues'] = () => Object.fromEntries(Object.entries(upState().cam || {}).filter(([, c]) => c.since).map(([id, c]) => [id, { what: c.what, since: c.since, texted: !!c.texted, boss: !!c.boss, pic: c.pic || '' }]));
 routes['/api/upkeep/idle-now'] = () => idleCheck(true).then(list => ({ wouldText: list, minutes: IDLE_MIN }));
+// ---- Engine + battery alerts. Azuga pushes these to POST /hook/azuga/<HOOK_KEY> (Admin > Webhooks in Azuga) ----
+// Check-engine codes (DTC / MIL) and battery warnings: text Callum + the driver, and add a note to the truck in Airtable.
+const HOOK_KEY = () => crypto.createHmac('sha256', shareKey() || 'fleet').update('azuga-hook').digest('hex').slice(0, 24);
+const DTC_RE = /\b[PBCU][0-3][0-9A-F]{3}\b/g, DTC_ONE = /\b[PBCU][0-3][0-9A-F]{3}\b/;
+const DTC_KIND = { P: 'engine/transmission', B: 'body', C: 'chassis (brakes, steering)', U: 'computer network' };
+async function dtcWords(codes) {   // { P0420: 'Catalytic converter not working well; usually not urgent' }
+  const out = Object.fromEntries(codes.map(c => [c, DTC_KIND[c[0]] + ' fault (look it up: ' + c + ')']));
+  if (!AI_KEY() || !codes.length) return out;
+  try {
+    const a = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': AI_KEY(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: AI_MODEL, max_tokens: 400, messages: [{ role: 'user', content: 'For each OBD-II trouble code, say what it means in plain words a pool tech understands (max 12 words), then how urgent: "safe to drive", "get it checked this week" or "stop driving". Reply JSON only, like {"P0420":"Catalytic converter not working well · get it checked this week"}. Codes: ' + codes.join(', ') }] }) });
+    const j = await a.json().catch(() => ({})), m = (((j.content || [])[0] || {}).text || '').match(/\{[\s\S]*\}/), o = m ? JSON.parse(m[0]) : {};
+    for (const c of codes) if (typeof o[c] === 'string' && o[c].trim()) out[c] = clean(o[c]).slice(0, 140);
+  } catch (e) { console.error('DTC words:', e.message); }
+  return out;
+}
+// Pull what matters out of one Azuga webhook message
+function hookParse(x) {
+  const type = String(x.messageType || x.type || ''), recs = [].concat(x.dtcMessageRecords || [], x.pendingDtcRecords || []);
+  const codes = [...new Set((JSON.stringify(recs) + ' ' + [x.dtcCode, x.dtcCodes, x.code].filter(Boolean).join(' ')).toUpperCase().match(DTC_RE) || [])];
+  const spn = recs.filter(r => r && r.suspectIdentification != null && !DTC_ONE.test(JSON.stringify(r))).map(r => 'SPN ' + r.suspectIdentification + (r.failureMode != null ? ' FMI ' + r.failureMode : ''));
+  const engine = codes.length || spn.length || (/DTC|(^|_)MIL(_|$)/i.test(type) && (x.milStatus === true || x.milStatus === 1 || /on/i.test(String(x.milStatus))));
+  const battery = x.batteryDisonnected === true || x.batteryDisconnected === true || x.batteryNotCharging === true || /BATTERY/i.test(type);
+  const bWhy = x.batteryDisonnected === true || x.batteryDisconnected === true || /DISCONN/i.test(type) ? 'tracker lost battery power (battery disconnected or dead)' : x.batteryNotCharging === true ? 'battery isn\'t charging (alternator or battery problem)' : 'low battery voltage';
+  return { type, vid: String(x.vehicleId || x.trackeeId || ''), vin: clean(x.deviceAssociatedVIN || x.vin).toUpperCase(), name: clean(x.vehicleName), codes, spn, engine: !!engine, battery, bWhy,
+    pending: /PENDING/i.test(type), miles: Math.round(+x.odometer || +x.vehicleOdometer || 0) || null, at: +x.locationTime || +x.lastKnownTime || Date.now() };
+}
+async function azugaHook(body) {
+  const msgs = [].concat(Array.isArray(body) ? body : body && (body.data || body.messages || body.events) || body || []).filter(x => x && typeof x === 'object');
+  const st = upState(); st.hookSeen = st.hookSeen || {};
+  for (const x of msgs) { const k = String(x.messageType || x.type || 'unknown').slice(0, 40); st.hookSeen[k] = { n: ((st.hookSeen[k] || {}).n || 0) + 1, last: Date.now() }; }
+  saveUp(st);
+  for (const x of msgs) { if (/SPEED/i.test(String(x.messageType || x.type || '')) && !/LIMIT$/i.test(String(x.messageType || ''))) { await speedAdd(x).catch(e => console.error('Speed event:', e.message)); continue; }
+    const p = hookParse(x); if (p.engine || p.battery) await truckAlert(p).catch(e => console.error('Truck alert:', e.message)); }
+  return { ok: true, n: msgs.length };
+}
+async function truckAlert(p, sample) {
+  const st = upState(), at = await atData(), vs = await freshVehicles(), m = matchAll(vs, at.trucks), now = Date.now();
+  const tk = (m[p.vid] || {}).truck || (p.vin && at.trucks.find(t => clean(t.vin).toUpperCase() === p.vin)) || null;
+  const truck = tk ? truckLabelOf(tk) : p.name || 'A truck', d = tk && tk.driver ? matchPerson(at.drivers, tk.driver.name) : null;
+  const items = p.engine ? (p.codes.length ? p.codes : p.spn.length ? p.spn : ['MIL']) : ['BATTERY'];
+  st.alertSent = st.alertSent || {};
+  const fresh = items.filter(c => !(now - (st.alertSent[p.vid + ':' + c] || 0) < (c === 'BATTERY' ? 864e5 : 7 * 864e5)));   // same code again: once a week; battery: once a day
+  if (!sample && !fresh.length) return { skipped: true };
+  if (sample) fresh.splice(0, fresh.length, ...items); else { fresh.forEach(c => { st.alertSent[p.vid + ':' + c] = now; }); saveUp(st); }
+  let what, why;
+  if (p.engine) {
+    const words = await dtcWords(p.codes.filter(c => fresh.includes(c)));
+    what = (p.pending ? 'Possible check-engine problem (pending code)' : 'Check-engine light'); why = fresh.map(c => c === 'MIL' ? 'light on, no code sent yet' : c + ': ' + (words[c] || 'heavy-truck fault code')).join('; ');
+  } else { what = 'Battery warning'; why = p.bWhy; }
+  why = why.charAt(0).toUpperCase() + why.slice(1);
+  const mi = p.miles ? ' at ' + p.miles.toLocaleString() + ' mi' : '';
+  const drvTxt = d ? 'Millennial Pools: Hi ' + d.name.split(' ')[0] + ', ' + truck + ' is showing a ' + what.toLowerCase() + '. ' + why + '. ' + (/stop driving/i.test(why) ? 'Please pull over safely and call Callum.' : 'Callum has been told and will set up a fix. Let him know if the truck drives differently.') : '';
+  const meTxt = 'Fleet dashboard: ' + what + ' on ' + truck + (d ? ' (' + d.name + ')' : '') + mi + '. ' + why + '. Added to the truck notes.';
+  if (sample) { const ph = phoneOf(matchPerson(at.drivers, 'Callum Curcie')); if (!ph) throw new Error('No phone number for Callum Curcie in Airtable.');
+    await sendText(ph, 'SAMPLE · ' + meTxt); if (drvTxt) await sendText(ph, 'SAMPLE (what ' + d.name + ' gets) · ' + drvTxt); return { truck, what, why, me: meTxt, driver: drvTxt }; }
+  if (tk) await addTruckNote({ truckId: tk.id, source: 'Azuga', text: what + mi + ': ' + why }).catch(e => console.error('Alert note:', e.message));
+  st.alertLog = [{ at: now, truck, who: d ? d.name : '', what, why }, ...(st.alertLog || [])].slice(0, 40); saveUp(st);
+  if (st.engine === false) return { truck, what, why, texted: false };
+  const me = matchPerson(at.drivers, 'Callum Curcie'), mePh = phoneOf(me);
+  if (mePh) await sendText(mePh, meTxt).catch(e => console.error('Alert text Callum:', e.message));
+  if (d && phoneOf(d) && (!me || d.name !== me.name)) await sendText(phoneOf(d), drvTxt)
+    .catch(e => console.error('Alert text driver:', e.message));
+  console.log(new Date().toISOString(), 'Truck alert', truck, what, why);
+  return { truck, what, why, texted: true };
+}
+globalThis.azugaHook = azugaHook; globalThis.HOOK_KEY = HOOK_KEY;
+// ---- Speeding: Azuga's "Posted Over speeding" / "Over Speeding" webhooks (same /hook/azuga address) ----
+// Each one is kept for 35 days. Start + end messages of the same episode (same truck, within 3 min) count once.
+const SPEED_OVER = +process.env.SPEED_ALERT_MPH || 90;   // anything at or over this speed counts, whatever the limit
+async function speedAdd(x) {
+  const peak = Math.round(+x.peakSpeed || +x.deviceMaxSpeed || +x.maxSpeed || +x.deviceSpeed || +x.speed || 0), limit = Math.round(+x.postedSpeedLimit || +x.speedLimit || 0);
+  if (!peak) return;
+  const st = upState(), at = await atData(), m = matchAll(await freshVehicles(), at.trucks), vid = String(x.vehicleId || x.trackeeId || ''), tk = (m[vid] || {}).truck;
+  const who = (tk && tk.driver && tk.driver.name) || clean(x.userName) || '', t = +x.locationTime || +x.lastKnownTime || Date.now(), now = Date.now();
+  const log = (st.speedLog || []).filter(e => e.t > now - 35 * 864e5), same = log.find(e => e.vid === vid && Math.abs(e.t - t) < 3 * 6e4);
+  if (same) { if (peak > same.peak) { same.peak = peak; if (limit) same.limit = limit; } }
+  else log.unshift({ vid, t, peak, limit, who, truck: tk ? truckLabelOf(tk) : clean(x.vehicleName) });
+  st.speedLog = log.slice(0, 3000); saveUp(st);
+}
+const speedOn = () => Object.keys(upState().hookSeen || {}).some(k => /SPEED/i.test(k));
+function speedWeek(days = 7) {
+  const since = Date.now() - days * 864e5, by = {};
+  for (const e of upState().speedLog || []) { if (e.t < since || !e.who) continue; const k = dupeName(e.who), r = by[k] = by[k] || { name: e.who, top: 0, topLimit: 0, over: 0, events: 0, worst: null };
+    r.events++; if (e.peak >= SPEED_OVER) { r.over++; if (!r.worst || e.peak > r.worst.peak) r.worst = e; }
+    if (e.peak > r.top) { r.top = e.peak; r.topLimit = e.limit; } }
+  return Object.values(by).sort((a, b) => b.over - a.over || b.top - a.top);
+}
+const speedLine = r => !r || !r.over ? 'Speeding: never hit ' + SPEED_OVER + ' mph, nice work!'
+  : 'Speeding: ' + r.over + ' time' + (r.over > 1 ? 's' : '') + ' at ' + SPEED_OVER + '+ mph · top speed ' + r.top + ' mph';
+routes['/api/speeding'] = q => ({ connected: speedOn(), over: SPEED_OVER, rows: speedWeek(Math.min(35, +q.get('days') || 7)) });
+
+// ---- Tracker + camera health: once a day, text Callum about any NEW problem; the Upkeep page lists all of them ----
+// Tracker: no signal for 3+ days on an active truck (unplugged, dead, or truck parked). Camera: the truck is driving but
+// its camera has sent no events for 7+ days (camera offline). Newly linked cameras get 7 days before they can be flagged.
+async function healthCheck(dry) {
+  const st = upState(), at = await atData(), vs = await freshVehicles(), m = matchAll(vs, at.trucks), now = Date.now();
+  const raw = await routes['/api/locations']().catch(() => []), locs = Object.fromEntries(list(raw && raw.data !== undefined ? raw.data : raw).map(l => [l.trackeeId, l]));
+  const lastEv = {}; (await events30()).forEach(e => { if (e.t > (lastEv[e.vehicleId] || 0)) lastEv[e.vehicleId] = e.t; });
+  const h = st.health = st.health || { cams: {}, open: {} }, rows = [];
+  for (const v of vs) {
+    const tk = (m[v.trackeeId] || {}).truck; if (!tk || tk.active === false || v.deletedTrackee) continue;
+    const l = locs[v.trackeeId] || {}, seen = Math.max(+v.lastContactDate || 0, +l.dateAndTime || 0, +l.lastKnownTime || 0), truck = truckLabelOf(tk), who = tk.driver ? tk.driver.name : '';
+    const days = seen ? Math.floor((now - seen) / 864e5) : null;
+    if (days == null || days >= 3) rows.push({ key: v.trackeeId + ':trk', kind: 'tracker', truck, who, days, seen, why: seen ? 'No tracker signal for ' + days + ' days' : 'Tracker has never reported' });
+    const cam = clean(v.safetyCamSerialNumber || v.safetyCam); if (!cam) continue;
+    const c = h.cams[v.trackeeId]; if (!c || c.serial !== cam) h.cams[v.trackeeId] = { serial: cam, since: now };
+    const linked = h.cams[v.trackeeId].since, ev = lastEv[v.trackeeId] || 0, quiet = Math.floor((now - Math.max(ev, linked)) / 864e5);
+    if (days != null && days < 2 && quiet >= 7) rows.push({ key: v.trackeeId + ':cam:' + cam, kind: 'camera', truck, who, cam, days: quiet, seen: ev, why: 'Truck is driving but camera ' + cam + ' has sent no events for ' + (ev ? quiet + ' days' : '7+ days') });
+  }
+  const fresh = rows.filter(r => !h.open[r.key]);
+  if (!dry) {
+    const keep = {}; rows.forEach(r => { keep[r.key] = h.open[r.key] || now; }); h.open = keep; h.rows = rows; h.last = now; saveUp(st);
+    if (fresh.length && st.health_on !== false) {
+      const me = matchPerson(at.drivers, 'Callum Curcie'), ph = phoneOf(me);
+      const txt = 'Fleet dashboard: ' + fresh.length + ' new device problem' + (fresh.length > 1 ? 's' : '') + String.fromCharCode(10) + fresh.slice(0, 8).map(r => '• ' + r.truck + (r.who ? ' (' + r.who.split(' ')[0] + ')' : '') + ': ' + r.why).join(String.fromCharCode(10)) + (fresh.length > 8 ? String.fromCharCode(10) + '+ ' + (fresh.length - 8) + ' more on the Upkeep page' : '');
+      if (ph) await sendText(ph, txt).catch(e => console.error('Health text:', e.message));
+    }
+  }
+  return { rows, fresh: fresh.map(r => r.key) };
+}
+routes['/api/upkeep/health'] = () => { const s = upState(), h = s.health || {}; return { rows: h.rows || [], last: h.last || 0, open: h.open || {}, alerts: s.alertLog || [], hookSeen: s.hookSeen || {}, hookUrl: (clean(process.env.PUBLIC_URL) || lastBase || 'https://fleet-dashboard-oxei.onrender.com').replace(/\/$/, '') + '/hook/azuga/' + HOOK_KEY(), engine: s.engine !== false, health: s.health_on !== false }; };
+if (process.argv[2] !== 'test') setInterval(() => { const st = upState(), et = etNow(), day = et.toLocaleDateString('en-CA');
+  if (et.getHours() >= 9 && st.healthDay !== day) { st.healthDay = day; saveUp(st); healthCheck().catch(e => console.error('Health check:', e.message)); } }, 15 * 60e3);
 // Camera view check: once a day Claude looks at the newest road + driver snapshots from each truck's camera events.
 // Blocked or pointing the wrong way -> text the driver. Still wrong at the next day's check -> text Callum too.
 const CAM_HOUR = +process.env.CAM_CHECK_HOUR || 11, CAM_MODEL = clean(process.env.CAM_CHECK_MODEL) || 'claude-sonnet-4-5', CAM_ROAD_PCT = +process.env.CAM_ROAD_PCT || 10;   // under 10% road (or under 20% with no horizon) = not facing the road
@@ -3076,7 +3203,7 @@ routes['/api/upkeep'] = async () => {
   const pp = personalPeople(at), locs = Object.fromEntries(((await rampYear().catch(() => ({ card: [] }))).card || []).filter(t => t.loc).map(t => [t.id, t.loc]));
   const gas = Object.entries(done).map(([id, x]) => ({ id, ...x, personal: !!matchPerson(pp, x.who), sta: x.sta || (locs[id] ? [locs[id].city, locs[id].state].filter(Boolean).join(', ') + (locs[id].zip ? ' ' + locs[id].zip : '') : ''), truck: tk[x.truckId] ? tname(tk[x.truckId]) : '', tank: tankOf(tk[x.truckId]), link: 'https://app.ramp.com/business-overview/transactions/' + id })).sort((a, b) => b.flags.length - a.flags.length || Date.parse(b.at) - Date.parse(a.at));
   const renew = (await renewRows()).map(({ t, ...x }) => x);
-  return { cost, oil, oilMiles: OIL_MI, gas, gasOk: GAS_OK, personalRoles: PERSONAL_ROLES, personalNames: pp.map(d => d.name), gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew, idle: !!st.idle, camchk: !!st.camchk }, camRows: st.camRows || [], camLast: st.camLast || 0, camHour: CAM_HOUR, idleMin: IDLE_MIN, idleLog: (st.idleLog || []).slice(0, 15), mail: mailReady(), sms: !!TXT_KEY(), ai: !!AI_KEY() };
+  return { cost, oil, oilMiles: OIL_MI, gas, gasOk: GAS_OK, personalRoles: PERSONAL_ROLES, personalNames: pp.map(d => d.name), gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew, idle: !!st.idle, camchk: !!st.camchk, engine: st.engine !== false, health_on: st.health_on !== false }, camRows: st.camRows || [], camLast: st.camLast || 0, camHour: CAM_HOUR, idleMin: IDLE_MIN, idleLog: (st.idleLog || []).slice(0, 15), mail: mailReady(), sms: !!TXT_KEY(), ai: !!AI_KEY() };
 };
 routes['/api/upkeep/flags'] = async () => { const pp = personalPeople(await atData()); return { gas: Object.values(gasChk()).filter(x => !matchPerson(pp, x.who) && x.verdict === 'far' && !x.ok && !(x.flags || []).some(f => /^Truck was parked/.test(f))).length }; };
 routes['/api/upkeep/safety-preview'] = async q => (await safetyText(q.get('name') || 'Callum Curcie')) || { error: 'No score for that name yet.' };
@@ -3089,7 +3216,10 @@ const UPKEEP_POSTS = {
   '/api/upkeep/cam-sample': () => camSample(),
   '/api/upkeep/gas-ok': b => { const done = gasChk(), r = done[String(b.id || '')]; if (!r) throw new Error('That fill-up is no longer in the list. Refresh.');
     r.ok = b.why === '' ? '' : GAS_OK.includes(b.why) ? b.why : GAS_OK[3]; saveGasChk(done); return { ok: true, why: r.ok }; },
-  '/api/upkeep/settings': b => { const st = upState(); ['safety', 'oil', 'renew', 'idle', 'camchk'].forEach(k => { if (k in b) st[k] = b[k] === true; }); saveUp(st); return { safety: st.safety, oil: st.oil, renew: st.renew, idle: !!st.idle, camchk: !!st.camchk }; },
+  '/api/upkeep/settings': b => { const st = upState(); ['safety', 'oil', 'renew', 'idle', 'camchk', 'engine', 'health_on'].forEach(k => { if (k in b) st[k] = b[k] === true; }); saveUp(st); return { safety: st.safety, oil: st.oil, renew: st.renew, idle: !!st.idle, camchk: !!st.camchk, engine: st.engine !== false, health_on: st.health_on !== false }; },
+  '/api/upkeep/health-now': () => healthCheck(true),
+  '/api/upkeep/alert-sample': async b => { const at = await atData(), tk = at.trucks.find(t => t.id === b.truckId) || at.trucks.find(t => t.vin && t.driver && !/callum/i.test(t.driver.name)) || at.trucks.find(t => t.vin);
+    if (!tk) throw new Error('No truck with a VIN in Airtable.'); return truckAlert({ vid: '', vin: clean(tk.vin).toUpperCase(), name: '', codes: [b.battery ? '' : 'P0420'].filter(Boolean), spn: [], engine: !b.battery, battery: !!b.battery, bWhy: 'battery isn\'t charging (alternator or battery problem)', miles: null }, true); },
   '/api/upkeep/renewal': setRenewal,
   '/api/upkeep/read-cards': () => { readRenewals(40).catch(e => console.error('Renewals:', e.message)); return { started: true }; },
   '/api/upkeep/gas-check': () => { checkGas(40); return { started: true }; },
@@ -3245,6 +3375,13 @@ http.createServer(async (req, res) => {
   const base = (req.headers['x-forwarded-proto'] || 'http') + '://' + (req.headers.host || 'localhost');
   if (!process.env.PUBLIC_URL && req.headers.host && !/localhost|127\.0\.0\.1/.test(req.headers.host)) lastBase = base;
   // Public SMS policy pages (needed for the Textedly / carrier 10DLC registration). No login.
+  if (req.url.split('?')[0].startsWith('/hook/azuga/')) {   // public: Azuga webhooks (check-engine codes, battery). The secret is in the address.
+    if (!shareKey() || req.url.split('?')[0].slice(12) !== globalThis.HOOK_KEY()) { res.writeHead(404); return res.end(); }
+    let b = {}; if (req.method === 'POST') { try { b = await readJson(req, 2e6); } catch (e) { console.error('Azuga hook body:', e.message); } }
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}');
+    if (req.method === 'POST') globalThis.azugaHook(b).catch(e => console.error('Azuga hook:', e.message));
+    return;
+  }
   if (req.url.split('?')[0] === '/pom') {   // public: opens Pool Office Manager from a text
     const to = clean(process.env.POM_APP_LINK);
     if (/^(https?:|[a-z][a-z0-9+.-]*:\/\/)/i.test(to)) { res.writeHead(302, { Location: to, 'Cache-Control': 'no-store' }); return res.end(); }
@@ -4382,7 +4519,7 @@ body[data-v=vCam]:not([data-v=vMap]) .bar{max-width:1400px}
  <div id="buySum"></div><div class="bchips" id="buyChips"></div><div class="rp-grid"><div id="buyList"></div><aside id="buySide"></aside></div></div>
 </div>
 <div id="vUp" hidden>
- <div class="crewhead"><div><h2>Upkeep</h2><p id="upCount" class="muted">Oil changes, renewals and driver texts</p></div><span style="flex:1"></span><div class="rnav" id="upNav"><button data-us="oil" class="on">Oil changes</button><button data-us="ren">Renewals</button><button data-us="saf">Driver texts</button></div></div>
+ <div class="crewhead"><div><h2>Upkeep</h2><p id="upCount" class="muted">Oil changes, renewals and driver texts</p></div><span style="flex:1"></span><div class="rnav" id="upNav"><button data-us="oil" class="on">Oil changes</button><button data-us="ren">Renewals</button><button data-us="saf">Driver texts</button><button data-us="hl">Truck health</button></div></div>
  <div id="usBody"><div class="empty">Loading...</div></div>
 </div>
 <div id="vCam" hidden>
@@ -5666,8 +5803,14 @@ function renderRampUp(){if(!UP)return;
     +'<div class="panel rp-pan"><h3>How it works</h3><p class="muted" style="margin:0;font-size:13px">For every gas charge on a Ramp card, the dashboard looks at where the card holder’s trucks were (Azuga) within 30 minutes. If none of theirs was there, it checks every company truck, since crews swap trucks. It is marked red only when their own truck was out driving somewhere else and no company truck was at the station. If their truck just sat parked, it is grey: they were most likely in another vehicle (some trucks have no tracker). Gallons over the tank size and a 2nd fill-up with little driving are shown in grey as things to glance at (often gas cans or equipment). Use “Mark OK” to clear anything you know is fine. '+(UP.personalNames&&UP.personalNames.length?'District managers ('+UP.personalNames.map(esc).join(', ')+') use a personal car and a work truck, so their fill-ups only count for a truck when GPS puts it at the pump; the rest are listed under “Personal + work vehicle”.':'')+'</p></div></aside></div>'}
 const camRowsHtml=(rows,last)=>{if(!rows||!rows.length)return '';const bad=rows.filter(r=>r.bad&&r.bad.length);
   return '<div class="panel rp-pan camchk"><h3>Cameras '+(last?'<small class="muted">checked '+esc(new Date(last).toLocaleString('en-US',{weekday:'short',hour:'numeric',minute:'2-digit'}))+'</small>':'')+'</h3>'+(bad.length?bad.map(r=>'<div class="cqr bad"><b>'+esc(r.truck)+'</b><span>'+esc(r.who||'')+'</span><em>'+r.bad.map(b=>(b.cam==='road'?'Road':'Driver')+' camera: '+esc(b.issue.replace('_',' '))+(b.note?' ('+esc(b.note)+')':'')).join(' · ')+'</em>'+r.bad.filter(b=>b.pic).map(b=>'<a href="'+esc(b.pic)+'" target="_blank" rel="noopener" title="Open full size"><img class="cqpic" src="'+esc(b.pic)+'" alt="'+(b.cam==='road'?'Road':'Driver')+' camera snapshot" loading="lazy"></a>').join('')+'</div>').join(''):'<div class="cqr ok">No problems found on the '+rows.length+' trucks with a snapshot this week.</div>')
-   +'<details class="cqall"><summary>What Claude measured on each truck</summary>'+rows.map(r=>{const s=r.seen||{},rd=s.road,dv=s.driver;return '<div class="cqm"><b>'+esc(r.truck)+'</b> <span>'+esc(r.who||'')+'</span><small>'+(rd?'Road '+Math.round(+rd.roadPct||0)+'% of picture'+(rd.note?' ('+esc(rd.note)+')':''):'No road image')+' · '+(dv?(dv.person===false?'No one in the seat':dv.wholeFace===false||(dv.cutOff&&dv.cutOff!=='none')?'Face not fully visible'+(dv.cutOff&&dv.cutOff!=='none'?' (cut off '+esc(dv.cutOff)+')':''):'Whole face visible'):'No driver image')+'</small></div>'}).join('')+'</details></div>'};
+   +'<details class="cqall"><summary>What Claude measured on each truck</summary>'+rows.map(r=>{const s=r.seen||{},rd=s.road,dv=s.driver;return '<div class="cqm"><b>'+esc(r.truck)+'</b> <span>'+esc(r.who||'')+'</span><small>'+(rd?'Road '+Math.round(+rd.roadPct||0)+'% of picture'+(rd.note?' ('+esc(rd.note)+')':''):'No road image')+' · '+(dv?(dv.person===false?'No one in the seat':dv.eyesNoseMouth===false?'Face not visible'+(dv.note?' ('+esc(dv.note)+')':''):'Face visible'):'No driver image')+'</small></div>'}).join('')+'</details></div>'};
 const upRem=(icon,title,on,how,who,when,actions)=>'<div class="rmc wide'+(on?' live':'')+'"><div class="rmh"><span class="rmi">'+icon+'</span><div><b>'+title+'</b><small>'+how+'</small></div>'+(on?'<span class="rmpill on">● On</span>':'<span class="rmpill off">Off</span>')+'</div><dl class="rmd"><dt>About</dt><dd>'+who+'</dd><dt>When</dt><dd>'+when+'</dd></dl><div class="rma">'+actions+'</div></div>';
+let HL=null;
+let SPD=null;
+function spdHtml(){if(!SPD){get('/api/speeding').then(r=>{SPD=r;const el=$('upSpd');if(el)el.innerHTML=spdHtml()}).catch(()=>{});return '<p class="muted">Loading...</p>'}
+  if(!SPD.connected)return '<p class="muted">Not connected yet: add the speeding events to the Azuga webhook (Upkeep → Truck health has the steps).</p>';
+  const rows=SPD.rows.filter(r=>r.over);if(!rows.length)return '<p class="muted">Nobody hit '+SPD.over+' mph this week.</p>';
+  return '<table class="tbl" style="width:100%;font-size:13.5px"><tr><th style="text-align:left">#</th><th style="text-align:left">Tech</th><th style="text-align:left">'+SPD.over+'+ mph</th><th style="text-align:left">Top speed</th></tr>'+rows.map((r,i)=>'<tr><td>'+(i+1)+'</td><td>'+esc(r.name)+'</td><td>'+(r.over?'<b style="color:#c2410c">'+r.over+'×</b>':'0')+'</td><td>'+r.top+' mph</td></tr>').join('')+'</table>'}
 function renderUp(){const u=UP;if(!u)return;let h='';
   if(USEC==='oil'){const o=Array.isArray(u.oil)?u.oil.filter(upf):[],lab={due:'Due now',soon:'Due soon',ok:'OK',unknown:'No record'};
     $('upCount').textContent='Due every '+u.oilMiles.toLocaleString()+' miles or 6 months · last change comes from invoices saved in the truck notes';
@@ -5692,10 +5835,21 @@ function renderUp(){const u=UP;if(!u)return;let h='';
     h=kpis([[r.filter(x=>soon(x.insLeft)).length,'insurance due in 30 days','bad'],[r.filter(x=>soon(x.regLeft)).length,'registrations due in 30 days','bad'],[r.filter(x=>!x.reg).length,'trucks with no registration date','warn'],[r.filter(x=>x.ins&&x.reg&&!need(x)).length,'all set','good']])
      +upRem('📄','Renewal reminder',u.settings.renew,'Email to callum@millennialpools.com with the card attached','Any truck whose insurance or registration runs out within 30 days','Checked every day from 8 AM · once per renewal','<label class="sw"><input type="checkbox" id="upRenOn"'+(u.settings.renew?' checked':'')+'><i></i>Send automatically</label><button class="btn2" id="upRenRead"'+(u.ai?'':' disabled title="Needs ANTHROPIC_API_KEY"')+'>Read cards now</button><button class="btn2" id="upRenTest">Send due reminders now</button>')
      +grp('Due in 30 days or expired',r.filter(need).sort((a,b)=>lt(a)-lt(b)),'bad')+grp('Missing a date',r.filter(miss),'warn')+grp('All set',r.filter(x=>!need(x)&&!miss(x)).sort((a,b)=>lt(a)-lt(b)),'good')}
+  if(USEC==='hl'){$('upCount').textContent='Check-engine codes and battery warnings as they happen, plus a daily check that every tracker and camera is still working';
+    if(!HL){get('/api/upkeep/health').then(r=>{HL=r;if(USEC==='hl')renderUp()}).catch(err=>{$('usBody').innerHTML='<div class="empty">'+esc(err.message)+'</div>'});h='<div class="empty">Loading...</div>'}
+    else{const hs=Object.entries(HL.hookSeen||{}),ago=t=>t?new Date(t).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'';
+      h=upRem('🔧','Check-engine &amp; battery texts',u.settings.engine,'Text to you and the driver · note added to the truck in Airtable','Check-engine codes (Claude explains each one in plain words and how urgent it is) and battery warnings, sent by Azuga the moment they happen','As they happen · the same code at most once a week per truck, battery once a day','<label class="sw"><input type="checkbox" id="upEngOn"'+(u.settings.engine?' checked':'')+'><i></i>Text automatically</label><button class="btn2" id="upAlertSample">Text me a sample</button>')
+       +(hs.length?'<p class="muted" style="font-size:12.5px;margin:6px 0 10px">Azuga is connected. Messages received: '+hs.map(([k,v])=>esc(k)+' ×'+v.n+' (last '+ago(v.last)+')').join(', ')+'</p>'
+        :'<div class="panel" style="margin:8px 0 14px;padding:14px 16px"><b>One-time setup in Azuga</b><p class="muted" style="font-size:13px;margin:6px 0">Azuga only sends these to a web address you give it. Go to Admin → Webhooks → add a webhook with this address, and turn on <b>DTC Message</b>, <b>Pending DTC Info</b>, <b>Vehicle Mil Info</b>, <b>Over Speeding</b> and <b>Posted Over speeding Event</b> (and any battery event). Keep the address private.</p><input readonly style="width:100%;padding:8px 10px;border-radius:8px" value="'+esc(HL.hookUrl)+'" onclick="this.select()"></div>')
+       +((HL.alerts||[]).length?'<p class="muted" style="font-size:12.5px;margin:0 0 14px">Recent: '+HL.alerts.slice(0,8).map(x=>esc(x.truck)+' · '+esc(x.what)+' ('+ago(x.at)+')').join(', ')+'</p>':'')
+       +upRem('📡','Tracker &amp; camera health',u.settings.health_on,'Text to you, once for each new problem','Trackers with no signal for 3+ days (unplugged, dead, or the truck is parked), and cameras with no events for 7+ days while the truck is driving (camera offline)','Every day at 9 AM','<label class="sw"><input type="checkbox" id="upHlOn"'+(u.settings.health_on?' checked':'')+'><i></i>Text automatically</label><button class="btn2" id="upHlNow">Check now (no texts)</button>')
+       +((HL.rows||[]).length?'<div class="ukg">'+HL.rows.map(r=>'<div class="rmc"><div class="rmh"><span class="rmi">'+(r.kind==='camera'?'📷':'📡')+'</span><div><b>'+esc(r.truck)+'</b><small>'+esc(r.who||'No driver')+'</small></div><span class="rmpill off">'+(r.kind==='camera'?'Camera':'Tracker')+'</span></div><p style="margin:8px 0 0;font-size:13.5px">'+esc(r.why)+(r.seen?' · last '+ago(r.seen):'')+'</p></div>').join('')+'</div>'
+        :'<p class="muted">'+(HL.last?'No tracker or camera problems at the last check ('+ago(HL.last)+').':'Not checked yet. Press Check now.')+'</p>')}}
   if(USEC==='saf'){$('upCount').textContent='Idling texts as it happens, and every Friday at 5 PM each driver gets their score, camera events, time at pools and Ramp spending';
     h=upRem('⏱️','Long idling text',u.settings.idle,'Text to the driver','Any truck idling '+(u.idleMin||15)+'+ minutes, live or on a trip that just ended','Checked every 5 min, 6 AM–9 PM · at most 2 a day per driver','<label class="sw"><input type="checkbox" id="upIdleOn"'+(u.settings.idle?' checked':'')+'><i></i>Text automatically</label><button class="btn2" id="upIdleNow">Who would get one now?</button>')+(u.idleLog&&u.idleLog.length?'<p class="muted" style="font-size:12.5px;margin:6px 0 14px">Recent idle texts: '+u.idleLog.slice(0,8).map(x=>esc(x.who)+' '+x.mins+' min').join(', ')+'</p>':'')+(!u.sms?'<p class="muted">Texting isn’t set up in Render.</p>':'')
      +upRem('📷','Camera view check',u.settings.camchk,'Text to the driver · text to you if it isn’t fixed by the next day','Each truck’s newest snapshots, read by Claude: the road camera must face straight down the road, and the driver camera must show the driver’s whole face','Every day at '+((u.camHour||11)>12?(u.camHour-12)+' PM':(u.camHour||11)+' AM')+' · trucks with no camera event this week can’t be checked','<label class="sw"><input type="checkbox" id="upCamOn"'+(u.settings.camchk?' checked':'')+'><i></i>Check automatically</label><button class="btn2" id="upCamNow">Check cameras now (no texts)</button><button class="btn2" id="upCamSample">Text me samples</button>')
      +'<div id="upCamOut">'+camRowsHtml(u.camRows,u.camLast)+'</div>'
+     +'<div class="panel" style="margin:14px 0;padding:14px 16px"><h3 style="margin:0 0 4px">Speeding this week</h3><p class="muted" style="font-size:13px;margin:0 0 8px">Times each tech hit '+((SPD&&SPD.over)||90)+'+ mph, and their top speed. Each driver’s own line goes in their Friday text, and you get this ranking by text Fridays at 5 PM.</p><div id="upSpd">'+spdHtml()+'</div></div>'
      +'<div class="saf"><div class="panel rp-pan"><h3>Friday driver report</h3><label class="sw"><input type="checkbox" id="upSafOn"'+(u.settings.safety?' checked':'')+'><i></i>Text every driver, Fridays at 5 PM</label>'
      +'<ul class="safl"><li><b>Driver score</b> out of 100 and their rank</li><li><b>Camera events</b> this week, each kind and the worst one</li><li><b>Time at pools</b>: visits and average minutes vs their usual</li><li><b>Ramp spending</b> this week (and how much was gas)</li><li><b>Private link</b> to their report with the clips (works 2 weeks)</li></ul>'
      +'<p class="muted" style="font-size:13px">Texted to the mobile number on their Airtable record; drivers with no phone get it by email.</p>'
@@ -5716,10 +5870,12 @@ document.addEventListener('click',async e=>{const n=e.target.closest('#upNav [da
     $('upSafOut').innerHTML=r.error?'<div class="empty">'+esc(r.error)+'</div>':(r.sms?'<div class="mail"><div class="mail-h"><b>Text message</b><span>To: '+esc(r.name)+'</span></div><div class="mail-b">'+esc(r.sms)+'</div></div>':'')+'<div class="mail"><div class="mail-h"><b>'+esc(r.subject)+'</b><span>To: '+esc(r.name)+' · from contact@millennialpools.com</span></div><div class="mail-b">'+esc(r.body).split('\\n').join('<br>')+'</div></div>'}catch(err){$('upSafOut').textContent=err.message}}
   if(id==='upCamNow'){e.target.textContent='Checking every camera (a minute or two)...';go('/api/upkeep/cam-check',{dry:true},r=>{e.target.textContent='Check cameras now (no texts)';$('upCamOut').innerHTML=camRowsHtml(r.rows,Date.now())||'<p class="muted">No camera snapshots from this week to check.</p>'});}
   if(id==='upCamSample'){e.target.textContent='Checking and texting you...';go('/api/upkeep/cam-sample',{},r=>{e.target.textContent=r.sent?'Sent you '+r.sent+' sample'+(r.sent>1?'s':''):'No camera problems to sample';$('upCamOut').innerHTML=camRowsHtml(r.rows,Date.now())})}
+  if(id==='upAlertSample'){e.target.textContent='Texting you...';go('/api/upkeep/alert-sample',{},r=>{e.target.textContent='Sent you a sample ('+r.truck+')'})}
+  if(id==='upHlNow'){e.target.textContent='Checking every tracker and camera...';go('/api/upkeep/health-now',{},r=>{HL.rows=r.rows;HL.last=Date.now();renderUp()})}
   if(id==='upIdleNow')go('/api/upkeep/idle-now',{},r=>{e.target.textContent=r.wouldText.length?r.wouldText.map(x=>x.who.split(' ')[0]+' ('+x.mins+'m)').join(', '):'Nobody idling '+r.minutes+'+ min right now'});
   if(id==='upSafTest')go('/api/upkeep/safety-sample',{name:$('upSafName').value.trim()},r=>{$('upSafMsg').textContent='Sent '+r.name+'’s email to '+r.to});
 });
-document.addEventListener('change',async e=>{const t=e.target,map={upOilOn:'oil',upRenOn:'renew',upSafOn:'safety',upIdleOn:'idle',upCamOn:'camchk'};
+document.addEventListener('change',async e=>{const t=e.target,map={upOilOn:'oil',upRenOn:'renew',upSafOn:'safety',upIdleOn:'idle',upCamOn:'camchk',upEngOn:'engine',upHlOn:'health_on'};
   if(map[t.id]){try{UP.settings=await post('/api/upkeep/settings',{[map[t.id]]:t.checked});renderUp()}catch(err){alert(err.message);t.checked=!t.checked}return}
   if(t.dataset&&t.dataset.ren){try{await post('/api/upkeep/renewal',{id:t.dataset.id,[t.dataset.ren]:t.value});const x=UP.renew.find(r=>r.id===t.dataset.id);x[t.dataset.ren+'Air']=t.value;if(!x[t.dataset.ren]||x[t.dataset.ren+'Src']!=='checkup'||t.value>x[t.dataset.ren]){x[t.dataset.ren]=t.value;x[t.dataset.ren+'Src']=t.value?'airtable':''}x[t.dataset.ren+'Left']=x[t.dataset.ren]?Math.round((Date.parse(x[t.dataset.ren]+'T12:00')-Date.now())/864e5):null;t.classList.add('saved');setTimeout(renderUp,700)}catch(err){alert(err.message)}}});
 // ---- Purchases tab: hardware-store receipts from Ramp, item by item, with season-end return status ----
