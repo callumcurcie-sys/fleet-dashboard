@@ -406,8 +406,12 @@ function matchAll(vs, trucks) {
   return m;
 }
 // What Azuga should change to match Airtable.
+// Azuga vehicle names start with the truck number ("#16 2008 Ford Ranger") so an empty truck can be told apart in live cam
+const azName = t => { const no = String(t.truckNo || '').split(/[ ~(]/)[0].replace(/^#/, ''), car = [t.year, clean(t.make), clean(t.model)].filter(Boolean).join(' '), pl = normPlate(t.plate || '');
+  return (no ? '#' + no + ' ' + car : pl ? car + ' · ' + pl : '').trim().slice(0, 100); };   // no truck # yet: the plate keeps them apart
 async function diffFor(v, t) {
   const changes = {}, notes = [];
+  if (azName(t) && clean(v.name) !== azName(t)) changes.name = azName(t);
   if (t.vin && /^[A-HJ-NPR-Z0-9]{17}$/.test(t.vin) && t.vin !== normVin(v.vin)) changes.vin = t.vin;
   const p = normPlate(t.plate);
   if (p && !PLATE_OK.test(p)) notes.push('Airtable plate "' + t.plate + '" is not a plate number, so it was not sent to Azuga.');
@@ -422,6 +426,20 @@ async function diffFor(v, t) {
     else if (!ad.ids.includes(v.userId)) changes.userId = ad.id;
   }
   return { changes, notes };
+}
+// One-off (and safe to repeat): put the truck number in every linked Azuga vehicle's name. limit: how many to change this time.
+async function nameTrucks(b) {
+  const [vs, at] = await Promise.all([freshVehicles(), atData()]), m = matchAll(vs, at.trucks), out = [], skip = [];
+  for (const v of vs) { const x = m[v.trackeeId]; if (!x || !x.truck || x.dupe) continue;
+    const want = azName(x.truck); if (!want) { skip.push(clean(v.name) + ' (no truck # or plate in Airtable)'); continue; }
+    if (clean(v.name) !== want) out.push({ id: v.trackeeId, from: clean(v.name), to: want }); }
+  if (b.dry) return { change: out, skip };
+  const done = [], failed = [];
+  for (const c of out.slice(0, Math.max(1, Math.min(100, +b.limit || 100)))) {
+    try { await sendUpdate(await buildUpdate({ trackeeId: c.id, name: c.to }, await freshVehicles())); done.push(c); } catch (e) { failed.push({ ...c, error: e.message }); }
+    await sleep(800);
+  }
+  cache.delete('fresh'); return { done, failed, left: out.length - done.length - failed.length, skip };
 }
 async function atLinks() {
   if (!AIRTABLE_TOKEN) return { connected: false };
@@ -3136,7 +3154,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/truck/take-out': takeOutDriver, '/api/text/sample': textSample, '/api/repair/read': readInvoice, '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/svc/test': () => svcTest(), '/api/eod/test': () => eodTest(), '/api/eod/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.eod = { ...(st.eod || {}), on: b.on === true }; saveMail(st); return { on: st.eod.on }; }, '/api/svc/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.svc = { ...(st.svc || { day: '', sent: {} }), on: b.on === true }; saveMail(st); return { on: st.svc.on }; }, '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/azuga/name-trucks': nameTrucks, '/api/truck/take-out': takeOutDriver, '/api/text/sample': textSample, '/api/repair/read': readInvoice, '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/svc/test': () => svcTest(), '/api/eod/test': () => eodTest(), '/api/eod/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.eod = { ...(st.eod || {}), on: b.on === true }; saveMail(st); return { on: st.eod.on }; }, '/api/svc/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.svc = { ...(st.svc || { day: '', sent: {} }), on: b.on === true }; saveMail(st); return { on: st.svc.on }; }, '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   Object.assign(POSTS, UPKEEP_POSTS);
@@ -4211,7 +4229,7 @@ body[data-v=vCam]:not([data-v=vMap]) .bar{max-width:1400px}
  <div id="camTypes" class="ctypes"></div><div id="cgrid" class="cboard"></div>
 </div>
 <div id="vEdit" hidden><div class="ed">
- <aside class="panel edl"><div class="edf"><label><input type="checkbox" id="needs"> Only show trucks that need attention</label><div id="syncBar" style="margin-top:10px"></div><div class="syncp sm" id="syncE"></div><a class="btn2 qrbtn" href="/stickers" target="_blank" rel="noopener">▦ Print truck QR stickers</a><div id="swapBox"></div></div><div id="edList"></div></aside>
+ <aside class="panel edl"><div class="edf"><label><input type="checkbox" id="needs"> Only show trucks that need attention</label><div id="syncBar" style="margin-top:10px"></div><div class="syncp sm" id="syncE"></div><button class="btn2 qrbtn" id="nameTrucks" type="button" style="width:100%;margin-bottom:8px"># Put truck numbers in Azuga names</button><div class="muted" id="nameMsg" style="font-size:12px;margin:-4px 0 8px"></div><a class="btn2 qrbtn" href="/stickers" target="_blank" rel="noopener">▦ Print truck QR stickers</a><div id="swapBox"></div></div><div id="edList"></div></aside>
  <section class="panel edc" id="edCard"><div class="empty">Pick a truck on the left to edit it.</div></section>
 </div></div>
 <script>
@@ -4469,6 +4487,12 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-take
   b.disabled=true;b.textContent='Taking out...';
   try{const r=await post('/api/truck/take-out',{truckId:b.dataset.takeout});toast(r.who+' taken out of '+r.truck+(r.azuga?' · '+r.azuga:''));PEOPLE=null;await loadAT();if(!$('vDrv').hidden&&typeof loadPeople==='function')loadPeople()}
   catch(err){toast(err.message);b.disabled=false;delete b.dataset.sure;b.classList.remove('danger');b.textContent=b.dataset.lbl||'Take out of truck'}},true);
+document.addEventListener('click',async e=>{const b=e.target.closest('#nameTrucks');if(!b)return;const m=$('nameMsg');
+  try{if(!b.dataset.sure){b.disabled=true;const r=await post('/api/azuga/name-trucks',{dry:true});b.disabled=false;
+      if(!r.change.length){m.textContent='Every linked truck already has its number in Azuga.'+(r.skip.length?' No truck # in Airtable: '+r.skip.join(', '):'');return}
+      b.dataset.sure=1;b.textContent='Rename '+r.change.length+' in Azuga';m.innerHTML=r.change.slice(0,8).map(c=>esc(c.from||'(blank)')+' → <b>'+esc(c.to)+'</b>').join('<br>')+(r.change.length>8?'<br>and '+(r.change.length-8)+' more':'')+(r.skip.length?'<br>Skipped (no truck # or plate in Airtable): '+esc(r.skip.join(', ')):'');return}
+    b.disabled=true;b.textContent='Renaming...';const r=await post('/api/azuga/name-trucks',{});m.textContent='Renamed '+r.done.length+(r.failed.length?' · failed: '+r.failed.map(x=>x.from+' ('+x.error+')').join(', '):'');toast('Truck numbers added in Azuga');delete b.dataset.sure;b.textContent='# Put truck numbers in Azuga names';b.disabled=false}
+  catch(err){m.textContent=err.message;b.disabled=false}});
 function lastBox(p){const L=String(p||'').split(String.fromCharCode(10)).map(x=>x.trim()).filter(Boolean);return L.length?'<div class="last3"><b>Last 3 drivers</b><ol>'+L.map(x=>{const i=x.indexOf(' (');return '<li><span>'+esc(i>0?x.slice(0,i):x)+'</span>'+(i>0?'<small>'+esc(x.slice(i+2,-1))+'</small>':'')+'</li>'}).join('')+'</ol></div>':''}
 function histBox(v,t){return '<details class="hist" data-v="'+esc(v)+'" data-t="'+esc(t)+'"><summary>Past drivers · last 12 months</summary><div class="hl muted">Loading...</div></details>'}
 document.addEventListener('toggle',async e=>{const d=e.target;if(!d.classList||!d.classList.contains('hist')||!d.open||d.dataset.done)return;d.dataset.done=1;const box=d.querySelector('.hl');
