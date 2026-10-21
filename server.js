@@ -153,7 +153,7 @@ const routes = {
       const ph = String(d.phones[c.tech] || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''), u = users && matchPerson(users, c.tech), em = (d.emails || {})[c.tech] || (u && u.email) || '', email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em) ? em : '';
       if (ph.length !== 10 && !email) return skipped.push({ name: c.tech, why: 'No phone or email in Airtable' });
       const day = new Date(c.time).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'short', day: 'numeric' }), first = c.tech.split(' ')[0];
-      texts.push({ name: c.tech, phone: ph.length === 10 ? '+1' + ph : '', email, message: 'Hi ' + first + ', reminder: your weekly truck check-up for ' + day + " hasn't been submitted in POM yet. Please fill it out today. Thanks!",
+      texts.push({ name: c.tech, phone: ph.length === 10 ? '+1' + ph : '', email, message: 'Hi ' + first + ', reminder: your weekly truck check-up for ' + day + " hasn't been submitted in POM yet. Please fill it out today: " + POM_SHORT(),
         subject: 'Truck check-up missed: ' + day + '. Please submit today',
         body: 'Hi ' + first + ',\n\nYour weekly truck check-up for ' + day + " hasn't been submitted in Pool Office Manager yet. Please open the POM app and complete your Truck Check-Up as soon as possible.\n\nNot submitting your truck check-up can hurt your bonus for the week.\n\nYou'll keep getting this reminder until it's submitted.\n\nThanks,\nMillennial Pools" });
     });
@@ -1431,6 +1431,8 @@ async function sendText(to, message) {
   if (!r.ok) throw new Error('Textedly ' + r.status + ': ' + String(j.message || j.error || j.detail || JSON.stringify(j)).slice(0, 200));
   return j;
 }
+// Short link in the texts that opens POM: <site>/pom forwards to POM_APP_LINK (set in Render) or shows the app store buttons
+const POM_SHORT = () => (clean(process.env.PUBLIC_URL) || 'https://fleet-dashboard-oxei.onrender.com').replace(/\/$/, '') + '/pom';
 // Reminders go by text when the person has a mobile number in Airtable (and texting is set up), otherwise by email
 const phoneOf = d => { const ph = String((d && d.phone) || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return ph.length === 10 ? '+1' + ph : ''; };
 const canNotify = () => mailReady() || !!TXT_KEY();
@@ -1458,8 +1460,8 @@ async function textSample(b) {
   if (!d) throw new Error('No one called ' + clean(b.name) + ' in the Drivers table.');
   if (!ph) throw new Error('No mobile number for ' + d.name + ' in Airtable.');
   const first = d.name.split(' ')[0], k = clean(b.kind) || 'svc';
-  const msg = k === 'eod' ? 'Millennial Pools: Hi ' + first + ", 2 POM services from today aren't submitted: Sunset Village, Oak Ridge HOA. Please complete them in POM tonight. If you didn't get to a pool, let your regional know."
-    : k === 'checkup' ? 'Millennial Pools: Hi ' + first + ", reminder: your weekly truck check-up hasn't been submitted in POM yet. Please fill it out today. Thanks!"
+  const msg = k === 'eod' ? 'Millennial Pools: Hi ' + first + ", 2 POM services from today aren't submitted: Sunset Village, Oak Ridge HOA. Please complete them tonight: " + POM_SHORT() + " If you didn't get to a pool, let your regional know."
+    : k === 'checkup' ? 'Millennial Pools: Hi ' + first + ", reminder: your weekly truck check-up hasn't been submitted in POM yet. Please fill it out today: " + POM_SHORT()
     : k === 'safety' ? (globalThis.safetySms ? ((await globalThis.safetySms(d.name).catch(() => null)) || {}).sms : '') || 'Millennial Pools: Hi ' + first + ', your driver score this week is 96/100. No camera events this week, nice work!'
     : svcText(d.name, { customer: 'Sunset Village Pool', visit: { leave: Date.now() - 25 * 6e4 } }).sms;
   await sendText(ph, '(SAMPLE, no action needed) ' + msg);
@@ -1477,7 +1479,7 @@ const SVC_WAIT_MIN = +process.env.SVC_REMINDER_MIN || 20;   // minutes after lea
 const svcText = (tech, s) => { const first = tech.split(' ')[0], t = new Date(s.visit.leave).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
   return { subject: 'Submit your POM report: ' + (s.customer || 'pool') + ' (left ' + t + ')',
     body: 'Hi ' + first + ',\n\nYou left ' + (s.customer || 'a pool') + (s.address ? ' (' + s.address + ')' : '') + ' at ' + t + ", but the service hasn't been submitted in Pool Office Manager yet.\n\nPlease open the POM app and complete it now while it's fresh.\n\nThanks,\nMillennial Pools",
-    sms: 'Millennial Pools: Hi ' + first + ', you left ' + (s.customer || 'a pool') + ' at ' + t + " but the service isn't submitted in POM yet. Please complete it in the POM app now. Thanks!" }; };
+    sms: 'Millennial Pools: Hi ' + first + ', you left ' + (s.customer || 'a pool') + ' at ' + t + " but the service isn't submitted in POM yet. Please complete it now: " + POM_SHORT() }; };
 async function svcCheck(dry) {
   const st = mailState(), day = etDay().ymd, sv = st.svc = st.svc && st.svc.day === day ? { ...st.svc } : { on: !!(st.svc && st.svc.on), day, sent: {} }, out = [];
   if (!dry && (!sv.on || !canNotify())) return out;
@@ -1520,7 +1522,7 @@ async function eodCheck(dry) {
     const d = matchPerson(at.drivers.filter(x => x.status !== 'Inactive'), tech), u = matchPerson(users, tech), email = (d && d.email) || (u && u.email) || '';
     const lines = mine.map(x => { const w = vis[x.id]; return '• ' + (x.customer || 'Pool') + (x.address ? ', ' + x.address : '') + (w ? '  (you were there ' + tm(w.arrive) + '–' + tm(w.leave) + ')' : ''); });
     const first = tech.split(' ')[0], n = mine.length;
-    out.push({ tech, email, d, phone: !!phoneOf(d), n, sms: 'Millennial Pools: Hi ' + first + ', ' + n + ' POM service' + (n > 1 ? 's' : '') + " from today " + (n > 1 ? "aren't" : "isn't") + ' submitted: ' + mine.map(x => x.customer || 'Pool').slice(0, 6).join(', ') + (n > 6 ? ' and ' + (n - 6) + ' more' : '') + ". Please complete " + (n > 1 ? 'them' : 'it') + " in POM tonight. If you didn't get to a pool, let your regional know.", subject: n + ' POM service' + (n > 1 ? 's' : '') + ' not submitted today', body: 'Hi ' + first + ',\n\nThese services from today still haven\'t been submitted in Pool Office Manager:\n\n' + lines.join('\n') + '\n\nPlease open the POM app and complete ' + (n > 1 ? 'them' : 'it') + ' tonight. If you didn\'t get to a pool, let your regional know.\n\nThanks,\nMillennial Pools' });
+    out.push({ tech, email, d, phone: !!phoneOf(d), n, sms: 'Millennial Pools: Hi ' + first + ', ' + n + ' POM service' + (n > 1 ? 's' : '') + " from today " + (n > 1 ? "aren't" : "isn't") + ' submitted: ' + mine.map(x => x.customer || 'Pool').slice(0, 6).join(', ') + (n > 6 ? ' and ' + (n - 6) + ' more' : '') + ". Please complete " + (n > 1 ? 'them' : 'it') + " tonight: " + POM_SHORT() + " If you didn't get to a pool, let your regional know.", subject: n + ' POM service' + (n > 1 ? 's' : '') + ' not submitted today', body: 'Hi ' + first + ',\n\nThese services from today still haven\'t been submitted in Pool Office Manager:\n\n' + lines.join('\n') + '\n\nPlease open the POM app and complete ' + (n > 1 ? 'them' : 'it') + ' tonight. If you didn\'t get to a pool, let your regional know.\n\nThanks,\nMillennial Pools' });
     await sleep(300);
   }
   if (dry) return out;
@@ -3095,6 +3097,13 @@ http.createServer(async (req, res) => {
   const base = (req.headers['x-forwarded-proto'] || 'http') + '://' + (req.headers.host || 'localhost');
   if (!process.env.PUBLIC_URL && req.headers.host && !/localhost|127\.0\.0\.1/.test(req.headers.host)) lastBase = base;
   // Public SMS policy pages (needed for the Textedly / carrier 10DLC registration). No login.
+  if (req.url.split('?')[0] === '/pom') {   // public: opens Pool Office Manager from a text
+    const to = clean(process.env.POM_APP_LINK);
+    if (/^(https?:|[a-z][a-z0-9+.-]*:\/\/)/i.test(to)) { res.writeHead(302, { Location: to, 'Cache-Control': 'no-store' }); return res.end(); }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open POM · Millennial Pools</title><style>body{margin:0;font:17px/1.5 system-ui,-apple-system,sans-serif;background:#eef6f9;color:#0f172a}.w{max-width:420px;margin:0 auto;padding:40px 20px}h1{font-size:22px;margin:0 0 6px}p{color:#475569;margin:0 0 20px}a{display:block;text-align:center;font-weight:800;text-decoration:none;color:#fff;background:#0e7490;border-radius:14px;padding:16px;margin-bottom:12px}a.alt{background:#fff;color:#0e7490;border:2px solid #0e7490}</style></head><body><div class="w"><h1>Open Pool Office Manager</h1><p>Tap the one for your phone. If the app is installed it opens from the store page.</p>'
+      + '<a href="https://apps.apple.com/us/search?term=Pool%20Office%20Manager">iPhone: open POM</a><a class="alt" href="https://play.google.com/store/search?q=Pool%20Office%20Manager&c=apps">Android: open POM</a></div></body></html>');
+  }
   if (req.url === '/privacy' || req.url === '/terms') {
     const page = (title, body) => '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + title + ' · Millennial Pools</title><style>body{margin:0;font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a;background:#eef6f9}.w{max-width:760px;margin:0 auto;padding:32px 20px 60px}.c{background:#fff;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(15,23,42,.06)}h1{margin:0 0 4px;font-size:26px}h2{font-size:17px;margin:22px 0 6px}.m{color:#64748b;font-size:14px}</style></head><body><div class="w"><div class="c"><h1>' + title + '</h1><p class="m">Millennial Pool Management LLC · 1041 Glassboro Road, Monroe Township, NJ 08094 · contact@millennialpools.com · Updated October 2026</p>' + body + '</div></div></body></html>';
     const privacy = '<p>This policy covers the text messages (SMS) Millennial Pools sends to its own employees about their work vehicles.</p>'
