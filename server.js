@@ -2837,7 +2837,7 @@ async function safetyText(name, fleet) {
   // The whole week, written out in the text (camera setup problems go in their own texts, not here)
   const counts = {}; ev.forEach(e => { counts[e.k.label] = (counts[e.k.label] || 0) + 1; });
   const mon = new Date(etNow()); mon.setDate(mon.getDate() - ((mon.getDay() + 6) % 7));
-  const span = mon.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + '–' + etNow().toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const end = etNow(), span = mon.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + '–' + (end.getMonth() === mon.getMonth() ? end.getDate() : end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
   const lines = ['Millennial Pools · your week (' + span + ')', '', 'Hi ' + first + ',', '',
     'Driver score: ' + me.r.score + '/100 (#' + me.r.rank + ' of ' + fleet.length + ')', '',
     'Camera events: ' + (ev.length ? ev.length : 'none, nice work!'),
@@ -2847,7 +2847,7 @@ async function safetyText(name, fleet) {
     lines.push('Pools: ' + (wk2.visits ? wk2.visits + ' visit' + (wk2.visits > 1 ? 's' : '') + ' · ' + wk2.avg + ' min a pool on average' + (wk2.usual ? ' (your usual: ' + wk2.usual + ' min)' : '') : 'no tech visits logged'));
     lines.push('Ramp card: $' + Math.round(wk2.spend).toLocaleString() + (wk2.n ? ' · ' + wk2.n + ' purchase' + (wk2.n > 1 ? 's' : '') : '') + (wk2.gas ? ' · $' + Math.round(wk2.gas).toLocaleString() + ' gas' : ''), '');
   }
-  lines.push('Watch your clips and full report (private, works 2 weeks):', link);
+  lines.push((ev.length ? 'Watch your clips and full report' : 'Your full report') + ' (private, works 2 weeks):', link);
   return { name: me.name, week: wk2, subject: 'Your week: driver score ' + me.r.score + '/100', sms: lines.join('\n'), body: lines.slice(2).join('\n') + '\n\nThanks,\nMillennial Pools', events: ev.length };
 }
 globalThis.safetySms = name => safetyText(name);   // lets the sample texts (outside this block) build a real safety text
@@ -2904,7 +2904,7 @@ routes['/api/cam-issues'] = () => Object.fromEntries(Object.entries(upState().ca
 routes['/api/upkeep/idle-now'] = () => idleCheck(true).then(list => ({ wouldText: list, minutes: IDLE_MIN }));
 // Camera view check: once a day Claude looks at the newest road + driver snapshots from each truck's camera events.
 // Blocked or pointing the wrong way -> text the driver. Still wrong at the next day's check -> text Callum too.
-const CAM_HOUR = +process.env.CAM_CHECK_HOUR || 11, CAM_MODEL = clean(process.env.CAM_CHECK_MODEL) || 'claude-sonnet-4-5', CAM_ROAD_PCT = +process.env.CAM_ROAD_PCT || 20;   // under 20% road = not facing the road
+const CAM_HOUR = +process.env.CAM_CHECK_HOUR || 11, CAM_MODEL = clean(process.env.CAM_CHECK_MODEL) || 'claude-sonnet-4-5', CAM_ROAD_PCT = +process.env.CAM_ROAD_PCT || 10;   // under 10% road (or under 20% with no horizon) = not facing the road
 async function camImage(u) {
   try { const src = new URL(u); if (src.protocol !== 'https:' || !/^azuga-vmx-recording\.s3[\w.-]*\.amazonaws\.com$/.test(src.hostname)) return null;
     const r = await fetch(src, { headers: { Referer: 'https://fleet-app.azuga.com/' } }); if (!r.ok) return null;
@@ -2917,8 +2917,9 @@ async function camLook(road, cab) {
   if (cab) parts.push({ type: 'text', text: 'Image ' + (road ? 2 : 1) + ': DRIVER-FACING (cabin) camera.' }, { type: 'image', source: { type: 'base64', media_type: cab.type, data: cab.data } });
   parts.push({ type: 'text', text: 'Measure these dash camera snapshots from a work truck. Be literal and precise, do not judge whether it is "fine".\n'
     + 'ROAD camera: estimate the percent of the whole picture that shows road surface (pavement, lane lines, cars or the road ahead). Sky, clouds, sun, treetops, power lines, buildings, hood and dashboard do NOT count. Also say if the lens is covered.\n'
-    + 'DRIVER camera: is a person in the driver seat? If so, is their whole face in the picture, from the top of the forehead to the chin, with nothing covering it? A face cut off by the top or side edge of the picture counts as NOT whole. Also say if the lens is covered or aimed away from the driver seat.\n'
-    + 'Reply with JSON only: {"road":{"roadPct":0,"covered":false,"note":"few words on what the picture mostly shows"},"driver":{"person":true,"wholeFace":true,"cutOff":"none|top|bottom|left|right","covered":false,"aimedAway":false,"note":"few words"}}. Leave out a camera that has no image.' });
+    + 'Also: is the horizon (where the ground meets the sky) inside the picture?\n'
+    + 'DRIVER camera: is a person in the driver seat? If so, can you see their eyes (or sunglasses), nose and mouth? Hair or the top of the head touching the edge does not matter. Also say if the lens is covered or aimed away from the driver seat.\n'
+    + 'Reply with JSON only: {"road":{"roadPct":0,"horizon":true,"covered":false,"note":"few words on what the picture mostly shows"},"driver":{"person":true,"eyesNoseMouth":true,"covered":false,"aimedAway":false,"note":"few words"}}. Leave out a camera that has no image.' });
   const ask = async model => { const a = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': AI_KEY(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
     body: JSON.stringify({ model, max_tokens: 300, messages: [{ role: 'user', content: parts }] }) }); return { a, j: await a.json().catch(() => ({})) }; };
   let { a, j } = await ask(CAM_MODEL);
@@ -2926,15 +2927,15 @@ async function camLook(road, cab) {
   if (!a.ok) throw new Error('Claude ' + a.status + ': ' + String((j.error && j.error.message) || '').slice(0, 120));
   const m = (((j.content || []).find(c => c.type === 'text') || {}).text || '').match(/\{[\s\S]*\}/), o = m ? JSON.parse(m[0]) : {}, out = { raw: o };
   if (o.road) { const pct = +o.road.roadPct || 0;   // the code decides, from the measurement
-    out.road = o.road.covered ? { ok: false, issue: 'blocked', note: clean(o.road.note) } : pct < CAM_ROAD_PCT ? { ok: false, issue: 'pointing_wrong', note: 'only ' + Math.round(pct) + '% road: ' + clean(o.road.note) } : { ok: true, issue: 'none' }; }
+    out.road = o.road.covered ? { ok: false, issue: 'blocked', note: clean(o.road.note) } : pct < CAM_ROAD_PCT || (o.road.horizon === false && pct < CAM_ROAD_PCT * 2) ? { ok: false, issue: 'pointing_wrong', note: 'only ' + Math.round(pct) + '% road: ' + clean(o.road.note) } : { ok: true, issue: 'none' }; }
   if (o.driver) { const d = o.driver;
     out.driver = d.covered ? { ok: false, issue: 'blocked', note: clean(d.note) } : d.aimedAway ? { ok: false, issue: 'pointing_wrong', note: clean(d.note) }
-      : d.person && (d.wholeFace === false || (d.cutOff && d.cutOff !== 'none')) ? { ok: false, issue: 'face_hidden', note: (d.cutOff && d.cutOff !== 'none' ? 'face cut off at the ' + d.cutOff + ': ' : '') + clean(d.note) } : { ok: true, issue: 'none' }; }
+      : d.person && d.eyesNoseMouth === false ? { ok: false, issue: 'face_hidden', note: clean(d.note) } : { ok: true, issue: 'none' }; }
   return out;
 }
 const camWhat = bad => bad.map(b => 'the ' + (b.cam === 'road' ? 'road-facing' : 'driver-facing') + ' camera ' + CAM_ISSUE[b.issue]).join(' and ');
-const camMsg = (name, truck, bad) => 'Millennial Pools: Hi ' + String(name || '').split(' ')[0] + ', in ' + truck + ' ' + camWhat(bad).replace("the driver's whole face", 'your whole face') + '. Please fix it today: '
-  + (bad.some(b => b.cam === 'road') ? 'the road camera should face straight down the road' : '') + (bad.some(b => b.cam === 'road') && bad.some(b => b.cam === 'driver') ? ' and ' : '') + (bad.some(b => b.cam === 'driver') ? 'the driver camera should show your whole face' : '') + '. Thanks!';
+const camMsg = (name, truck, bad) => 'Millennial Pools: Hi ' + String(name || '').split(' ')[0] + ', in ' + truck + ' ' + camWhat(bad).replace("the driver's face", 'your face') + '. Please fix it today: '
+  + (bad.some(b => b.cam === 'road') ? 'the road camera should face straight down the road' : '') + (bad.some(b => b.cam === 'road') && bad.some(b => b.cam === 'driver') ? ' and ' : '') + (bad.some(b => b.cam === 'driver') ? 'the driver camera should show your face' : '') + '. Thanks!';
 // Samples: the texts drivers would get right now, sent only to Callum, with the photo
 async function camSample() {
   const rows = (await camCheck(true)).filter(r => r.bad.length), at = await atData(), me = matchPerson(at.drivers, 'Callum Curcie'), ph = phoneOf(me);
@@ -2943,12 +2944,13 @@ async function camSample() {
   for (const r of rows.slice(0, 4)) { await sendText(ph, '(SAMPLE of what ' + r.who + ' would get) ' + camMsg(r.who, r.truck, r.bad), (r.bad.find(b => b.pic) || {}).pic); await sleep(800); }
   return { sent: Math.min(4, rows.length), rows: rows.map(r => ({ truck: r.truck, who: r.who, bad: r.bad.map(b => ({ cam: b.cam, issue: b.issue, note: b.note })) })) };
 }
-const CAM_ISSUE = { blocked: 'looks blocked or covered', pointing_wrong: 'isn\'t facing the right way', face_hidden: 'can\'t see the driver\'s whole face' };
+const CAM_ISSUE = { blocked: 'looks blocked or covered', pointing_wrong: 'isn\'t facing the right way', face_hidden: 'can\'t see the driver\'s face' };
 async function camCheck(dry) {
   const st = upState(); if (!AI_KEY()) throw new Error('Add ANTHROPIC_API_KEY in Render first.');
   const ev = list(await routes['/api/videos'](new URLSearchParams())), td = await truckDrivers(), at = await atData(), vs = await freshVehicles(), m = matchAll(vs, at.trucks);
-  const newest = {}; const tm = x => +(x.eventTime || x.startTime || 0) || Date.parse(x.eventTime || x.startTime) || 0;
-  for (const x of ev) { if (!x.vehicleId || !(x.snapshotLinks || x.videoLinks)) continue; if (!newest[x.vehicleId] || tm(x) > tm(newest[x.vehicleId])) newest[x.vehicleId] = x; }
+  const newest = {}, second = {}; const tm = x => +(x.eventTime || x.startTime || 0) || Date.parse(x.eventTime || x.startTime) || 0;
+  for (const x of ev.slice().sort((a, b) => tm(b) - tm(a))) { if (!x.vehicleId || !(x.snapshotLinks || x.videoLinks)) continue;
+    if (!newest[x.vehicleId]) newest[x.vehicleId] = x; else if (!second[x.vehicleId] && tm(newest[x.vehicleId]) - tm(x) > 10 * 6e4) second[x.vehicleId] = x; }
   const cs = st.cam = st.cam || {}, now = Date.now(), out = [], callum = matchPerson(at.drivers, 'Callum Curcie');
   for (const [vid, x] of Object.entries(newest)) {
     const pick = idx => { const s1 = (x.snapshotLinks || []).flat().find(p => p && p.snapshotLink && (p.snapshotIndex === idx || (idx === 1 && p.snapshotIndex !== 2))); const v1 = (x.videoLinks || []).flat().find(v => v && v.thumbnailLink && (v.videoIndex === idx || (idx === 1 && v.videoIndex !== 2)));
@@ -2958,7 +2960,13 @@ async function camCheck(dry) {
     const urls = { road: pick(1), driver: pick(2) };
     const [road, cab] = await Promise.all([camImage(urls.road), camImage(urls.driver)]); if (!road && !cab) continue;
     let r; try { r = await camLook(road, cab); } catch (e) { console.error('Camera check:', e.message); break; }
-    const bad = ['road', 'driver'].filter(k => r[k] && r[k].ok === false && CAM_ISSUE[r[k].issue]).map(k => ({ cam: k, issue: r[k].issue, note: clean(r[k].note).slice(0, 80) }));
+    let bad = ['road', 'driver'].filter(k => r[k] && r[k].ok === false && CAM_ISSUE[r[k].issue]).map(k => ({ cam: k, issue: r[k].issue, note: clean(r[k].note).slice(0, 80) }));
+    if (bad.length && second[vid]) {   // only call it a problem if an earlier, separate snapshot shows the same thing (one odd moment isn't a setup problem)
+      const y = second[vid], pk = idx => { const v1 = (y.snapshotLinks || []).flat().find(p => p && p.snapshotLink && (p.snapshotIndex === idx || (idx === 1 && p.snapshotIndex !== 2))); const v2 = (y.videoLinks || []).flat().find(v => v && v.thumbnailLink && (v.videoIndex === idx || (idx === 1 && v.videoIndex !== 2))); return (v1 && v1.snapshotLink) || (v2 && v2.thumbnailLink) || ''; };
+      const [r2road, r2cab] = await Promise.all([bad.some(b => b.cam === 'road') ? camImage(pk(1)) : null, bad.some(b => b.cam === 'driver') ? camImage(pk(2)) : null]);
+      let r2 = {}; try { if (r2road || r2cab) r2 = await camLook(r2road, r2cab); } catch (e) { console.error('Camera check (2nd look):', e.message); }
+      bad = bad.filter(b => !r2[b.cam] || (r2[b.cam].ok === false));
+    }
     const tk = m[vid] && m[vid].truck, truck = tk ? truckLabelOf(tk) : clean(x.vehicleName || x.trackeeName || 'Truck'), who = clean(td[vid]) || camName(x), d = matchPerson(at.drivers, who);
     const base = lastBase || 'https://fleet-dashboard-oxei.onrender.com', pic = bad.length ? base + '/r/' + signShare({ k: 'c', u: urls[bad[0].cam] }, 14) : '';
     bad.forEach(b => { b.pic = urls[b.cam] ? base + '/r/' + signShare({ k: 'c', u: urls[b.cam] }, 14) : ''; });
