@@ -1179,12 +1179,16 @@ function etDay(d = new Date()) {
   return { ymd, start, end: new Date(+start + 864e5 - 1) };
 }
 const pomToday = () => pomDay(etDay().ymd);
+let pomNotes = true;
 async function pomRange(start, end) {
   const out = []; let after = null;
   for (let page = 0; page < 15; page++) {
-    const d = await pom(`query($selector: AppointmentsV2Selector, $first: Int, $after: String) { infiniteAppointmentsV2(selector: $selector, first: $first, after: $after) {
-      edges { node { ${POM_STOP_FIELDS} } } pageInfo { endCursor hasNextPage } } }`,
+    const q = f => pom(`query($selector: AppointmentsV2Selector, $first: Int, $after: String) { infiniteAppointmentsV2(selector: $selector, first: $first, after: $after) {
+      edges { node { ${f} } } pageInfo { endCursor hasNextPage } } }`,
       { selector: { startDate: start.toISOString(), endDate: end.toISOString(), includePinned: true }, first: 200, after });
+    // The job written on "Note"-type stops lives in notes / customDescription; if POM won't give those, carry on without them
+    let d; if (pomNotes) { try { d = await q(POM_STOP_FIELDS + ' notes customDescription'); } catch (e) { pomNotes = false; console.error('POM notes not available:', e.message); } }
+    if (!d) d = await q(POM_STOP_FIELDS);
     const c = d.infiniteAppointmentsV2 || {};
     (c.edges || []).forEach(e => e && e.node && out.push(e.node));
     if (!c.pageInfo || !c.pageInfo.hasNextPage) break;
@@ -1217,9 +1221,16 @@ const nameToks = n => dupeName(n).split(' ').filter(w => w && !/^(jr|sr|ii|iii|i
 const sameName = (a, b) => { const x = nameToks(a), y = nameToks(b); if (!x.length || !y.length || x[0].slice(0, 3) !== y[0].slice(0, 3)) return false;
   return x.slice(1).some(w => y.slice(1).some(v => v === w || (w.length > 3 && near(w, v)))); };
 const matchPerson = (list, n) => rampMatch(list, n) || list.find(d => sameName(d.name, n));
+// "Note" (or another catch-all) service type: show what the job actually is, from the stop's description or the first line of its notes
+const pomNote = a => clean(String(a.notes || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')).slice(0, 400);
+const pomJob = a => { const t = (a.serviceType && a.serviceType.display) || '';
+  if (t && !/^(notes?|other|misc\w*|general|service|task|appointment)$/i.test(t.trim())) return t;
+  const raw = clean(a.customDescription) || (String(a.notes || '').replace(/<[^>]*>/g, '\n').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').split(/\n|(?<=[.!?])\s/).map(clean).find(Boolean) || '');
+  const r = raw.replace(/[.;,:]+$/, '');
+  return r ? (r.length > 48 ? r.slice(0, 46).replace(/\s+\S*$/, '') + '…' : r) : t; };
 const pomStop = a => { const c = a.customer || {}, w = a.primaryWorker || (a.workers || []).find(x => x.primary) || (a.workers || [])[0] || {};
   return { id: a.id, ruleId: a.recurringRuleId || null, rdate: a.recurringDate || null, rrule: a.recurringRule && a.recurringRule.rruleString || '', workerId: w.id || null, serviceTypeId: a.serviceType && a.serviceType.id || null, time: a.date, mins: a.duration, status: a.status, serviceStatus: a.serviceStatus && a.serviceStatus.name, done: pomDone(a),
-    type: a.serviceType && a.serviceType.display, tech: [w.firstName, w.lastName].filter(Boolean).join(' '),
+    type: a.serviceType && a.serviceType.display, job: pomJob(a), note: pomNote(a), tech: [w.firstName, w.lastName].filter(Boolean).join(' '),
     customerId: c.id || null, customer: [c.firstName, c.lastName].filter(Boolean).join(' '), address: [c.streetAddress, c.city, c.state].filter(Boolean).join(', '),
     lat: +c.latitude || null, lng: +c.longitude || null }; };
 // Tech names in POM may be spelled a little differently from Airtable (DiMaio / Dimeo): same matching rules as Ramp
@@ -5129,7 +5140,7 @@ async function pomBox(id,name,date){const el=$('pomBox');if(!el)return;if(!name)
   el.innerHTML=head('<span class="pcount">'+done+' of '+st.length+' done</span>')+'<div class="pbar"><i style="width:'+pct+'%"></i></div>'
    +(vis.length?'<div class="psum"><b>'+Math.floor(tot/60)+'h '+(tot%60)+'m</b> at pools · '+vis.length+' of '+st.length+' visits found in the truck’s breadcrumbs</div>'+tl:(r.points?'':'<div class="muted" style="font-size:12px">No breadcrumbs from the truck '+(isToday?'yet today':'that day')+', so time on site can’t be measured.</div>'))
    +(r.tech.toLowerCase()!==name.toLowerCase()?'<div class="muted" style="font-size:12px;margin:4px 0">Shown as '+esc(r.tech)+' in Pool Office Manager</div>':'')
-   +'<ol class="plist">'+st.map((s,i)=>'<li class="'+(s.done?'done':'')+'" data-i="'+i+'"><span class="pn">'+(s.done?'✓':i+1)+'</span><div><b>'+esc(s.customer||'Customer')+'</b>'+(s.type?'<span class="psvc" style="--h:'+([...s.type].reduce((h,c)=>h*31+c.charCodeAt(0)>>>0,7)%150+170)+'">'+esc(s.type)+'</span>':'')+'<span>'+esc(s.address||'No address')+'</span>'
+   +'<ol class="plist">'+st.map((s,i)=>'<li class="'+(s.done?'done':'')+'" data-i="'+i+'"><span class="pn">'+(s.done?'✓':i+1)+'</span><div><b>'+esc(s.customer||'Customer')+'</b>'+((s.job||s.type)?'<span class="psvc" style="--h:'+([...(s.job||s.type)].reduce((h,c)=>h*31+c.charCodeAt(0)>>>0,7)%150+170)+'"'+(s.note?' title="'+esc(s.note)+'"':'')+'>'+esc(s.job||s.type)+'</span>':'')+'<span>'+esc(s.address||'No address')+'</span>'
      +(s.visit?'<span class="pvisit">Arrived '+t(s.visit.arrive)+' · left '+t(s.visit.leave)+(s.visit.visits>1?' · came back '+(s.visit.visits-1)+'×':'')+(s.visit.how==='wide'?' <span class="pfar">parked ~'+(s.visit.ft>=1000?(s.visit.ft/5280).toFixed(2)+' mi':s.visit.ft+' ft')+' away</span>'+flag('The truck never stopped within 500 ft of the address in Pool Office Manager, so this visit was matched from up to 0.3 mi away. The address in POM may be off, or this could be a neighbouring stop.'):s.visit.how==='addr'?' <span class="pfar">matched by street</span>'+flag('Matched by street address instead of map position: the truck stopped at '+(s.visit.parkedAt||'a nearby number on the same street')+'. '+(s.lat?'POM\\'s map pin for this pool is more than 0.3 mi away, so the pin is probably wrong.':'POM has no map pin for this pool.')):'')+'</span>':(!isToday||s.done?'<span class="pvisit none">Truck not seen at this address</span>':''))+'</div>'
      +'<em>'+(s.visit?'<strong class="vmins'+(s.visit.mins<5?' short':s.visit.mins>60?' long':'')+'">'+s.visit.mins+' min</strong>':'')+(s.done?'Done':esc(String(s.serviceStatus||s.status||'To do').toLowerCase().split('_').join(' ').replace(/^./,c=>c.toUpperCase())))+(s.time?'<small>Scheduled '+t(s.time)+'</small>':'')+'</em></li>').join('')+'</ol>';
   bind();POMDAY=isToday?null:st;
