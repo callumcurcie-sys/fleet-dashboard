@@ -2891,7 +2891,64 @@ async function idleCheck(dry) {
   return out;
 }
 if (process.argv[2] !== 'test') setInterval(() => idleCheck().catch(e => console.error('Idle check:', e.message)), 5 * 60e3);
+routes['/api/cam-issues'] = () => Object.fromEntries(Object.entries(upState().cam || {}).filter(([, c]) => c.since).map(([id, c]) => [id, { what: c.what, since: c.since, texted: !!c.texted, boss: !!c.boss }]));
 routes['/api/upkeep/idle-now'] = () => idleCheck(true).then(list => ({ wouldText: list, minutes: IDLE_MIN }));
+// Camera view check: once a day Claude looks at the newest road + driver snapshots from each truck's camera events.
+// Blocked or pointing the wrong way -> text the driver. Still wrong at the next day's check -> text Callum too.
+const CAM_HOUR = +process.env.CAM_CHECK_HOUR || 11;
+async function camImage(u) {
+  try { const src = new URL(u); if (src.protocol !== 'https:' || !/^azuga-vmx-recording\.s3[\w.-]*\.amazonaws\.com$/.test(src.hostname)) return null;
+    const r = await fetch(src, { headers: { Referer: 'https://fleet-app.azuga.com/' } }); if (!r.ok) return null;
+    const type = (r.headers.get('content-type') || 'image/jpeg').split(';')[0], buf = Buffer.from(await r.arrayBuffer());
+    return /^image\/(jpeg|png|webp)$/.test(type) && buf.length < 4.5e6 ? { type, data: buf.toString('base64') } : null; } catch { return null; }
+}
+async function camLook(road, cab) {
+  const parts = [];
+  if (road) parts.push({ type: 'text', text: 'Image 1: ROAD-FACING camera.' }, { type: 'image', source: { type: 'base64', media_type: road.type, data: road.data } });
+  if (cab) parts.push({ type: 'text', text: 'Image ' + (road ? 2 : 1) + ': DRIVER-FACING (cabin) camera.' }, { type: 'image', source: { type: 'base64', media_type: cab.type, data: cab.data } });
+  parts.push({ type: 'text', text: 'These are dash camera snapshots from a work truck. For each camera, is the view usable? A road camera should show the road ahead through the windshield. A driver camera should show the driver seat area. '
+    + 'Problems: blocked (something covering the lens, sticker, tape, paper, hand), pointing_wrong (aimed at ceiling, dashboard, floor, sky or sideways so the road or driver seat is mostly out of view), blurry (lens dirty or smeared so nothing is recognizable). '
+    + 'Night, rain, sun glare, an empty driver seat, or a dark cabin are normal, NOT problems. Only report a problem you are confident about. Reply with JSON only: {"road":{"ok":true,"issue":"none|blocked|pointing_wrong|blurry","note":"few words"},"driver":{"ok":true,"issue":"none|blocked|pointing_wrong|blurry","note":"few words"}}. Leave out a camera that has no image.' });
+  const a = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': AI_KEY(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    body: JSON.stringify({ model: AI_MODEL, max_tokens: 300, messages: [{ role: 'user', content: parts }] }) });
+  const j = await a.json().catch(() => ({})); if (!a.ok) throw new Error('Claude ' + a.status + ': ' + String((j.error && j.error.message) || '').slice(0, 120));
+  const m = (((j.content || []).find(c => c.type === 'text') || {}).text || '').match(/\{[\s\S]*\}/); return m ? JSON.parse(m[0]) : {};
+}
+const CAM_ISSUE = { blocked: 'looks blocked or covered', pointing_wrong: 'is pointing the wrong way', blurry: 'is too blurry or dirty to see through' };
+async function camCheck(dry) {
+  const st = upState(); if (!AI_KEY()) throw new Error('Add ANTHROPIC_API_KEY in Render first.');
+  const ev = list(await routes['/api/videos'](new URLSearchParams())), td = await truckDrivers(), at = await atData(), vs = await freshVehicles(), m = matchAll(vs, at.trucks);
+  const newest = {}; const tm = x => +(x.eventTime || x.startTime || 0) || Date.parse(x.eventTime || x.startTime) || 0;
+  for (const x of ev) { if (!x.vehicleId || !(x.snapshotLinks || x.videoLinks)) continue; if (!newest[x.vehicleId] || tm(x) > tm(newest[x.vehicleId])) newest[x.vehicleId] = x; }
+  const cs = st.cam = st.cam || {}, now = Date.now(), out = [], callum = matchPerson(at.drivers, 'Callum Curcie');
+  for (const [vid, x] of Object.entries(newest)) {
+    const pick = idx => { const s1 = (x.snapshotLinks || []).flat().find(p => p && p.snapshotLink && (p.snapshotIndex === idx || (idx === 1 && p.snapshotIndex !== 2))); const v1 = (x.videoLinks || []).flat().find(v => v && v.thumbnailLink && (v.videoIndex === idx || (idx === 1 && v.videoIndex !== 2)));
+      return (s1 && s1.snapshotLink) || (v1 && v1.thumbnailLink) || ''; };
+    const prev0 = cs[vid] || {};
+    if (!dry && prev0.img === tm(x)) continue;   // same snapshot as last time: nothing new to look at
+    const [road, cab] = await Promise.all([camImage(pick(1)), camImage(pick(2))]); if (!road && !cab) continue;
+    let r; try { r = await camLook(road, cab); } catch (e) { console.error('Camera check:', e.message); break; }
+    const bad = ['road', 'driver'].filter(k => r[k] && r[k].ok === false && CAM_ISSUE[r[k].issue]).map(k => ({ cam: k, issue: r[k].issue, note: clean(r[k].note).slice(0, 80) }));
+    const tk = m[vid] && m[vid].truck, truck = tk ? truckLabelOf(tk) : clean(x.vehicleName || x.trackeeName || 'Truck'), who = clean(td[vid]) || camName(x), d = matchPerson(at.drivers, who);
+    const prev = cs[vid] || {}, row = { truck, who: d ? d.name : who, at: tm(x), bad, prev: prev.since || 0 };
+    out.push(row); if (dry) continue;
+    if (!bad.length) { cs[vid] = { ok: now, img: tm(x) }; continue; }
+    const what = bad.map(b => 'the ' + (b.cam === 'road' ? 'road-facing' : 'driver-facing') + ' camera ' + CAM_ISSUE[b.issue]).join(' and ');
+    const since = prev.since || tm(x); cs[vid] = { since, what, img: tm(x), texted: prev.texted || 0, boss: prev.boss || 0 };
+    if (!prev.since) {   // first time: tell the driver (only about a recent snapshot)
+      if (now - tm(x) > 3 * 864e5) continue;
+      const ph = phoneOf(d); if (ph) try { await sendText(ph, 'Millennial Pools: Hi ' + d.name.split(' ')[0] + ', in ' + truck + ' ' + what + '. Please check it and fix it today so it can see ' + (bad.some(b => b.cam === 'road') ? 'the road' : 'the driver seat') + '. Thanks!'); cs[vid].texted = now; } catch (e) { console.error('Camera text', d.name, e.message); }
+      console.log(new Date().toISOString(), 'Camera issue:', truck, what);
+    } else if (!prev.boss && tm(x) - since > 20 * 3600e3) {   // a newer snapshot a day later is still wrong: tell Callum
+      const ph = phoneOf(callum); if (ph) try { await sendText(ph, 'Fleet dashboard: camera still not fixed in ' + truck + (d ? ' (' + d.name + ')' : '') + ': ' + what + ', since ' + new Date(since).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + '. ' + (prev.texted ? 'The driver was texted.' : 'No driver phone on file.')); cs[vid].boss = now; } catch (e) { console.error('Camera text to Callum', e.message); }
+    }
+    await sleep(500);
+  }
+  if (!dry) { st.camLast = now; st.camRows = out.map(r => ({ truck: r.truck, who: r.who, at: r.at, bad: r.bad })); saveUp(st); }
+  return out;
+}
+if (process.argv[2] !== 'test') setInterval(() => { const st = upState(), et = etNow();
+  if (st.camchk && et.getHours() >= CAM_HOUR && et.toLocaleDateString('en-CA') !== new Date(st.camLast || 0).toLocaleDateString('en-CA', { timeZone: 'America/New_York' })) camCheck().catch(e => console.error('Camera check:', e.message)); }, 20 * 60e3);
 // Hourly: renewals (daily, 8 AM+), and on Mondays from 8 AM the safety + oil emails (each once a week)
 // ---- Drivers: anyone marked inactive in POM comes off every truck; each truck keeps its last 3 drivers ----
 const fmtDay = ms => new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
@@ -2979,7 +3036,7 @@ routes['/api/upkeep'] = async () => {
   const pp = personalPeople(at), locs = Object.fromEntries(((await rampYear().catch(() => ({ card: [] }))).card || []).filter(t => t.loc).map(t => [t.id, t.loc]));
   const gas = Object.entries(done).map(([id, x]) => ({ id, ...x, personal: !!matchPerson(pp, x.who), sta: x.sta || (locs[id] ? [locs[id].city, locs[id].state].filter(Boolean).join(', ') + (locs[id].zip ? ' ' + locs[id].zip : '') : ''), truck: tk[x.truckId] ? tname(tk[x.truckId]) : '', tank: tankOf(tk[x.truckId]), link: 'https://app.ramp.com/business-overview/transactions/' + id })).sort((a, b) => b.flags.length - a.flags.length || Date.parse(b.at) - Date.parse(a.at));
   const renew = (await renewRows()).map(({ t, ...x }) => x);
-  return { cost, oil, oilMiles: OIL_MI, gas, gasOk: GAS_OK, personalRoles: PERSONAL_ROLES, personalNames: pp.map(d => d.name), gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew, idle: !!st.idle }, idleMin: IDLE_MIN, idleLog: (st.idleLog || []).slice(0, 15), mail: mailReady(), sms: !!TXT_KEY(), ai: !!AI_KEY() };
+  return { cost, oil, oilMiles: OIL_MI, gas, gasOk: GAS_OK, personalRoles: PERSONAL_ROLES, personalNames: pp.map(d => d.name), gasBusy, renew, settings: { safety: st.safety, oil: st.oil, renew: st.renew, idle: !!st.idle, camchk: !!st.camchk }, camRows: st.camRows || [], camLast: st.camLast || 0, camHour: CAM_HOUR, idleMin: IDLE_MIN, idleLog: (st.idleLog || []).slice(0, 15), mail: mailReady(), sms: !!TXT_KEY(), ai: !!AI_KEY() };
 };
 routes['/api/upkeep/flags'] = async () => { const pp = personalPeople(await atData()); return { gas: Object.values(gasChk()).filter(x => !matchPerson(pp, x.who) && x.verdict === 'far' && !x.ok && !(x.flags || []).some(f => /^Truck was parked/.test(f))).length }; };
 routes['/api/upkeep/safety-preview'] = async q => (await safetyText(q.get('name') || 'Callum Curcie')) || { error: 'No score for that name yet.' };
@@ -2988,9 +3045,10 @@ const PERSONAL_ROLES = (process.env.GAS_PERSONAL_ROLES || 'District').split(',')
 const personalPeople = at => at.drivers.filter(d => d.name && PERSONAL_ROLES.includes(String(d.role || '').toLowerCase()));
 const GAS_OK = ['Gas cans / equipment', 'Different vehicle', 'Rental or personal car for work', 'Checked, it is fine'];
 const UPKEEP_POSTS = {
+  '/api/upkeep/cam-check': b => camCheck(!!b.dry).then(rows => ({ rows })),
   '/api/upkeep/gas-ok': b => { const done = gasChk(), r = done[String(b.id || '')]; if (!r) throw new Error('That fill-up is no longer in the list. Refresh.');
     r.ok = b.why === '' ? '' : GAS_OK.includes(b.why) ? b.why : GAS_OK[3]; saveGasChk(done); return { ok: true, why: r.ok }; },
-  '/api/upkeep/settings': b => { const st = upState(); ['safety', 'oil', 'renew', 'idle'].forEach(k => { if (k in b) st[k] = b[k] === true; }); saveUp(st); return { safety: st.safety, oil: st.oil, renew: st.renew, idle: !!st.idle }; },
+  '/api/upkeep/settings': b => { const st = upState(); ['safety', 'oil', 'renew', 'idle', 'camchk'].forEach(k => { if (k in b) st[k] = b[k] === true; }); saveUp(st); return { safety: st.safety, oil: st.oil, renew: st.renew, idle: !!st.idle, camchk: !!st.camchk }; },
   '/api/upkeep/renewal': setRenewal,
   '/api/upkeep/read-cards': () => { readRenewals(40).catch(e => console.error('Renewals:', e.message)); return { started: true }; },
   '/api/upkeep/gas-check': () => { checkGas(40); return { started: true }; },
@@ -4133,6 +4191,8 @@ header .live{margin-left:8px!important}
 .last3 ol{margin:6px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:3px}.last3 li span{font-weight:600}.last3 li small{color:var(--muted);margin-left:8px}
 .gc.per{border-left-color:#3b82f6}.gc.per .gc-ic{background:#3b82f6}.gc-per{color:var(--ink2)!important}
 .btn2.sm.takeout{margin-left:8px;padding:4px 10px;font-size:12px;min-height:0}.rtk{display:inline-flex;align-items:center;gap:2px;margin:2px 8px 2px 0}.rtk .takeout{margin-left:4px;padding:2px 8px;font-size:11.5px}
+.camchk .cqr{display:flex;flex-wrap:wrap;gap:4px 12px;padding:8px 0;border-top:1px solid var(--line);font-size:13px}.camchk .cqr:first-of-type{border-top:0}.camchk .cqr em{font-style:normal;color:var(--bad);width:100%}.camchk .cqr span{color:var(--muted)}.camchk .cqr.ok{color:var(--go)}
+.camflag{display:inline-block;margin-top:5px;font-size:12px;font-weight:700;color:#b91c1c;background:#fee2e2;border:1px solid #fecaca;border-radius:8px;padding:2px 8px}.camflag.late{background:#b91c1c;color:#fff;border-color:#b91c1c}
 /* ===== v30: calm look. Same pool colours, no moving decorations, quieter cards, more room ===== */
 :root{--deck:#f3f6f8;--deck2:#e9eef1;--line:#e2e8ec;--line2:#d3dce2;--card:#fff;--r:14px;
  --sh:0 1px 2px rgba(15,35,50,.05),0 2px 8px -4px rgba(15,35,50,.08)}
@@ -4424,7 +4484,7 @@ function render(){
     :'<b>No matches</b>Try a different search, or pick All trucks above.';
   const sig=rs.map(vid).join(),fresh=sig!==listSig;listSig=sig;
   const gcount=[0,0,0];rs.forEach(r=>gcount[grp(r)]++);const byGrp=(OPTS.sort||'moving')==='moving';
-  $('list').innerHTML=rs.length?rs.map((r,i)=>{const d=who(r),named=/[a-z]/i.test(d),g=grp(r);return (byGrp&&(i===0||grp(rs[i-1])!==g)?'<div class="lgrp g'+g+'"><span>'+GRP[g]+'</span><b>'+gcount[g]+'</b></div>':'')+'<div class="card'+(sel==vid(r)?' sel':'')+(fresh?' rise':'')+'" style="--i:'+Math.min(i,14)+'" data-id="'+esc(vid(r))+'" tabindex="0" role="button">'+avatar(d)+'<div class="ci"><div class="top"><b>'+tno(vid(r))+esc(shortTitle(r))+'</b>'+status(r)+'</div><div class="d">'+(named?esc(d)+scoreChip(d):'<span class="muted">No driver assigned</span>')+'</div><div class="a">'+(pick(r,'address','landmark')?esc(pick(r,'address','landmark')):'<span class="trk">Tracker unavailable</span>')+'</div></div></div>'}).join(''):'<div class="empty">'+emptyMsg+'</div>';
+  $('list').innerHTML=rs.length?rs.map((r,i)=>{const d=who(r),named=/[a-z]/i.test(d),g=grp(r);return (byGrp&&(i===0||grp(rs[i-1])!==g)?'<div class="lgrp g'+g+'"><span>'+GRP[g]+'</span><b>'+gcount[g]+'</b></div>':'')+'<div class="card'+(sel==vid(r)?' sel':'')+(fresh?' rise':'')+'" style="--i:'+Math.min(i,14)+'" data-id="'+esc(vid(r))+'" tabindex="0" role="button">'+avatar(d)+'<div class="ci"><div class="top"><b>'+tno(vid(r))+esc(shortTitle(r))+'</b>'+status(r)+'</div><div class="d">'+(named?esc(d)+scoreChip(d):'<span class="muted">No driver assigned</span>')+'</div>'+camFlag(vid(r))+'<div class="a">'+(pick(r,'address','landmark')?esc(pick(r,'address','landmark')):'<span class="trk">Tracker unavailable</span>')+'</div></div></div>'}).join(''):'<div class="empty">'+emptyMsg+'</div>';
   document.querySelectorAll('.card').forEach(c=>c.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();select(c.dataset.id)}});
   document.querySelectorAll('.card').forEach(c=>c.onclick=()=>select(c.dataset.id));
   const pts=[],shown=new Set(rs.map(vid));
@@ -4565,6 +4625,11 @@ setInterval(swapPanel,60000);
 async function camAtLabel(){try{const r=await get('/api/cameras/sync-status'),el=$('camAt');if(!el)return;const l=r.last;el.innerHTML=r.busy?'<i class="camdot spin"></i>Syncing to Airtable...':l?'<i class="camdot'+(l.error?' bad':'')+'"></i>'+(l.error?'Airtable sync failed: '+esc(l.error):'Airtable synced '+new Date(l.at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})+' · '+l.cameras+' cameras'+(l.events?' · +'+l.events+' events':'')):'<i class="camdot off"></i>Not synced to Airtable yet'}catch(e){}}
 setTimeout(camAtLabel,4000);setInterval(camAtLabel,5*60e3);
 document.addEventListener('click',async e=>{const b=e.target.closest('#camSync');if(!b)return;b.disabled=true;$('camAt').innerHTML='<i class="camdot spin"></i>Syncing to Airtable...';try{const r=await post('/api/cameras/sync',{});$('camAt').innerHTML=r.error?'<i class="camdot bad"></i>'+esc(r.error):r.busy?'<i class="camdot spin"></i>Already syncing...':'<i class="camdot"></i>Synced: '+r.cameras+' cameras, '+r.events+' new events, '+r.trackers+' tracker boxes updated'}catch(err){$('camAt').textContent=err.message}b.disabled=false});
+// Camera blocked / pointing wrong (daily camera check): a red flag on the truck's card
+let CAMISS={};const camFlag=id=>{const c=CAMISS[id];if(!c)return '';const days=Math.max(0,Math.floor((Date.now()-c.since)/864e5));
+  return '<div class="camflag'+(c.boss?' late':'')+'" title="'+esc((c.what||'Camera problem')+(c.texted?' · driver texted':'')+(c.boss?' · you were texted, still not fixed':''))+'">📷 '+esc(String(c.what||'Camera problem').replace(/^the /,'').replace(/^./,x=>x.toUpperCase()))+(days?' · '+days+' day'+(days>1?'s':''):'')+'</div>'};
+async function loadCamIss(){try{CAMISS=await get('/api/cam-issues');if(typeof render==='function'&&(vehicles.length||locs.length))render()}catch(e){}}
+setTimeout(loadCamIss,1500);setInterval(loadCamIss,10*60e3);
 async function upBadge(){try{const r=await get('/api/upkeep/flags'),tab=document.querySelector('.tabs button[data-v=vBuy]');if(!tab)return;let b=tab.querySelector('.gbadge');if(!b){b=document.createElement('span');b.className='rqb gbadge';b.title='Fill-ups where the truck was not near the card';tab.appendChild(b)}b.textContent=r.gas;b.hidden=!r.gas}catch(e){}}
 setTimeout(upBadge,3000);setInterval(upBadge,5*60e3);
 async function loadAT(){swapPanel();try{AT=await get('/api/airtable')}catch(e){AT={connected:true,error:e.message,links:{}}}if(!$('vEdit').hidden)renderEdit();if(vehicles.length||locs.length)render()}
@@ -5555,6 +5620,9 @@ function renderRampUp(){if(!UP)return;
       :'<div class="empty">'+(g.length?'Nothing here.':'No fill-ups checked yet. The first check runs a few minutes after the server starts.')+'</div>')+'</div>'
     +'<aside><div class="panel rp-pan"><h3>Most “not near” fill-ups</h3>'+(top.length?top.map(([n,b])=>'<div class="ukrank"><div><b>'+esc(n)+'</b><small>'+b.n+' fill-up'+(b.n>1?'s':'')+' · '+money(b.amt)+'</small></div><i><b style="width:'+(b.n/tmx*100)+'%"></b></i></div>').join(''):'<div class="muted">Nobody yet.</div>')+'</div>'
     +'<div class="panel rp-pan"><h3>How it works</h3><p class="muted" style="margin:0;font-size:13px">For every gas charge on a Ramp card, the dashboard looks at where the card holder’s trucks were (Azuga) within 30 minutes. If none of theirs was there, it checks every company truck, since crews swap trucks. It is marked red only when their own truck was out driving somewhere else and no company truck was at the station. If their truck just sat parked, it is grey: they were most likely in another vehicle (some trucks have no tracker). Gallons over the tank size and a 2nd fill-up with little driving are shown in grey as things to glance at (often gas cans or equipment). Use “Mark OK” to clear anything you know is fine. '+(UP.personalNames&&UP.personalNames.length?'District managers ('+UP.personalNames.map(esc).join(', ')+') use a personal car and a work truck, so their fill-ups only count for a truck when GPS puts it at the pump; the rest are listed under “Personal + work vehicle”.':'')+'</p></div></aside></div>'}
+const camRowsHtml=(rows,last)=>{if(!rows||!rows.length)return '';const bad=rows.filter(r=>r.bad&&r.bad.length);
+  return '<div class="panel rp-pan camchk"><h3>Cameras '+(last?'<small class="muted">checked '+esc(new Date(last).toLocaleString('en-US',{weekday:'short',hour:'numeric',minute:'2-digit'}))+'</small>':'')+'</h3>'+(bad.length?bad.map(r=>'<div class="cqr bad"><b>'+esc(r.truck)+'</b><span>'+esc(r.who||'')+'</span><em>'+r.bad.map(b=>(b.cam==='road'?'Road':'Driver')+' camera: '+esc(b.issue.replace('_',' '))+(b.note?' ('+esc(b.note)+')':'')).join(' · ')+'</em></div>').join(''):'<div class="cqr ok">All '+rows.length+' cameras look fine.</div>')
+   +(bad.length?'<div class="cqr ok">'+(rows.length-bad.length)+' other camera'+(rows.length-bad.length===1?'':'s')+' look fine.</div>':'')+'</div>'};
 const upRem=(icon,title,on,how,who,when,actions)=>'<div class="rmc wide'+(on?' live':'')+'"><div class="rmh"><span class="rmi">'+icon+'</span><div><b>'+title+'</b><small>'+how+'</small></div>'+(on?'<span class="rmpill on">● On</span>':'<span class="rmpill off">Off</span>')+'</div><dl class="rmd"><dt>About</dt><dd>'+who+'</dd><dt>When</dt><dd>'+when+'</dd></dl><div class="rma">'+actions+'</div></div>';
 function renderUp(){const u=UP;if(!u)return;let h='';
   if(USEC==='oil'){const o=Array.isArray(u.oil)?u.oil.filter(upf):[],lab={due:'Due now',soon:'Due soon',ok:'OK',unknown:'No record'};
@@ -5582,6 +5650,8 @@ function renderUp(){const u=UP;if(!u)return;let h='';
      +grp('Due in 30 days or expired',r.filter(need).sort((a,b)=>lt(a)-lt(b)),'bad')+grp('Missing a date',r.filter(miss),'warn')+grp('All set',r.filter(x=>!need(x)&&!miss(x)).sort((a,b)=>lt(a)-lt(b)),'good')}
   if(USEC==='saf'){$('upCount').textContent='Idling texts as it happens, and every Friday at 5 PM each driver gets their score, camera events, time at pools and Ramp spending';
     h=upRem('⏱️','Long idling text',u.settings.idle,'Text to the driver','Any truck idling '+(u.idleMin||15)+'+ minutes, live or on a trip that just ended','Checked every 5 min, 6 AM–9 PM · at most 2 a day per driver','<label class="sw"><input type="checkbox" id="upIdleOn"'+(u.settings.idle?' checked':'')+'><i></i>Text automatically</label><button class="btn2" id="upIdleNow">Who would get one now?</button>')+(u.idleLog&&u.idleLog.length?'<p class="muted" style="font-size:12.5px;margin:6px 0 14px">Recent idle texts: '+u.idleLog.slice(0,8).map(x=>esc(x.who)+' '+x.mins+' min').join(', ')+'</p>':'')+(!u.sms?'<p class="muted">Texting isn’t set up in Render.</p>':'')
+     +upRem('📷','Camera view check',u.settings.camchk,'Text to the driver · text to you if it isn’t fixed by the next day','Each truck’s newest road + driver camera snapshots, read by Claude: blocked, pointing the wrong way, or too dirty to see','Every day at '+((u.camHour||11)>12?(u.camHour-12)+' PM':(u.camHour||11)+' AM')+' · trucks with no camera event this week can’t be checked','<label class="sw"><input type="checkbox" id="upCamOn"'+(u.settings.camchk?' checked':'')+'><i></i>Check automatically</label><button class="btn2" id="upCamNow">Check cameras now (no texts)</button>')
+     +'<div id="upCamOut">'+camRowsHtml(u.camRows,u.camLast)+'</div>'
      +'<div class="saf"><div class="panel rp-pan"><h3>Friday driver report</h3><label class="sw"><input type="checkbox" id="upSafOn"'+(u.settings.safety?' checked':'')+'><i></i>Text every driver, Fridays at 5 PM</label>'
      +'<ul class="safl"><li><b>Driver score</b> out of 100 and their rank</li><li><b>Camera events</b> this week and the worst one</li><li><b>Time at pools</b>: visits and average minutes vs their usual</li><li><b>Ramp spending</b> this week (and how much was gas)</li><li><b>Private link</b> to their report with the clips (works 2 weeks)</li></ul>'
      +'<p class="muted" style="font-size:13px">Texted to the mobile number on their Airtable record; drivers with no phone get it by email.</p>'
@@ -5600,10 +5670,11 @@ document.addEventListener('click',async e=>{const n=e.target.closest('#upNav [da
   if(id==='upRenTest')go('/api/upkeep/renewal-test',{},r=>{e.target.textContent=r.sent.length?'Sent: '+r.sent.length:'Nothing due in 30 days'});
   if(id==='upSafPrev'){const v=$('upSafName').value.trim();$('upSafOut').innerHTML='<div class="mail"><div class="mail-h"><b>Loading...</b></div></div>';try{const r=await get('/api/upkeep/safety-preview?name='+encodeURIComponent(v));
     $('upSafOut').innerHTML=r.error?'<div class="empty">'+esc(r.error)+'</div>':(r.sms?'<div class="mail"><div class="mail-h"><b>Text message</b><span>To: '+esc(r.name)+'</span></div><div class="mail-b">'+esc(r.sms)+'</div></div>':'')+'<div class="mail"><div class="mail-h"><b>'+esc(r.subject)+'</b><span>To: '+esc(r.name)+' · from contact@millennialpools.com</span></div><div class="mail-b">'+esc(r.body).split('\\n').join('<br>')+'</div></div>'}catch(err){$('upSafOut').textContent=err.message}}
+  if(id==='upCamNow'){e.target.textContent='Checking every camera (a minute or two)...';go('/api/upkeep/cam-check',{dry:true},r=>{e.target.textContent='Check cameras now (no texts)';$('upCamOut').innerHTML=camRowsHtml(r.rows,Date.now())||'<p class="muted">No camera snapshots from this week to check.</p>'});}
   if(id==='upIdleNow')go('/api/upkeep/idle-now',{},r=>{e.target.textContent=r.wouldText.length?r.wouldText.map(x=>x.who.split(' ')[0]+' ('+x.mins+'m)').join(', '):'Nobody idling '+r.minutes+'+ min right now'});
   if(id==='upSafTest')go('/api/upkeep/safety-sample',{name:$('upSafName').value.trim()},r=>{$('upSafMsg').textContent='Sent '+r.name+'’s email to '+r.to});
 });
-document.addEventListener('change',async e=>{const t=e.target,map={upOilOn:'oil',upRenOn:'renew',upSafOn:'safety',upIdleOn:'idle'};
+document.addEventListener('change',async e=>{const t=e.target,map={upOilOn:'oil',upRenOn:'renew',upSafOn:'safety',upIdleOn:'idle',upCamOn:'camchk'};
   if(map[t.id]){try{UP.settings=await post('/api/upkeep/settings',{[map[t.id]]:t.checked});renderUp()}catch(err){alert(err.message);t.checked=!t.checked}return}
   if(t.dataset&&t.dataset.ren){try{await post('/api/upkeep/renewal',{id:t.dataset.id,[t.dataset.ren]:t.value});const x=UP.renew.find(r=>r.id===t.dataset.id);x[t.dataset.ren+'Air']=t.value;if(!x[t.dataset.ren]||x[t.dataset.ren+'Src']!=='checkup'||t.value>x[t.dataset.ren]){x[t.dataset.ren]=t.value;x[t.dataset.ren+'Src']=t.value?'airtable':''}x[t.dataset.ren+'Left']=x[t.dataset.ren]?Math.round((Date.parse(x[t.dataset.ren]+'T12:00')-Date.now())/864e5):null;t.classList.add('saved');setTimeout(renderUp,700)}catch(err){alert(err.message)}}});
 // ---- Purchases tab: hardware-store receipts from Ramp, item by item, with season-end return status ----
