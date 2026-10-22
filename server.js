@@ -1699,7 +1699,7 @@ const rampRepairs = () => cached('rampRepairs', 3600, async () => {
 // (ANTHROPIC_API_KEY in Render; the Ramp app needs receipts:read). Every line becomes a row in Airtable's
 // "Ramp items" table with a link to the item and a Status (Out / Returned / Used up) for season-end returns.
 const AT_ITEMS = 'tbl6f6FmKPRdie2uK', IT = { item: 'fldfmOGrz3tAqyezP', txn: 'fldXZEoseMTikTgag', date: 'fld2WjFbXDZhqOBda', store: 'fldHsRbMDA1cR2bkp', person: 'fldwyvwcJAb8F0iGw',
-  memo: 'fldPRjPJD6cvCmvGp', sku: 'fldJrAoNyn1x1b6OM', qty: 'fldV9CKeJD8cH3G7F', price: 'fldbu8c7CM3UAOCbF', link: 'fldf5PvAkxMQh33f3', ramp: 'fld9AX1cKax6Ol5Na', status: 'fldKj2OZkOHoPF9qF', notes: 'fldO2GBAIjZlFhnqo' };
+  photo: 'fldD9VsfaDaEBu0hw', memo: 'fldPRjPJD6cvCmvGp', sku: 'fldJrAoNyn1x1b6OM', qty: 'fldV9CKeJD8cH3G7F', price: 'fldbu8c7CM3UAOCbF', link: 'fldf5PvAkxMQh33f3', ramp: 'fld9AX1cKax6Ol5Na', status: 'fldKj2OZkOHoPF9qF', notes: 'fldO2GBAIjZlFhnqo' };
 const HW_STORE = /home ?depot|lowe'?s|harbor ?freight|amazon|amzn|tractor supply|\bace\b|menards|northern tool|grainger|true value|leslie'?s|pinch a penny|sherwin|walmart|target|costco|sam'?s club|staples|best buy|autozone|advance auto|o'?reilly|napa/i;
 const ITEMS_SINCE = process.env.ITEMS_SINCE || '2026-03-01';
 const AI_KEY = () => clean(process.env.ANTHROPIC_API_KEY || ''), AI_MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
@@ -1839,10 +1839,41 @@ async function purchases() {
   if (!RAMP_CLIENT_ID || !RAMP_CLIENT_SECRET) return { connected: false };
   const st = itemsState(), [tx, recs] = await Promise.all([hwPurchases(), cached('itemsAT', 60, () => atAll(AT_ITEMS, Object.values(IT)))]);
   const items = recs.map(r => { const f = r.fields; return { id: r.id, name: clean(f[IT.item]), txn: clean(f[IT.txn]), date: clean(f[IT.date]), store: clean(f[IT.store]), who: clean(f[IT.person]), memo: clean(f[IT.memo]),
-    sku: clean(f[IT.sku]), qty: f[IT.qty] || 1, price: f[IT.price] || 0, link: itemLink(f[IT.store], clean(f[IT.sku]), clean(f[IT.item])), alt: itemGoogle(f[IT.store], clean(f[IT.sku]), clean(f[IT.item])), ramp: clean(f[IT.ramp]), status: clean(f[IT.status]?.name ?? f[IT.status]) || 'Out', notes: clean(f[IT.notes]) }; });
+    sku: clean(f[IT.sku]), qty: f[IT.qty] || 1, price: f[IT.price] || 0, link: itemLink(f[IT.store], clean(f[IT.sku]), clean(f[IT.item])), alt: itemGoogle(f[IT.store], clean(f[IT.sku]), clean(f[IT.item])), ramp: clean(f[IT.ramp]), status: clean(f[IT.status]?.name ?? f[IT.status]) || 'Out', notes: clean(f[IT.notes]), photo: clean(f[IT.photo]) }; });
   const txns = tx.map(t => ({ ...t, state: st.done[t.id] ? (String(st.done[t.id]).startsWith('err') ? 'error' : 'read') : t.receipts.length ? 'waiting' : 'noReceipt', err: String(st.done[t.id] || '').startsWith('err') ? String(st.done[t.id]).slice(5) : '' }));
-  return { connected: true, ai: !!AI_KEY(), err: st.err || '', last: st.last || 0, busy: itemsBusy, since: ITEMS_SINCE, items, txns };
+  return { connected: true, ai: !!AI_KEY(), err: st.err || '', last: st.last || 0, busy: itemsBusy, photoErr: st.photoErr || '', photoBusy, since: ITEMS_SINCE, items, txns };
 }
+// Product pictures for Home Depot items: the main photo on the store's page (og:image), looked up once per item and saved in Airtable.
+// Internet # (9 digits) goes straight to the product; a UPC or the item name goes through Home Depot's search (less exact).
+async function hdPhoto(sku, name) {
+  const path = /^\d{9}$/.test(sku) ? 'p/' + sku : /^\d{11,14}$/.test(sku) ? 's/' + sku : 's/' + encodeURIComponent(name.slice(0, 60));
+  const r = await fetch('https://www.homedepot.com/' + path, { redirect: 'follow', signal: AbortSignal.timeout(15000),
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36', Accept: 'text/html,application/xhtml+xml', 'Accept-Language': 'en-US,en;q=0.9' } });
+  if (!r.ok) throw new Error('Home Depot ' + r.status);
+  const h = await r.text(), og = (h.match(/property="og:image"\s+content="([^"]+)"/) || h.match(/content="([^"]+)"\s+property="og:image"/) || [])[1];
+  return (og && /thdstatic\.com\/productImages\//.test(og) ? og : (h.match(/https:\/\/images\.thdstatic\.com\/productImages\/[^"'\s\\]+?_(?:1000|600|400|300)\.(?:jpg|webp|png)/) || [])[0]) || '';
+}
+let photoBusy = false;
+async function findPhotos(max = 40) {
+  if (photoBusy) return { busy: true }; photoBusy = true; let found = 0, tried = 0, err = '';
+  try {
+    const st = itemsState(); st.photoTry = st.photoTry || {};
+    const recs = await atAll(AT_ITEMS, [IT.item, IT.store, IT.sku, IT.photo]), groups = {};
+    recs.filter(r => /home ?depot/i.test(r.fields[IT.store] || '') && !r.fields[IT.photo] && !(Date.now() - (st.photoTry[r.id] || 0) < 7 * 864e5))
+      .forEach(r => { const k = clean(r.fields[IT.sku]) || clean(r.fields[IT.item]).toLowerCase(); if (k) (groups[k] = groups[k] || []).push(r); });   // same item bought twice: look it up once
+    for (const rs of Object.values(groups).slice(0, max)) {
+      const f = rs[0].fields; tried++;
+      try { const url = await hdPhoto(clean(f[IT.sku]), clean(f[IT.item])); rs.forEach(r => { st.photoTry[r.id] = Date.now(); });
+        if (url) { found++; for (let i = 0; i < rs.length; i += 10) await airtable(AT_ITEMS, { method: 'PATCH', body: JSON.stringify({ records: rs.slice(i, i + 10).map(r => ({ id: r.id, fields: { [IT.photo]: url } })) }) }); }
+      } catch (e) { err = e.message; if (/403|429|timeout|abort/i.test(e.message)) break; }   // blocked: stop and try again later
+      await sleep(1200);
+    }
+    st.photoErr = err && !found ? err : ''; saveItemsState(st); if (found) cache.delete('itemsAT');
+    console.log(new Date().toISOString(), 'Item photos: found', found, 'of', tried, err ? '(' + err + ')' : '');
+    return { found, tried, err };
+  } finally { photoBusy = false; }
+}
+if (process.argv[2] !== 'test') { setTimeout(() => findPhotos().catch(e => console.error('Item photos:', e.message)), 4 * 60e3); setInterval(() => findPhotos().catch(e => console.error('Item photos:', e.message)), 30 * 60e3); }
 async function setItemStatus(b) {
   const status = ['Out', 'Returned', 'Used up'].includes(b.status) ? b.status : null, ids = (Array.isArray(b.ids) ? b.ids : []).map(String).filter(x => /^rec\w{14}$/.test(x)).slice(0, 200);
   if (!status || !ids.length) throw new Error('Pick items and a status.');
@@ -3305,7 +3336,7 @@ async function syncCameras() {
 if (process.argv[2] !== 'test' && AIRTABLE_TOKEN) { setTimeout(() => syncCameras(), 4 * 60e3); setInterval(() => syncCameras(), 60 * 60e3); }
 routes['/api/cameras/sync-status'] = () => ({ busy: camBusy, ...camState(), keys: undefined });
 // ---------------- Pool visits: time each tech's truck spent at each scheduled pool (Azuga GPS), one row per visit in Airtable "Pool visits" ----------------
-const AT_VIS = 'tbluerTi9eXWDU9if', VIS = { name: 'fld7U3SsUZ30RoXVQ', key: 'fldmStwClNSwxbLdo', date: 'fldRQTn65zhEhoMoX', tech: 'fldFiwsaOtyQlSx4F', pool: 'fld9sewnDCen43WoB', addr: 'fldbs4X1HGDnuBNEA',
+const AT_VIS = 'tbluerTi9eXWDU9if', VIS = { job: 'fldW8SiBYPBRrPWYr', name: 'fld7U3SsUZ30RoXVQ', key: 'fldmStwClNSwxbLdo', date: 'fldRQTn65zhEhoMoX', tech: 'fldFiwsaOtyQlSx4F', pool: 'fld9sewnDCen43WoB', addr: 'fldbs4X1HGDnuBNEA',
   mins: 'fldSuhmwtaTpO1Zbu', arr: 'fldIU9Ztb7NYqKLTs', left: 'fldV6xyN3FhXA4vGe', type: 'fld3jdlrXTrtIQrqi', status: 'fldO9Ry5EsIr8aRoK', truck: 'fldPSpFIs806AL36b' };
 const VIS_DAYS = +process.env.VISIT_BACKFILL_DAYS || 90;   // how far back to work out visits from GPS history
 const VIS_MIN = 2, VIS_MAX = 240;   // a truck there under 2 min drove past; over 4 h is a parked truck, not a service
@@ -3321,7 +3352,7 @@ async function logVisitDay(ymd) {
     for (const s of v.stops) {
       if (!s.visit || !inDay(s)) continue;
       recs.push({ fields: { [VIS.name]: (s.customer || 'Pool') + ' · ' + tech + ' · ' + ymd, [VIS.key]: s.id + '|' + ymd, [VIS.date]: ymd, [VIS.tech]: tech, [VIS.pool]: s.customer || '', [VIS.addr]: s.address || '',
-        [VIS.mins]: s.visit.mins, [VIS.arr]: new Date(s.visit.arrive).toISOString(), [VIS.left]: new Date(s.visit.leave).toISOString(), [VIS.type]: s.type || '', [VIS.status]: s.done ? 'Done' : 'Not done', ...(tk ? { [VIS.truck]: [tk] } : {}) } });
+        [VIS.mins]: s.visit.mins, [VIS.arr]: new Date(s.visit.arrive).toISOString(), [VIS.left]: new Date(s.visit.leave).toISOString(), [VIS.type]: s.type || '', [VIS.job]: s.job || s.type || '', [VIS.status]: s.done ? 'Done' : 'Not done', ...(tk ? { [VIS.truck]: [tk] } : {}) } });
     }
     await sleep(500);
   }
@@ -3342,8 +3373,8 @@ async function visitBackfill(max = 3) {
   } catch (e) { console.error('Pool visits:', e.message); } finally { visBusy = false; }
 }
 if (process.argv[2] !== 'test') { setTimeout(() => visitBackfill(), 7 * 60e3); setInterval(() => visitBackfill(), 20 * 60e3); }
-const allVisits = () => cached('visAll', 1800, async () => (await atAll(AT_VIS, [VIS.date, VIS.tech, VIS.pool, VIS.addr, VIS.mins, VIS.arr, VIS.status, VIS.type])).map(r => { const f = r.fields;
-  return { d: f[VIS.date] || '', tech: f[VIS.tech] || '', pool: f[VIS.pool] || '', addr: f[VIS.addr] || '', m: +f[VIS.mins] || 0, a: f[VIS.arr] || '', t: f[VIS.type] || '', done: ((f[VIS.status] && f[VIS.status].name) || f[VIS.status]) === 'Done' }; }));
+const allVisits = () => cached('visAll', 1800, async () => (await atAll(AT_VIS, [VIS.date, VIS.tech, VIS.pool, VIS.addr, VIS.mins, VIS.arr, VIS.status, VIS.type, VIS.job])).map(r => { const f = r.fields;
+  return { d: f[VIS.date] || '', tech: f[VIS.tech] || '', pool: f[VIS.pool] || '', addr: f[VIS.addr] || '', m: +f[VIS.mins] || 0, a: f[VIS.arr] || '', t: f[VIS.type] || '', j: f[VIS.job] || '', done: ((f[VIS.status] && f[VIS.status].name) || f[VIS.status]) === 'Done' }; }));
 // Only regular tech visits set a tech's average; winterizing, closing crew, check-ups, repairs etc. take a different amount of time
 const isTechVisit = x => !x.t || /tech\s*visit/i.test(x.t);
 const visAgg = (list, key) => { const g = {}; list.forEach(x => (g[x[key]] = g[x[key]] || []).push(x));
@@ -3357,7 +3388,7 @@ routes['/api/pools/time'] = async q => {
     const techs = visAgg(v, 'tech').map(t => ({ ...t, perDay: Math.round(t.n / Math.max(1, t.days) * 10) / 10, allAvg: base[t.name] ? base[t.name].avg : t.avg, allN: base[t.name] ? base[t.name].n : t.n,
       pools: visAgg(v.filter(x => x.tech === t.name), 'pool').sort((a, b) => b.n - a.n).slice(0, 25),
       jobs: visAgg(other.filter(x => x.tech === t.name), 't').sort((a, b) => b.n - a.n),
-      recent: vAll.filter(x => x.tech === t.name).sort((a, b) => b.a.localeCompare(a.a)).slice(0, 30).map(x => ({ d: x.d, a: x.a, pool: x.pool, m: x.m, done: x.done, t: isTechVisit(x) ? '' : x.t })) })).sort((a, b) => b.n - a.n);
+      recent: vAll.filter(x => x.tech === t.name).sort((a, b) => b.a.localeCompare(a.a)).slice(0, 30).map(x => ({ d: x.d, a: x.a, pool: x.pool, m: x.m, done: x.done, t: x.j || x.t, other: !isTechVisit(x) })) })).sort((a, b) => b.n - a.n);
     const pools = visAgg(v, 'pool').map(p => ({ ...p, addr: (v.find(x => x.pool === p.name) || {}).addr || '', techs: visAgg(v.filter(x => x.pool === p.name), 'tech').map(t => ({ name: t.name, avg: t.avg, n: t.n })).sort((a, b) => b.n - a.n) })).sort((a, b) => b.n - a.n).slice(0, 400);
     return { days, since, visits: v.length, fleetAvg: v.length ? Math.round(v.reduce((a, x) => a + x.m, 0) / v.length) : 0, logged: visState().days.length, backfill: VIS_DAYS,
       oldest: every.reduce((m, x) => x.d && x.d < m ? x.d : m, '9999'), jobs: visAgg(other, 't').sort((a, b) => b.n - a.n), techs, pools };
@@ -3460,7 +3491,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/azuga/name-trucks': nameTrucks, '/api/truck/take-out': takeOutDriver, '/api/text/sample': textSample, '/api/repair/read': readInvoice, '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/svc/test': () => svcTest(), '/api/eod/test': () => eodTest(), '/api/eod/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.eod = { ...(st.eod || {}), on: b.on === true }; saveMail(st); return { on: st.eod.on }; }, '/api/svc/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.svc = { ...(st.svc || { day: '', sent: {} }), on: b.on === true }; saveMail(st); return { on: st.svc.on }; }, '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/purchases/photos': () => { findPhotos(60).catch(e => console.error('Item photos:', e.message)); return { started: true }; }, '/api/azuga/name-trucks': nameTrucks, '/api/truck/take-out': takeOutDriver, '/api/text/sample': textSample, '/api/repair/read': readInvoice, '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/svc/test': () => svcTest(), '/api/eod/test': () => eodTest(), '/api/eod/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.eod = { ...(st.eod || {}), on: b.on === true }; saveMail(st); return { on: st.eod.on }; }, '/api/svc/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.svc = { ...(st.svc || { day: '', sent: {} }), on: b.on === true }; saveMail(st); return { on: st.svc.on }; }, '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   Object.assign(POSTS, UPKEEP_POSTS);
@@ -4248,7 +4279,7 @@ body:has(header[data-sky=night]) .pin{box-shadow:0 0 0 3px rgba(255,255,255,.9),
 .rmc.wide{margin-bottom:14px}.rmc.wide .rma .sw{flex:1 1 auto}
 .dcon input{background:#f0f9ff}.dcon{position:relative}
 .ptbar{position:relative;height:10px;border-radius:6px;background:#f1f5f9}.ptbar i{position:absolute;inset:0 auto 0 0;border-radius:6px;background:linear-gradient(90deg,#22d3ee,#0e7490)}.ptbar em{position:absolute;top:-4px;bottom:-4px;width:2px;background:#0f172a;opacity:.55}
-.ptbad{color:#b91c1c;font-weight:700}.ptjobs{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px;margin:-4px 0 14px;color:#64748b}.ptjobs em{font-style:normal;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:999px;padding:3px 10px;color:#334155}.ptjt{display:inline-block;margin-left:6px;font-size:11px;font-weight:700;background:#ede9fe;color:#6d28d9;border-radius:999px;padding:1px 8px}.ptchg{font-size:12.5px;font-weight:700;border-radius:10px;padding:5px 9px}.ptchg.dn{background:#fff7ed;color:#c2410c}.ptchg.up{background:#ecfeff;color:#0e7490}.ptnote{font-size:12.5px;margin:-4px 0 12px}
+.ptbad{color:#b91c1c;font-weight:700}.ptjobs{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px;margin:-4px 0 14px;color:#64748b}.ptjobs em{font-style:normal;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:999px;padding:3px 10px;color:#334155}.ptjt{display:inline-block;margin-left:6px;font-size:11px;font-weight:700;background:#ede9fe;color:#6d28d9;border-radius:999px;padding:1px 8px}.ptjt.tv{background:#e0f2fe;color:#0369a1}.ptchg{font-size:12.5px;font-weight:700;border-radius:10px;padding:5px 9px}.ptchg.dn{background:#fff7ed;color:#c2410c}.ptchg.up{background:#ecfeff;color:#0e7490}.ptnote{font-size:12.5px;margin:-4px 0 12px}
 .ptpools{display:grid;gap:8px}.ptp{display:grid;grid-template-columns:minmax(180px,1.4fr) 110px 2fr;gap:10px;align-items:center;background:#fff;border-radius:12px;padding:10px 14px;box-shadow:0 2px 8px rgba(15,23,42,.05)}.ptp small{display:block;color:#64748b;font-size:12px}.ptm b{font-size:17px;color:#0b4a63}.ptt{display:flex;flex-wrap:wrap;gap:5px}.ptt span{font-size:12px;background:#e0f2fe;color:#0b4a63;border-radius:10px;padding:2px 8px}
 @media(max-width:700px){.ptp{grid-template-columns:1fr auto}.ptt{grid-column:1/-1}}.ptus{color:#0e7490;font-weight:700}#pomNav{margin-right:10px}
 .rmhead{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;margin:4px 0 10px}.rmhead h3{margin:0;font-size:16px;color:#0b4a63}.rmhead .muted{font-size:12.5px}
@@ -4526,7 +4557,7 @@ body[data-v=vCam]:not([data-v=vMap]) .bar{max-width:1400px}
  <div id="rsGas" hidden></div>
  <div id="rsGps" hidden></div>
  <div id="rsCost" hidden></div>
- <div id="rsItems" hidden><div class="crewhead" style="margin-top:4px"><p id="buyCount" class="muted">Loading Ramp purchases...</p><span style="flex:1"></span><select id="buyWho" aria-label="Filter by person"><option value="">Everyone</option></select><button class="btn2" id="buyRead">Read new receipts now</button></div>
+ <div id="rsItems" hidden><div class="crewhead" style="margin-top:4px"><p id="buyCount" class="muted">Loading Ramp purchases...</p><span style="flex:1"></span><select id="buyWho" aria-label="Filter by person"><option value="">Everyone</option></select><button class="btn2" id="buyRead">Read new receipts now</button><button class="btn2" id="buyPrint" title="Home Depot items that match the filters, with a picture of each">Print Home Depot list</button></div>
  <div id="buySum"></div><div class="bchips" id="buyChips"></div><div class="rp-grid"><div id="buyList"></div><aside id="buySide"></aside></div></div>
 </div>
 <div id="vUp" hidden>
@@ -5399,7 +5430,7 @@ function renderPoolTime(){const r=PT;if(!r)return;const q=$('q').value.trim().to
        +(Math.abs(d)>=3&&t.allN>t.n?'<div class="ptchg '+(d<0?'dn':'up')+'">'+(d<0?'▼ ':'▲ ')+Math.abs(d)+' min '+(d<0?'shorter':'longer')+' than usual lately</div>':'')
        +'<details class="ukd"><summary>Pools and recent visits</summary><div class="bd"><h4>Their pools <span>avg · visits</span></h4>'+t.pools.map(p=>'<div class="bdr"><div><b>'+esc(p.name||'Pool')+'</b></div><b>'+p.avg+' min · '+p.n+'</b></div>').join('')
        +((t.jobs||[]).length?'<h4>Other jobs <span>not in their average</span></h4>'+t.jobs.map(j=>'<div class="bdr"><div><b>'+esc(j.name)+'</b></div><b>'+j.avg+' min · '+j.n+'</b></div>').join(''):'')
-       +'<h4>Recent visits</h4>'+t.recent.map(x=>'<div class="bdr"><div><b>'+esc(x.pool||'Pool')+'</b>'+(x.t?'<span class="ptjt">'+esc(x.t)+'</span>':'')+'<small>'+fdate(x.d)+(x.a?' · arrived '+new Date(x.a).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'')+(x.done?'':' · not submitted in POM')+'</small></div><b class="'+(x.m<8&&!x.t?'ptbad':'')+'">'+mins(x.m)+'</b></div>').join('')+'</div></details></div>'}).join('')+'</div>'
+       +'<h4>Recent visits</h4>'+t.recent.map(x=>'<div class="bdr"><div><b>'+esc(x.pool||'Pool')+'</b>'+(x.t?'<span class="ptjt'+(x.other?'':' tv')+'"'+(x.other?' title="Not counted in the average"':'')+'>'+esc(x.t)+'</span>':'')+'<small>'+fdate(x.d)+(x.a?' · arrived '+new Date(x.a).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'')+(x.done?'':' · not submitted in POM')+'</small></div><b class="'+(x.m<8&&!x.t?'ptbad':'')+'">'+mins(x.m)+'</b></div>').join('')+'</div></details></div>'}).join('')+'</div>'
      :'<div class="empty">'+(r.logged?'No pool visits found for this range yet.':'No visits logged yet. The first days of GPS history are being worked out now; check back in a few minutes.')+'</div>'}
   else h+=P.length?'<div class="ptpools">'+P.map(p=>'<div class="ptp"><div><b>'+esc(p.name||'Pool')+'</b><small>'+esc(p.addr)+'</small></div><div class="ptm"><b>'+p.avg+' min</b><small>'+p.n+' visit'+(p.n>1?'s':'')+'</small></div><div class="ptt">'+p.techs.map(t=>'<span title="'+t.n+' visits">'+esc(t.name.split(' ')[0])+' '+t.avg+'m</span>').join('')+'</div></div>').join('')+'</div>':'<div class="empty">No pools match.</div>';
   $('psTime').innerHTML=h}
@@ -5918,6 +5949,20 @@ function renderBuy(){const r=BUY;if(!r)return;
     +(nr.length?'<div class="panel bside"><h4>No receipt in Ramp yet</h4>'+nr.map(t=>'<a class="brow" href="'+esc(t.link)+'" target="_blank" rel="noopener"><b>'+esc(t.who)+'</b><span>'+esc(t.store)+' · '+esc(t.date)+' · '+money(t.amount)+'</span></a>').join('')+'</div>':'');
 }
 $('buyWho').onchange=renderBuy;
+// Printable list of Home Depot items (current filters), with each item's picture from homedepot.com
+document.addEventListener('click',e=>{if(!e.target.closest('#buyPrint')||!BUY||!BUY.items)return;
+  const q=$('q').value.trim().toLowerCase(),who=$('buyWho').value;
+  const it=BUY.items.filter(x=>/home ?depot/i.test(x.store)&&(!who||x.who===who)&&(BUYF==='All'||x.status===BUYF)&&(!q||(x.name+' '+x.sku+' '+x.who+' '+x.memo).toLowerCase().includes(q))).sort((a,b)=>(b.date||'').localeCompare(a.date||'')||a.name.localeCompare(b.name));
+  if(!it.length){alert('No Home Depot items match the filters.');return}
+  const miss=it.filter(x=>!x.photo).length;if(miss)post('/api/purchases/photos',{}).catch(()=>{});
+  const tot=it.reduce((a,x)=>a+(+x.price||0),0),qty=it.reduce((a,x)=>a+(+x.qty||1),0);
+  const what=[BUYF==='All'?'All items':BUYF==='Out'?'Still out':BUYF,who||'Everyone',q?'matching “'+q+'”':''].filter(Boolean).join(' · ');
+  const rows=it.map(x=>'<tr><td class="ph">'+(x.photo?'<img src="'+esc(x.photo)+'" referrerpolicy="no-referrer" onerror="this.remove()">':'')+'</td><td class="nm"><b>'+esc(x.name)+'</b>'+(x.sku?'<small>SKU '+esc(x.sku)+'</small>':'')+'</td><td class="c">'+x.qty+'</td><td class="r">'+money(x.price)+'</td><td>'+esc(x.date)+'</td><td>'+esc(x.who)+'</td><td>'+esc(x.status)+'</td></tr>').join('');
+  const css='body{font:12.5px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a;margin:24px}h1{font-size:19px;margin:0 0 2px}p{margin:0 0 14px;color:#475569}table{width:100%;border-collapse:collapse}th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;border-bottom:2px solid #cbd5e1;padding:6px}td{border-bottom:1px solid #e2e8f0;padding:6px;vertical-align:middle}tr{break-inside:avoid}td.ph{width:72px;height:72px;text-align:center}td.ph img{width:68px;height:68px;object-fit:contain;display:block;margin:auto}td.ph:empty::after{content:"No photo";font-size:10px;color:#94a3b8}td.nm small{display:block;color:#64748b}.c{text-align:center}.r{text-align:right;white-space:nowrap}tfoot td{font-weight:700;border-top:2px solid #cbd5e1;border-bottom:0}@media print{body{margin:10mm}.np{display:none}}.np{margin:0 0 14px}.np button{font:inherit;padding:6px 14px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;cursor:pointer}';
+  const w=window.open('','_blank');if(!w){alert('Allow pop-ups for this site to print the list.');return}
+  w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Home Depot items · '+esc(what)+'</title><style>'+css+'</style></head><body><div class="np"><button onclick="print()">Print</button></div><h1>Home Depot items</h1><p>'+esc(what)+' · '+it.length+' items · '+qty+' pieces · '+money(tot)+' · printed '+new Date().toLocaleDateString('en-US',{dateStyle:'medium'})+(miss?' · '+miss+' without a picture yet':'')+'</p><table><thead><tr><th></th><th>Item</th><th class="c">Qty</th><th class="r">Price</th><th>Bought</th><th>Who</th><th>Status</th></tr></thead><tbody>'+rows+'</tbody><tfoot><tr><td></td><td>Total</td><td class="c">'+qty+'</td><td class="r">'+money(tot)+'</td><td colspan="3"></td></tr></tfoot></table><scr'+'ipt>window.onload=function(){setTimeout(function(){print()},300)}</scr'+'ipt></body></html>');
+  w.document.close()});
+
 document.addEventListener('click',async e=>{const c=e.target.closest('[data-bf]');if(c){BUYF=c.dataset.bf;renderBuy();return}
   const b=e.target.closest('#vBuy [data-bs]');if(!b)return;const ids=b.dataset.ball?b.dataset.ball.split(','):[b.dataset.bi],st=b.dataset.bs;b.disabled=true;
   try{await post('/api/purchase/status',{ids,status:st});BUY.items.forEach(x=>{if(ids.includes(x.id))x.status=st});renderBuy();toast(ids.length+' item'+(ids.length>1?'s':'')+' marked '+st.toLowerCase())}catch(err){toast(err.message,'bad');b.disabled=false}});
