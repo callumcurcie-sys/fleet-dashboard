@@ -1853,19 +1853,41 @@ async function hdPhoto(sku, name) {
   const h = await r.text(), og = (h.match(/property="og:image"\s+content="([^"]+)"/) || h.match(/content="([^"]+)"\s+property="og:image"/) || [])[1];
   return (og && /thdstatic\.com\/productImages\//.test(og) ? og : (h.match(/https:\/\/images\.thdstatic\.com\/productImages\/[^"'\s\\]+?_(?:1000|600|400|300)\.(?:jpg|webp|png)/) || [])[0]) || '';
 }
+// Photos looked up some other way (e.g. from a browser that Home Depot doesn't block): { map: { sku-or-lowercase-name: imageUrl } }
+async function savePhotoMap(b) {
+  const map = b && typeof b.map === 'object' ? b.map : {}, st = itemsState(); st.photoTry = st.photoTry || {};
+  const recs = await atAll(AT_ITEMS, [IT.item, IT.store, IT.sku, IT.photo]), fix = [];
+  for (const r of recs) { const f = r.fields; if (f[IT.photo] || !/home ?depot/i.test(f[IT.store] || '')) continue;
+    const k = clean(f[IT.sku]) || clean(f[IT.item]).toLowerCase(); if (!(k in map)) continue;
+    const u = String(map[k] || ''); st.photoTry[r.id] = Date.now();
+    if (/^https:\/\/images\.thdstatic\.com\/productImages\/[\w\-\/.%]+$/.test(u)) fix.push({ id: r.id, fields: { [IT.photo]: u } }); }
+  for (let i = 0; i < fix.length; i += 10) { await airtable(AT_ITEMS, { method: 'PATCH', body: JSON.stringify({ records: fix.slice(i, i + 10) }) }); await sleep(220); }
+  saveItemsState(st); cache.delete('itemsAT');
+  return { saved: fix.length };
+}
+// Backup when Home Depot blocks the server: UPCitemdb's free lookup (about 100 a day) has pictures for many barcodes
+async function upcPhoto(upc) {
+  const r = await fetch('https://api.upcitemdb.com/prod/trial/lookup?upc=' + encodeURIComponent(upc), { signal: AbortSignal.timeout(12000), headers: { Accept: 'application/json' } });
+  if (r.status === 429) throw new Error('UPC lookups used up for today'); if (!r.ok) throw new Error('UPC lookup ' + r.status);
+  const j = await r.json(), it = (j.items || [])[0]; return ((it && it.images) || []).find(u => /^https:\/\//.test(u)) || '';
+}
 let photoBusy = false;
 async function findPhotos(max = 40) {
   if (photoBusy) return { busy: true }; photoBusy = true; let found = 0, tried = 0, err = '';
   try {
     const st = itemsState(); st.photoTry = st.photoTry || {};
-    const recs = await atAll(AT_ITEMS, [IT.item, IT.store, IT.sku, IT.photo]), groups = {};
+    const recs = await atAll(AT_ITEMS, [IT.item, IT.store, IT.sku, IT.photo]), groups = {}; let hdBlocked = false;
     recs.filter(r => /home ?depot/i.test(r.fields[IT.store] || '') && !r.fields[IT.photo] && !(Date.now() - (st.photoTry[r.id] || 0) < 7 * 864e5))
       .forEach(r => { const k = clean(r.fields[IT.sku]) || clean(r.fields[IT.item]).toLowerCase(); if (k) (groups[k] = groups[k] || []).push(r); });   // same item bought twice: look it up once
-    for (const rs of Object.values(groups).slice(0, max)) {
+    const upcFirst = rs => /^\d{9,14}$/.test(clean(rs[0].fields[IT.sku])) ? 0 : 1;   // numbered items first: they're the ones a backup lookup can find
+    for (const rs of Object.values(groups).sort((a, b) => upcFirst(a) - upcFirst(b)).slice(0, max)) {
       const f = rs[0].fields; tried++;
-      try { const url = await hdPhoto(clean(f[IT.sku]), clean(f[IT.item])); rs.forEach(r => { st.photoTry[r.id] = Date.now(); });
+      const sku = clean(f[IT.sku]);
+      try { let url = ''; if (!hdBlocked) { try { url = await hdPhoto(sku, clean(f[IT.item])); } catch (e) { if (!/403/.test(e.message)) throw e; hdBlocked = true; } }
+        if (!url && hdBlocked) { if (!/^\d{11,14}$/.test(sku)) continue; url = await upcPhoto(sku); }
+        rs.forEach(r => { st.photoTry[r.id] = Date.now(); });
         if (url) { found++; for (let i = 0; i < rs.length; i += 10) await airtable(AT_ITEMS, { method: 'PATCH', body: JSON.stringify({ records: rs.slice(i, i + 10).map(r => ({ id: r.id, fields: { [IT.photo]: url } })) }) }); }
-      } catch (e) { err = e.message; if (/403|429|timeout|abort/i.test(e.message)) break; }   // blocked: stop and try again later
+      } catch (e) { err = e.message; if (/403|429|timeout|abort|used up/i.test(e.message)) break; }   // blocked: stop and try again later
       await sleep(1200);
     }
     st.photoErr = err && !found ? err : ''; saveItemsState(st); if (found) cache.delete('itemsAT');
@@ -3491,7 +3513,7 @@ http.createServer(async (req, res) => {
     return res.end(DASHBOARD_PASSWORD ? 'Login required' : 'Set DASHBOARD_PASSWORD to use this dashboard');
   }
   const url = new URL(req.url, 'http://x');
-  const POSTS = { '/api/purchases/photos': () => { findPhotos(60).catch(e => console.error('Item photos:', e.message)); return { started: true }; }, '/api/azuga/name-trucks': nameTrucks, '/api/truck/take-out': takeOutDriver, '/api/text/sample': textSample, '/api/repair/read': readInvoice, '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/svc/test': () => svcTest(), '/api/eod/test': () => eodTest(), '/api/eod/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.eod = { ...(st.eod || {}), on: b.on === true }; saveMail(st); return { on: st.eod.on }; }, '/api/svc/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.svc = { ...(st.svc || { day: '', sent: {} }), on: b.on === true }; saveMail(st); return { on: st.svc.on }; }, '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
+  const POSTS = { '/api/purchases/photo-map': savePhotoMap, '/api/purchases/photos': () => { findPhotos(60).catch(e => console.error('Item photos:', e.message)); return { started: true }; }, '/api/azuga/name-trucks': nameTrucks, '/api/truck/take-out': takeOutDriver, '/api/text/sample': textSample, '/api/repair/read': readInvoice, '/api/pom/checkup-oneoff': oneOffCheckups, '/api/mail/test': () => mailTest(), '/api/mail/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return mailNow(); }, '/api/mail/auto': b => { const st = mailState(); if (b.on === true && !mailReady()) throw new Error('Add the Outlook email settings in Render first.'); st.auto = b.on === true; saveMail(st); return { auto: st.auto }; }, '/api/repair/add': addRepair, '/api/cameras/sync': () => syncCameras(), '/api/text/test': () => textTest(), '/api/svc/test': () => svcTest(), '/api/eod/test': () => eodTest(), '/api/eod/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.eod = { ...(st.eod || {}), on: b.on === true }; saveMail(st); return { on: st.eod.on }; }, '/api/svc/auto': b => { const st = mailState(); if (b.on === true && !canNotify()) throw new Error('Set up texting (Twilio) or email in Render first.'); st.svc = { ...(st.svc || { day: '', sent: {} }), on: b.on === true }; saveMail(st); return { on: st.svc.on }; }, '/api/text/now': b => { if (b.confirm !== 'SEND') throw new Error('Confirmation missing.'); return textMissed(); }, '/api/text/auto': b => { const st = mailState(); if (b.on === true && !TXT_KEY()) throw new Error('Add TEXTEDLY_API_KEY in Render first.'); st.sms = b.on === true; saveMail(st); return { sms: st.sms }; }, '/api/repair/link': () => ({ url: '/r/' + signShare({ k: 'i' }, 365), days: 365 }), '/api/truck/note': addTruckNote, '/api/purchase/status': setItemStatus, '/api/purchase/items': saveItemsByHand, '/api/purchase/gas': saveGasByHand, '/api/purchase/read': () => { readReceipts(25).catch(() => {}); return { started: true }; }, '/api/truck/request': decideRequest, '/api/truck/note-delete': deleteTruckNote, '/api/pom/checkup-apply': b => applyCheckups(b.all === true ? 'all' : Array.isArray(b.keys) ? b.keys.map(String).slice(0, 50) : []),
     '/api/pom/checkup-auto': b => { const on = b.on === true; cache.set('chkAuto', { data: { on }, t: Date.now() }); saveSnap('chkAuto', { on }); if (on) setTimeout(autoCheckups, 1000); return { on }; },
     '/api/sync/import': b => { if (b.confirm !== 'COPY') throw new Error('Confirmation missing.'); return reconcile('import'); }, '/api/sync/now': () => reconcile(), '/api/update': saveTruck, '/api/sync': b => syncOne(String(b.trackeeId || '')), '/api/driver/create': createDriver, '/api/driver/update': updateDriver, '/api/driver/remove': deleteDriver, '/api/driver/azuga': addDriverToAzuga, '/api/driver/merge': mergeDrivers, '/api/driver/delete': deleteBlankDriver, '/api/driver/status': setDriverStatus };
   Object.assign(POSTS, UPKEEP_POSTS);
